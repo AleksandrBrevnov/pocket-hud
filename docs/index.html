@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Gemini Live HUD — Мгновенный суфлёр</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: #000000;
+      color: #00ff66;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    #top-bar {
+      background: #111111;
+      padding: 10px 14px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      border-bottom: 1px solid #222;
+      z-index: 10;
+    }
+    input[type="password"] {
+      flex: 1;
+      background: #1e1e1e;
+      border: 1px solid #333;
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+    button {
+      background: #00ff66;
+      color: #000;
+      font-weight: bold;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    button.stop {
+      background: #ff3344;
+      color: #fff;
+    }
+    #status {
+      font-size: 12px;
+      color: #888;
+      padding: 6px 14px;
+      background: #0a0a0a;
+      display: flex;
+      justify-content: space-between;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    #hud-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      font-size: 26px;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+    .chunk {
+      background: rgba(0, 255, 102, 0.06);
+      border-left: 4px solid #00ff66;
+      padding: 10px 14px;
+      border-radius: 4px;
+      animation: fadeIn 0.15s ease-in;
+    }
+    .chunk .ru {
+      color: #ffffff;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body>
+
+  <div id="top-bar">
+    <input type="password" id="apiKey" placeholder="Google AI Studio API Key (AIzaSy...)">
+    <button id="toggleBtn" onclick="toggleStream()">СТАРТ</button>
+  </div>
+
+  <div id="status">
+    <span id="connStatus">⚪ Остановлен</span>
+    <span id="audioStatus">⚡ Задержка: ~350 мс</span>
+  </div>
+
+  <div id="hud-container"></div>
+
+  <script>
+    let isRunning = false;
+    let ws = null;
+    let audioContext = null;
+    let mediaStream = null;
+    let processor = null;
+    let wakeLock = null;
+
+    const apiKeyInput = document.getElementById("apiKey");
+    const toggleBtn = document.getElementById("toggleBtn");
+    const connStatus = document.getElementById("connStatus");
+    const audioStatus = document.getElementById("audioStatus");
+    const hudContainer = document.getElementById("hud-container");
+
+    if (localStorage.getItem("gemini_live_api_key")) {
+      apiKeyInput.value = localStorage.getItem("gemini_live_api_key");
+    }
+
+    async function toggleStream() {
+      if (isRunning) {
+        stopStream();
+      } else {
+        await startStream();
+      }
+    }
+
+    async function startStream() {
+      const apiKey = apiKeyInput.value.trim();
+      if (!apiKey) {
+        alert("Пожалуйста, введите API Key из Google AI Studio");
+        return;
+      }
+      localStorage.setItem("gemini_live_api_key", apiKey);
+
+      try {
+        // КРИТИЧНО ДЛЯ CHROME MOBILE: создаём и возобновляем AudioContext СИНХРОННО в момент клика
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+
+        if ('wakeLock' in navigator) {
+          wakeLock = await navigator.wakeLock.request('screen').catch(() => null);
+        }
+
+        connStatus.innerText = "🟡 Соединение с Gemini Live...";
+        toggleBtn.innerText = "СТОП";
+        toggleBtn.classList.add("stop");
+
+        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          connStatus.innerText = "🟢 Настройка потока...";
+          // Для чистого визуального HUD: модальность TEXT даёт минимальный пинг и чистые текстовые токены
+          const setupMsg = {
+            setup: {
+              model: "models/gemini-2.0-flash-exp",
+              generationConfig: {
+                responseModalities: ["TEXT"]
+              },
+              systemInstruction: {
+                parts: [{
+                  text: "Ты — синхронный пассивный суфлёр для Александра в Риме. Слушай итальянскую речь вокруг и выводи краткий русский перевод чанками по 3-6 слов. Не здоровайся, не отвечай на вопросы, переводи только чистый смысл."
+                }]
+              }
+            }
+          };
+          ws.send(JSON.stringify(setupMsg));
+        };
+
+        ws.onmessage = async (event) => {
+          let data;
+          if (event.data instanceof Blob) {
+            data = JSON.parse(await event.data.text());
+          } else {
+            data = JSON.parse(event.data);
+          }
+
+          if (data.setupComplete) {
+            connStatus.innerText = "🟢 Активен (Поток 350 мс)";
+            startMicrophone();
+            return;
+          }
+
+          // Приём текстовых токенов
+          if (data.serverContent && data.serverContent.modelTurn) {
+            const parts = data.serverContent.modelTurn.parts;
+            for (const part of parts) {
+              if (part.text) {
+                appendHudText(part.text);
+              }
+            }
+          }
+        };
+
+        ws.onerror = (err) => {
+          connStatus.innerText = "🔴 Ошибка WebSocket";
+        };
+
+        ws.onclose = () => {
+          connStatus.innerText = "⚪ Отключен";
+          stopStream();
+        };
+
+        isRunning = true;
+
+      } catch (err) {
+        alert("Ошибка запуска: " + err.message);
+        stopStream();
+      }
+    }
+
+    async function startMicrophone() {
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+
+        if (audioContext.state === 'suspended') {
+          await audioContext.resume();
+        }
+
+        const inputSampleRate = audioContext.sampleRate;
+        const source = audioContext.createMediaStreamSource(mediaStream);
+
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+        processor.onaudioprocess = (e) => {
+          if (!isRunning || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+          const inputData = e.inputBuffer.getChannelData(0);
+          
+          // Программный дециматор в 16000 Гц
+          const ratio = inputSampleRate / 16000;
+          const targetLength = Math.floor(inputData.length / ratio);
+          const pcm16 = new Int16Array(targetLength);
+
+          for (let i = 0; i < targetLength; i++) {
+            const srcIdx = Math.floor(i * ratio);
+            let s = Math.max(-1, Math.min(1, inputData[srcIdx]));
+            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+
+          const base64Data = arrayBufferToBase64(pcm16.buffer);
+
+          const audioChunk = {
+            realtimeInput: {
+              mediaChunks: [{
+                mimeType: "audio/pcm;rate=16000",
+                data: base64Data
+              }]
+            }
+          };
+          ws.send(JSON.stringify(audioChunk));
+        };
+
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+
+      } catch (err) {
+        alert("Ошибка микрофона: " + err.message);
+        stopStream();
+      }
+    }
+
+    let currentChunkEl = null;
+
+    function appendHudText(text) {
+      if (!currentChunkEl) {
+        currentChunkEl = document.createElement("div");
+        currentChunkEl.className = "chunk";
+        currentChunkEl.innerHTML = `<span class="ru"></span>`;
+        hudContainer.appendChild(currentChunkEl);
+      }
+
+      const ruSpan = currentChunkEl.querySelector(".ru");
+      ruSpan.innerText += text;
+      hudContainer.scrollTop = hudContainer.scrollHeight;
+
+      if (text.includes(".") || text.includes("?") || text.includes("!")) {
+        currentChunkEl = null;
+      }
+    }
+
+    function arrayBufferToBase64(buffer) {
+      let binary = '';
+      const bytes = new Uint8Array(buffer);
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      return window.btoa(binary);
+    }
+
+    function stopStream() {
+      isRunning = false;
+      if (processor) { processor.disconnect(); processor = null; }
+      if (audioContext) { audioContext.close(); audioContext = null; }
+      if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+      if (ws) { ws.close(); ws = null; }
+      if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+
+      toggleBtn.innerText = "СТАРТ";
+      toggleBtn.classList.remove("stop");
+      connStatus.innerText = "⚪ Остановлен";
+    }
+  </script>
+</body>
+</html>
