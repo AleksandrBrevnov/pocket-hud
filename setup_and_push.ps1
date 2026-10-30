@@ -144,25 +144,104 @@ if ([string]::IsNullOrWhiteSpace($existingRemote)) {
 
 # 5. Отправка кода в GitHub
 Write-Host "`n[4/4] Отправка кода в GitHub (git push -u origin main)..." -ForegroundColor Green
-Write-Host "(Если откроется окно входа GitHub — авторизуйтесь в браузере в 1 клик)" -ForegroundColor DarkGray
 
-try {
-    git push -u origin main
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "`n[ПОДСКАЗКА] Если при создании репозитория на GitHub вы отметили 'Add a README file', GitHub отклоняет push." -ForegroundColor Yellow
-        $forcePush = Read-Host "Перезаписать репозиторий вашим кодом принудительно (git push -u origin main --force)? (y/N)"
-        if ($forcePush -eq 'y' -or $forcePush -eq 'Y') {
-            git push -u origin main --force
-            if ($LASTEXITCODE -ne 0) {
-                throw "git push --force завершился с кодом ошибки $LASTEXITCODE"
+$pushSuccess = $false
+$maxAttempts = 2
+$attempt = 0
+
+while (-not $pushSuccess -and $attempt -lt $maxAttempts) {
+    $attempt++
+    
+    $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+    $pinfo.FileName = "git.exe"
+    $pinfo.Arguments = "push -u origin main"
+    $pinfo.RedirectStandardError = $true
+    $pinfo.RedirectStandardOutput = $true
+    $pinfo.UseShellExecute = $false
+    $pinfo.CreateNoWindow = $true
+
+    $proc = [System.Diagnostics.Process]::Start($pinfo)
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+
+    $combined = "$stdout`n$stderr"
+
+    if ($proc.ExitCode -eq 0) {
+        $pushSuccess = $true
+        if ($stdout) { Write-Host $stdout }
+        break
+    }
+
+    if ($combined -match "denied to\s+([^\.\s]+)") {
+        $deniedUser = $matches[1]
+        Write-Host "`n==========================================================" -ForegroundColor Red
+        Write-Host " [ВНИМАНИЕ] Обнаружен конфликт учётных записей в Windows!" -ForegroundColor Yellow
+        Write-Host "==========================================================" -ForegroundColor Red
+        Write-Host " В Windows сохранён старый вход: $deniedUser" -ForegroundColor White
+        Write-Host " А репозиторий создан под аккаунтом: AleksandrBrevnov" -ForegroundColor White
+        Write-Host " GitHub отклонил отправку (HTTP 403 Forbidden)." -ForegroundColor DarkGray
+        Write-Host "`nВыберите удобное решение:" -ForegroundColor Cyan
+        Write-Host " 1. Сбросить вход '$deniedUser' (откроется окно входа AleksandrBrevnov) [Рекомендуется]" -ForegroundColor Yellow
+        Write-Host " 2. Добавить '$deniedUser' в соавторы AleksandrBrevnov/pocket-hud на GitHub" -ForegroundColor White
+        Write-Host " 3. Ввести GitHub Personal Access Token (PAT)" -ForegroundColor White
+
+        $sol = Read-Host "`nВаш выбор (1/2/3) [по умолчанию 1]"
+        if ([string]::IsNullOrWhiteSpace($sol) -or $sol -eq '1') {
+            Write-Host "`nОчищаю сохранённые данные входа Git из Windows..." -ForegroundColor Yellow
+            cmdkey /delete:LegacyGeneric:target=git:https://github.com 2>$null
+            cmdkey /delete:git:https://github.com 2>$null
+            Write-Host "Запускаю повторную отправку с интерактивной авторизацией..." -ForegroundColor Green
+            Write-Host "Сейчас появится окно GitHub — нажмите 'Sign in with your browser' и подтвердите вход." -ForegroundColor Cyan
+            & git.exe push -u origin main
+            if ($LASTEXITCODE -eq 0) {
+                $pushSuccess = $true
+                break
             }
-        } else {
-            throw "git push вернул код ошибки $LASTEXITCODE"
+        } elseif ($sol -eq '2') {
+            $collabUrl = "https://github.com/AleksandrBrevnov/pocket-hud/settings/access"
+            Write-Host "`nОткрываю страницу доступа: $collabUrl" -ForegroundColor Cyan
+            Start-Process $collabUrl
+            Write-Host "В открывшемся окне нажмите 'Add people', найдите '$deniedUser' и подтвердите." -ForegroundColor Yellow
+            Read-Host "После добавления нажмите Enter для отправки кода"
+            & git.exe push -u origin main
+            if ($LASTEXITCODE -eq 0) {
+                $pushSuccess = $true
+                break
+            }
+        } elseif ($sol -eq '3') {
+            $token = (Read-Host "Вставьте Personal Access Token").Trim()
+            if (-not [string]::IsNullOrWhiteSpace($token)) {
+                $tokenUrl = "https://${token}@github.com/AleksandrBrevnov/pocket-hud.git"
+                & git.exe push -u $tokenUrl main
+                if ($LASTEXITCODE -eq 0) {
+                    $pushSuccess = $true
+                    break
+                }
+            }
+        }
+    } elseif ($combined -match "fetch first|Updates were rejected|non-fast-forward") {
+        Write-Host "`n[ПОДСКАЗКА] На GitHub уже были файлы (например README)." -ForegroundColor Yellow
+        $forcePush = Read-Host "Перезаписать репозиторий вашим кодом (git push -u origin main --force)? (y/N)"
+        if ($forcePush -eq 'y' -or $forcePush -eq 'Y') {
+            & git.exe push -u origin main --force
+            if ($LASTEXITCODE -eq 0) {
+                $pushSuccess = $true
+                break
+            }
+        }
+    } else {
+        Write-Host $stderr -ForegroundColor Red
+        & git.exe push -u origin main
+        if ($LASTEXITCODE -eq 0) {
+            $pushSuccess = $true
+            break
         }
     }
-} catch {
+}
+
+if (-not $pushSuccess) {
     Write-Host "`n[ОШИБКА] Не удалось отправить код в GitHub." -ForegroundColor Red
-    Write-Host "Проверьте, что репозиторий на GitHub создан и вы вошли под своей учётной записью." -ForegroundColor Yellow
     Write-Host "Команда для ручной попытки: git push -u origin main" -ForegroundColor Gray
     exit 1
 }
