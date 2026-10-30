@@ -26,6 +26,14 @@ if (-not (Test-Path ".git")) {
 
 git branch -M main
 
+# Проверка идентификации автора Git
+if (-not (git config user.name)) {
+    git config user.name "Aleksandr"
+}
+if (-not (git config user.email)) {
+    git config user.email "aleksandr@local"
+}
+
 # 3. Фиксация файлов (Commit)
 Write-Host "[2/4] Проверка и сохранение файлов проекта..." -ForegroundColor Green
 git add .
