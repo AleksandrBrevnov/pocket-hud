@@ -50,8 +50,19 @@ Write-Host "`n[3/4] Проверка удалённого репозитория
 
 $existingRemote = ""
 try {
-    $existingRemote = (git remote get-url origin 2>$null).Trim()
+    $rawOrigin = git remote get-url origin 2>$null
+    if ($rawOrigin) {
+        $existingRemote = "$rawOrigin".Trim()
+    }
 } catch {}
+
+if (-not [string]::IsNullOrWhiteSpace($existingRemote)) {
+    Write-Host "  -> Обнаружен текущий адрес origin: $existingRemote" -ForegroundColor Gray
+    $keepRemote = Read-Host "Использовать этот адрес? (Y/n)"
+    if ($keepRemote -eq 'n' -or $keepRemote -eq 'N') {
+        $existingRemote = ""
+    }
+}
 
 $targetRemote = $existingRemote
 
@@ -71,7 +82,12 @@ if ([string]::IsNullOrWhiteSpace($existingRemote)) {
         if ($autoCreate -ne 'n' -and $autoCreate -ne 'N') {
             Write-Host "Создание публичного репозитория pocket-hud и отправка кода..." -ForegroundColor Yellow
             gh repo create pocket-hud --public --source=. --remote=origin --push
-            $targetRemote = (git remote get-url origin 2>$null).Trim()
+            try {
+                $rawGhOrigin = git remote get-url origin 2>$null
+                if ($rawGhOrigin) {
+                    $targetRemote = "$rawGhOrigin".Trim()
+                }
+            } catch {}
         }
     }
 
@@ -100,17 +116,26 @@ if ([string]::IsNullOrWhiteSpace($existingRemote)) {
             exit 1
         }
 
-        if ($userInput -match "^https?://") {
+        if ($userInput -match "(?:https?:\/\/|git@)?github\.com[:\/]([^\/]+)\/([^\/\s]+)") {
+            $user = $matches[1]
+            $repo = $matches[2] -replace "\.git$", ""
+            $targetRemote = "https://github.com/$user/$repo.git"
+        } elseif ($userInput -match "^https?:\/\/") {
             $targetRemote = $userInput
         } elseif ($userInput -match "^git@") {
             $targetRemote = $userInput
         } else {
             # Введен только логин
-            $cleanUser = $userInput.Trim('@').Trim()
+            $cleanUser = $userInput.Trim('@').Trim('/')
             $targetRemote = "https://github.com/$cleanUser/pocket-hud.git"
         }
 
-        git remote add origin $targetRemote
+        $allRemotes = git remote
+        if ($allRemotes -contains "origin") {
+            git remote set-url origin $targetRemote
+        } else {
+            git remote add origin $targetRemote
+        }
         Write-Host "  -> Remote origin установлен: $targetRemote" -ForegroundColor Gray
     }
 } else {
@@ -124,7 +149,16 @@ Write-Host "(Если откроется окно входа GitHub — авто
 try {
     git push -u origin main
     if ($LASTEXITCODE -ne 0) {
-        throw "git push вернул код ошибки $LASTEXITCODE"
+        Write-Host "`n[ПОДСКАЗКА] Если при создании репозитория на GitHub вы отметили 'Add a README file', GitHub отклоняет push." -ForegroundColor Yellow
+        $forcePush = Read-Host "Перезаписать репозиторий вашим кодом принудительно (git push -u origin main --force)? (y/N)"
+        if ($forcePush -eq 'y' -or $forcePush -eq 'Y') {
+            git push -u origin main --force
+            if ($LASTEXITCODE -ne 0) {
+                throw "git push --force завершился с кодом ошибки $LASTEXITCODE"
+            }
+        } else {
+            throw "git push вернул код ошибки $LASTEXITCODE"
+        }
     }
 } catch {
     Write-Host "`n[ОШИБКА] Не удалось отправить код в GitHub." -ForegroundColor Red
@@ -134,7 +168,7 @@ try {
 }
 
 # 6. Извлечение ссылок Actions и Releases
-$repoUrlClean = $targetRemote -replace "\.git$", "" -replace "^git@github\.com:", "https://github.com/"
+$repoUrlClean = ($targetRemote -replace "\.git$", "" -replace "^git@github\.com:", "https://github.com/").TrimEnd('/')
 $actionsUrl = "$repoUrlClean/actions"
 $releasesUrl = "$repoUrlClean/releases"
 
@@ -147,7 +181,7 @@ Write-Host "   Следить за сборкой: $actionsUrl" -ForegroundColor
 Write-Host "   (Сборка занимает около 1.5 - 2 минут)" -ForegroundColor DarkGray
 Write-Host "`n2. Когда сборка завершится, готовый APK появится здесь:" -ForegroundColor Cyan
 Write-Host "   Скачать APK:        $releasesUrl" -ForegroundColor Yellow
-Write-Host "   (Или во вкладке Actions -> последний запуск -> Artifacts)" -ForegroundColor DarkGray
+Write-Host "   (Если Releases пуст из-за прав токена: зайдите в Actions -> сборка -> внизу секция 'Artifacts')" -ForegroundColor DarkGray
 Write-Host "`n3. Также доступен Web HUD для браузера телефона:" -ForegroundColor Cyan
 Write-Host "   В GitHub репозитории: Settings -> Pages -> Source: Deploy from a branch -> main /docs -> Save" -ForegroundColor DarkGray
 

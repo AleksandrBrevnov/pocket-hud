@@ -96,6 +96,17 @@ class MainActivity : AppCompatActivity() {
         ActivityCompat.requestPermissions(this, perms.toTypedArray(), 101)
     }
 
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 101) {
+            if (checkPermissions()) {
+                Toast.makeText(this, "Разрешения предоставлены! Нажмите 'ЗАПУСТИТЬ В ФОНЕ'", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Требуется разрешение на запись звука для суфлёра", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     private fun createLayout(): android.view.View {
         val layout = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL

@@ -230,9 +230,13 @@ class PocketService : Service() {
             // Мгновенный Barge-in: очищаем очередь звука и сбрасываем буфер динамика
             if (serverContent.optBoolean("interrupted", false)) {
                 audioPlaybackQueue.clear()
-                audioTrack?.pause()
-                audioTrack?.flush()
-                audioTrack?.play()
+                try {
+                    audioTrack?.pause()
+                    audioTrack?.flush()
+                    audioTrack?.play()
+                } catch (e: Exception) {
+                    Log.e(tag, "Ошибка сброса AudioTrack: ${e.message}")
+                }
             }
 
             val modelTurn = serverContent.optJSONObject("modelTurn") ?: return
@@ -288,27 +292,34 @@ class PocketService : Service() {
         recordThread = Thread {
             val buffer = ByteArray(1024)
             while (isRunning) {
-                val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
-                if (read <= 0) {
-                    try {
-                        Thread.sleep(50)
-                    } catch (e: InterruptedException) {
-                        break
+                try {
+                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                    if (read <= 0) {
+                        try {
+                            Thread.sleep(50)
+                        } catch (e: InterruptedException) {
+                            break
+                        }
+                        continue
                     }
-                    continue
-                }
 
-                if (webSocket != null) {
-                    val base64Data = Base64.encodeToString(buffer, 0, read, Base64.NO_WRAP)
-                    val chunkJson = JSONObject().apply {
-                        put("realtimeInput", JSONObject().apply {
-                            put("mediaChunks", JSONArray().put(JSONObject().apply {
-                                put("mimeType", "audio/pcm;rate=16000")
-                                put("data", base64Data)
-                            }))
-                        })
+                    if (webSocket != null) {
+                        val base64Data = Base64.encodeToString(buffer, 0, read, Base64.NO_WRAP)
+                        val chunkJson = JSONObject().apply {
+                            put("realtimeInput", JSONObject().apply {
+                                put("mediaChunks", JSONArray().put(JSONObject().apply {
+                                    put("mimeType", "audio/pcm;rate=16000")
+                                    put("data", base64Data)
+                                }))
+                            })
+                        }
+                        webSocket?.send(chunkJson.toString())
                     }
-                    webSocket?.send(chunkJson.toString())
+                } catch (e: InterruptedException) {
+                    break
+                } catch (e: Exception) {
+                    Log.e(tag, "Ошибка в потоке записи: ${e.message}")
+                    break
                 }
             }
         }
