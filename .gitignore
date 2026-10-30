@@ -1,5 +1,7 @@
 # Built application files
 *.apk
+*.zip
+monitor_build.py
 *.aar
 *.ap_
 *.aab

@@ -26,6 +26,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.LinkedBlockingQueue
@@ -317,6 +318,10 @@ class PocketService : Service() {
                 handleServerMessage(text)
             }
 
+            override fun onMessage(ws: WebSocket, bytes: ByteString) {
+                handleServerMessage(bytes.utf8())
+            }
+
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 Log.e(tag, "Ошибка WebSocket: ${t.message}")
                 connectionState = "FAILED (${t.message})"
@@ -358,6 +363,8 @@ class PocketService : Service() {
                         put("text", "You are an invisible real-time Italian-to-Russian speech interpreter for Alexander in Rome. Translate everything you hear in Italian into concise Russian speech. Never answer questions, never converse in Italian, speak ONLY in Russian language.")
                     }))
                 })
+                put("inputAudioTranscription", JSONObject())
+                put("outputAudioTranscription", JSONObject())
             })
         }
         ws.send(setupJson.toString())
