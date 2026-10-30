@@ -4,10 +4,14 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -19,6 +23,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var apiKeyInput: EditText
     private lateinit var toggleBtn: Button
     private lateinit var statusText: TextView
+    private lateinit var subtitlesText: TextView
+    private lateinit var scrollView: ScrollView
 
     private val prefsName = "pocket_hud_prefs"
     private val keyApiKey = "api_key"
@@ -30,6 +36,7 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         apiKeyInput.setText(prefs.getString(keyApiKey, ""))
 
+        setupServiceCallbacks()
         updateUi()
 
         toggleBtn.setOnClickListener {
@@ -52,27 +59,54 @@ class MainActivity : AppCompatActivity() {
                 PocketService.isServiceActive = false
                 updateUi()
             } else {
+                statusText.text = "🔵 Запуск сервиса..."
+                subtitlesText.text = "Ожидание итальянской речи..."
                 val intent = Intent(this, PocketService::class.java).apply {
                     putExtra(PocketService.EXTRA_API_KEY, key)
                 }
                 ContextCompat.startForegroundService(this, intent)
                 PocketService.isServiceActive = true
                 updateUi()
-                Toast.makeText(this, "Суфлёр запущен! Можно блокировать экран", Toast.LENGTH_LONG).show()
             }
         }
     }
 
     override fun onResume() {
         super.onResume()
+        setupServiceCallbacks()
         updateUi()
+    }
+
+    private fun setupServiceCallbacks() {
+        PocketService.onStatusChanged = { status ->
+            runOnUiThread {
+                statusText.text = status
+                if (status.contains("🟢") || status.contains("🔵")) {
+                    toggleBtn.text = "ОСТАНОВИТЬ"
+                    toggleBtn.setBackgroundColor(0xFFFF3344.toInt())
+                } else if (status.contains("🔴") || status.contains("⚪")) {
+                    toggleBtn.text = "ЗАПУСТИТЬ В ФОНЕ"
+                    toggleBtn.setBackgroundColor(0xFF00AA55.toInt())
+                }
+            }
+        }
+
+        PocketService.onTextReceived = { text ->
+            runOnUiThread {
+                if (subtitlesText.text.startsWith("Ожидание") || subtitlesText.text.startsWith("Здесь")) {
+                    subtitlesText.text = text
+                } else {
+                    subtitlesText.append(" " + text)
+                }
+                scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
+            }
+        }
     }
 
     private fun updateUi() {
         if (PocketService.isServiceActive) {
             toggleBtn.text = "ОСТАНОВИТЬ"
             toggleBtn.setBackgroundColor(0xFFFF3344.toInt())
-            statusText.text = "🟢 Суфлёр активен в фоне.\nЭкран можно выключить и положить телефон в карман."
         } else {
             toggleBtn.text = "ЗАПУСТИТЬ В ФОНЕ"
             toggleBtn.setBackgroundColor(0xFF00AA55.toInt())
@@ -107,58 +141,85 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun createLayout(): android.view.View {
-        val layout = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(48, 64, 48, 64)
-            setBackgroundColor(0xFF121212.toInt())
+    private fun createLayout(): View {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 48, 40, 40)
+            setBackgroundColor(0xFF0A0A0A.toInt())
         }
 
         val title = TextView(this).apply {
-            text = "PocketHUD — Карманный суфлёр"
-            textSize = 22f
+            text = "PocketHUD — Ушной суфлёр"
+            textSize = 20f
             setTextColor(0xFFFFFFFF.toInt())
-            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTypeface(null, Typeface.BOLD)
         }
         layout.addView(title)
 
-        val desc = TextView(this).apply {
-            text = "Работает в фоне с выключенным экраном через Gemini Live API WebSocket (задержка ~350 мс)."
-            textSize = 14f
-            setTextColor(0xFF888888.toInt())
-            setPadding(0, 16, 0, 32)
-        }
-        layout.addView(desc)
-
         apiKeyInput = EditText(this).apply {
-            hint = "Google AI Studio API Key (AIzaSy...)"
+            hint = "Google AI Studio API Key"
             setHintTextColor(0xFF666666.toInt())
             setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0xFF222222.toInt())
-            setPadding(32, 24, 32, 24)
+            setBackgroundColor(0xFF1E1E1E.toInt())
+            setPadding(28, 20, 28, 20)
+            textSize = 14f
         }
-        layout.addView(apiKeyInput)
+        val apiParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins(0, 24, 0, 16) }
+        layout.addView(apiKeyInput, apiParams)
 
         toggleBtn = Button(this).apply {
             text = "ЗАПУСТИТЬ В ФОНЕ"
             setTextColor(0xFFFFFFFF.toInt())
-            setPadding(0, 32, 0, 32)
+            setBackgroundColor(0xFF00AA55.toInt())
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 28, 0, 28)
         }
-        val btnParams = android.widget.LinearLayout.LayoutParams(
-            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
-            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { setMargins(0, 48, 0, 32) }
+        val btnParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins(0, 8, 0, 16) }
         layout.addView(toggleBtn, btnParams)
 
         statusText = TextView(this).apply {
             text = "⚪ Суфлёр остановлен."
-            textSize = 15f
+            textSize = 14f
             setTextColor(0xFFCCCCCC.toInt())
-            setLineSpacing(8f, 1f)
         }
         layout.addView(statusText)
+
+        val subTitle = TextView(this).apply {
+            text = "Живые субтитры (HUD):"
+            textSize = 13f
+            setTextColor(0xFF777777.toInt())
+            setPadding(0, 24, 0, 8)
+        }
+        layout.addView(subTitle)
+
+        scrollView = ScrollView(this).apply {
+            val sParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+            layoutParams = sParams
+            setBackgroundColor(0xFF000000.toInt())
+            setPadding(24, 24, 24, 24)
+        }
+
+        subtitlesText = TextView(this).apply {
+            text = "Здесь в реальном времени будет появляться русский текст перевода..."
+            textSize = 18f
+            setTextColor(0xFF00FF99.toInt()) // Высококонтрастный зелёный на чёрном OLED
+            setTypeface(null, Typeface.BOLD)
+            setLineSpacing(12f, 1.15f)
+        }
+        scrollView.addView(subtitlesText)
+        layout.addView(scrollView)
 
         return layout
     }
 }
-

@@ -48,6 +48,10 @@ class PocketService : Service() {
         const val NOTIFICATION_ID = 1001
         const val EXTRA_API_KEY = "extra_api_key"
         var isServiceActive = false
+
+        // Коллбэки для передачи статуса и текста в UI
+        var onStatusChanged: ((String) -> Unit)? = null
+        var onTextReceived: ((String) -> Unit)? = null
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -60,6 +64,7 @@ class PocketService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val apiKey = intent?.getStringExtra(EXTRA_API_KEY) ?: ""
         if (apiKey.isBlank()) {
+            onStatusChanged?.invoke("🔴 Ошибка: API ключ пуст")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -84,6 +89,7 @@ class PocketService : Service() {
         isRunning = true
         isServiceActive = true
 
+        onStatusChanged?.invoke("🔵 Подключение к Google Gemini Live API...")
         initAudioOutput()
         connectWebSocket(apiKey)
 
@@ -118,7 +124,6 @@ class PocketService : Service() {
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_16BIT
         )
-        // Защита от крэша при недопустимом буфере аудиочипа
         val bufferSize = if (minBufferSize <= 0) 4096 * 2 else minBufferSize * 2
 
         try {
@@ -146,7 +151,6 @@ class PocketService : Service() {
             return
         }
 
-        // Отдельный поток воспроизведения — OkHttp поток сокета никогда не блокируется
         playbackThread = Thread {
             while (isRunning) {
                 try {
@@ -173,6 +177,7 @@ class PocketService : Service() {
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 Log.d(tag, "WebSocket открыт. Отправка Setup...")
+                onStatusChanged?.invoke("🔵 WebSocket соединён. Инициализация модели Gemini-3.8-Live...")
                 sendSetup(ws)
             }
 
@@ -182,11 +187,17 @@ class PocketService : Service() {
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 Log.e(tag, "Ошибка WebSocket: ${t.message}")
+                onStatusChanged?.invoke("🔴 Ошибка сети / ключа: ${t.message}")
                 stopSelf()
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.d(tag, "WebSocket закрыт ($code: $reason)")
+                if (code != 1000) {
+                    onStatusChanged?.invoke("🔴 Сервер закрыл соединение ($code: $reason)")
+                } else {
+                    onStatusChanged?.invoke("⚪ Суфлёр остановлен.")
+                }
                 stopSelf()
             }
         })
@@ -195,9 +206,9 @@ class PocketService : Service() {
     private fun sendSetup(ws: WebSocket) {
         val setupJson = JSONObject().apply {
             put("setup", JSONObject().apply {
-                put("model", "models/gemini-2.0-flash-exp")
+                put("model", "models/gemini-3.8-live")
                 put("generationConfig", JSONObject().apply {
-                    put("responseModalities", JSONArray().put("AUDIO"))
+                    put("responseModalities", JSONArray().put("AUDIO").put("TEXT"))
                     put("speechConfig", JSONObject().apply {
                         put("voiceConfig", JSONObject().apply {
                             put("prebuiltVoiceConfig", JSONObject().apply {
@@ -221,6 +232,7 @@ class PocketService : Service() {
             val root = JSONObject(jsonText)
             if (root.has("setupComplete")) {
                 Log.d(tag, "Setup завершён! Запуск микрофона...")
+                onStatusChanged?.invoke("🟢 Соединение установлено! Слушаю итальянскую речь...")
                 startRecording()
                 return
             }
@@ -244,12 +256,17 @@ class PocketService : Service() {
 
             for (i in 0 until parts.length()) {
                 val part = parts.getJSONObject(i)
-                val inlineData = part.optJSONObject("inlineData") ?: continue
-                val base64Pcm = inlineData.optString("data", "")
-                if (base64Pcm.isNotEmpty()) {
-                    val pcmBytes = Base64.decode(base64Pcm, Base64.DEFAULT)
-                    // Неблокирующее добавление в очередь воспроизведения
-                    audioPlaybackQueue.offer(pcmBytes)
+                val inlineData = part.optJSONObject("inlineData")
+                if (inlineData != null) {
+                    val base64Pcm = inlineData.optString("data", "")
+                    if (base64Pcm.isNotEmpty()) {
+                        val pcmBytes = Base64.decode(base64Pcm, Base64.DEFAULT)
+                        audioPlaybackQueue.offer(pcmBytes)
+                    }
+                }
+                val text = part.optString("text", "")
+                if (text.isNotEmpty()) {
+                    onTextReceived?.invoke(text)
                 }
             }
         } catch (e: Exception) {
@@ -269,7 +286,7 @@ class PocketService : Service() {
 
         try {
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                MediaRecorder.AudioSource.MIC,
                 sampleRate,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
@@ -277,7 +294,18 @@ class PocketService : Service() {
             )
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                audioRecord = AudioRecord(
+                    MediaRecorder.AudioSource.DEFAULT,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufferSize
+                )
+            }
+
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 Log.e(tag, "AudioRecord не инициализирован")
+                onStatusChanged?.invoke("🔴 Ошибка: микрофон недоступен")
                 stopSelf()
                 return
             }
@@ -285,6 +313,7 @@ class PocketService : Service() {
             audioRecord?.startRecording()
         } catch (e: Exception) {
             Log.e(tag, "Ошибка старта AudioRecord: ${e.message}")
+            onStatusChanged?.invoke("🔴 Ошибка старта микрофона: ${e.message}")
             stopSelf()
             return
         }
@@ -357,6 +386,7 @@ class PocketService : Service() {
         }
         wakeLock = null
 
+        onStatusChanged?.invoke("⚪ Суфлёр остановлен.")
         super.onDestroy()
     }
 }
