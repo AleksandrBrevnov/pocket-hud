@@ -30,17 +30,7 @@ jobs:
       - name: Build Debug APK
         run: |
           chmod +x ./gradlew
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace > gradle_build.log 2>&1
-
-      - name: Save Log to Git Branch
-        if: always()
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git checkout -B debug-log
-          git add -f gradle_build.log
-          git commit -m "chore: save build log" || true
-          git push origin debug-log --force || true
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK to Artifacts
         uses: actions/upload-artifact@v4
@@ -55,7 +45,6 @@ jobs:
         with:
           tag_name: v1.0.${{ github.run_number }}
           name: PocketHUD Release v1.0.${{ github.run_number }}
-          body_path: gradle_build.log
           files: app/build/outputs/apk/**/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
