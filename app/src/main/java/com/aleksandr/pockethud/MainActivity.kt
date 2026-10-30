@@ -23,6 +23,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var apiKeyInput: EditText
     private lateinit var toggleBtn: Button
     private lateinit var statusText: TextView
+    private lateinit var telemetryText: TextView
+    private lateinit var copySummaryBtn: Button
     private lateinit var subtitlesText: TextView
     private lateinit var scrollView: ScrollView
 
@@ -91,6 +93,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        PocketService.onTelemetryUpdated = { micAmp, chunks, responses ->
+            runOnUiThread {
+                telemetryText.text = "🎙️ Мик: $micAmp% | Чанков: $chunks | Ответов: $responses"
+            }
+        }
+
         PocketService.onTextReceived = { text ->
             runOnUiThread {
                 if (subtitlesText.text.startsWith("Ожидание") || subtitlesText.text.startsWith("Здесь")) {
@@ -111,6 +119,7 @@ class MainActivity : AppCompatActivity() {
             toggleBtn.text = "ЗАПУСТИТЬ В ФОНЕ"
             toggleBtn.setBackgroundColor(0xFF00AA55.toInt())
             statusText.text = "⚪ Суфлёр остановлен."
+            telemetryText.text = "🎙️ Мик: 0% | Чанков: 0 | Ответов: 0"
         }
     }
 
@@ -191,11 +200,41 @@ class MainActivity : AppCompatActivity() {
         }
         layout.addView(statusText)
 
+        telemetryText = TextView(this).apply {
+            text = "🎙️ Мик: 0% | Чанков: 0 | Ответов: 0"
+            textSize = 13f
+            setTextColor(0xFF00E5FF.toInt()) // Cyan телеметрия
+            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+            setPadding(0, 12, 0, 8)
+        }
+        layout.addView(telemetryText)
+
+        copySummaryBtn = Button(this).apply {
+            text = "📋 СКОПИРОВАТЬ СВОДКУ ДЛЯ АССИСТЕНТА"
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF333333.toInt())
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 18, 0, 18)
+            setOnClickListener {
+                val summary = PocketService.getDiagnosticSummary()
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("PocketHUD Diagnostics", summary)
+                clipboard.setPrimaryClip(clip)
+                Toast.makeText(this@MainActivity, "Сводка скопирована в буфер обмена! Отправьте её ассистенту.", Toast.LENGTH_LONG).show()
+            }
+        }
+        val copyParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins(0, 4, 0, 12) }
+        layout.addView(copySummaryBtn, copyParams)
+
         val subTitle = TextView(this).apply {
-            text = "Живые субтитры (HUD):"
+            text = "Живые субтитры (HUD & Xiaomi Watch 2):"
             textSize = 13f
             setTextColor(0xFF777777.toInt())
-            setPadding(0, 24, 0, 8)
+            setPadding(0, 12, 0, 8)
         }
         layout.addView(subTitle)
 
