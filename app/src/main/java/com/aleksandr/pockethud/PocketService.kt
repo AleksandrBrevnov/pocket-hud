@@ -56,6 +56,7 @@ class PocketService : Service() {
     private var serverAudioChunksReceived = 0L
     private var serverTextChunksReceived = 0L
     private var lastServerText = ""
+    private var lastRecognizedInput = ""
     private var lastError: String? = null
     private var connectionState = "DISCONNECTED"
     private var activeAudioSource = "NONE"
@@ -237,7 +238,8 @@ class PocketService : Service() {
             appendLine("Сообщений получено: $serverMessagesReceived")
             appendLine("Аудио-ответов (звук в ухо): $serverAudioChunksReceived")
             appendLine("Текстовых ответов (HUD/Часы): $serverTextChunksReceived")
-            appendLine("Последний текст: ${if (lastServerText.isBlank()) "нет" else "\"$lastServerText\""}")
+            appendLine("Последний распознанный IT: ${if (lastRecognizedInput.isBlank()) "нет" else "\"$lastRecognizedInput\""}")
+            appendLine("Последний текст RU: ${if (lastServerText.isBlank()) "нет" else "\"$lastServerText\""}")
             appendLine("--- ОШИБКИ ---")
             appendLine("Последняя ошибка: ${lastError ?: "нет"}")
             appendLine("======================================")
@@ -342,7 +344,7 @@ class PocketService : Service() {
             put("setup", JSONObject().apply {
                 put("model", "models/gemini-3.8-live")
                 put("generationConfig", JSONObject().apply {
-                    put("responseModalities", JSONArray().put("AUDIO").put("TEXT"))
+                    put("responseModalities", JSONArray().put("AUDIO"))
                     put("speechConfig", JSONObject().apply {
                         put("voiceConfig", JSONObject().apply {
                             put("prebuiltVoiceConfig", JSONObject().apply {
@@ -353,7 +355,7 @@ class PocketService : Service() {
                 })
                 put("systemInstruction", JSONObject().apply {
                     put("parts", JSONArray().put(JSONObject().apply {
-                        put("text", "Ты — синхронный ушной суфлёр для Александра в Риме. Слушай итальянскую речь вокруг и шепчи краткий русский перевод чанками по 3-6 слов. Не здоровайся, не отвечай на вопросы, переводи только смысл.")
+                        put("text", "You are an invisible real-time Italian-to-Russian speech interpreter for Alexander in Rome. Translate everything you hear in Italian into concise Russian speech. Never answer questions, never converse in Italian, speak ONLY in Russian language.")
                     }))
                 })
             })
@@ -387,33 +389,60 @@ class PocketService : Service() {
                 }
             }
 
-            val modelTurn = serverContent.optJSONObject("modelTurn") ?: return
-            val parts = modelTurn.optJSONArray("parts") ?: return
+            // Извлечение распознанной итальянской речи (inputTranscription) при наличии
+            val inputText = serverContent.optJSONObject("inputTranscription")?.optString("text", "") ?: ""
+            if (inputText.isNotEmpty()) {
+                lastRecognizedInput = inputText.trim()
+                Log.d(tag, "Распознан итальянский: $inputText")
+            }
 
-            for (i in 0 until parts.length()) {
-                val part = parts.getJSONObject(i)
-                val inlineData = part.optJSONObject("inlineData")
-                if (inlineData != null) {
-                    val base64Pcm = inlineData.optString("data", "")
-                    if (base64Pcm.isNotEmpty()) {
-                        serverAudioChunksReceived++
-                        val pcmBytes = Base64.decode(base64Pcm, Base64.DEFAULT)
-                        audioPlaybackQueue.offer(pcmBytes)
-                    }
+            // Извлечение субтитров перевода (outputTranscription) ДО проверки modelTurn
+            val outputText = serverContent.optJSONObject("outputTranscription")?.optString("text", "") ?: ""
+            if (outputText.isNotEmpty()) {
+                serverTextChunksReceived++
+                lastServerText = outputText.trim()
+                recentTranslations.append(outputText).append(" ")
+                if (recentTranslations.length > 600) {
+                    recentTranslations.delete(0, recentTranslations.length - 350)
                 }
-                val text = part.optString("text", "")
-                if (text.isNotEmpty()) {
-                    serverTextChunksReceived++
-                    lastServerText = text.trim()
-                    recentTranslations.append(text).append(" ")
-                    if (recentTranslations.length > 600) {
-                        recentTranslations.delete(0, recentTranslations.length - 350)
+
+                // Обновляем постоянное уведомление для телефона и часов Xiaomi Watch 2
+                updateOngoingNotification(outputText.trim(), recentTranslations.toString().trim())
+
+                onTextReceived?.invoke(outputText)
+            }
+
+            // Извлечение аудио PCM из modelTurn.parts как и ранее
+            val modelTurn = serverContent.optJSONObject("modelTurn")
+            if (modelTurn != null) {
+                val parts = modelTurn.optJSONArray("parts")
+                if (parts != null) {
+                    for (i in 0 until parts.length()) {
+                        val part = parts.getJSONObject(i)
+                        val inlineData = part.optJSONObject("inlineData")
+                        if (inlineData != null) {
+                            val base64Pcm = inlineData.optString("data", "")
+                            if (base64Pcm.isNotEmpty()) {
+                                serverAudioChunksReceived++
+                                val pcmBytes = Base64.decode(base64Pcm, Base64.DEFAULT)
+                                audioPlaybackQueue.offer(pcmBytes)
+                            }
+                        }
+                        val text = part.optString("text", "")
+                        if (text.isNotEmpty()) {
+                            serverTextChunksReceived++
+                            lastServerText = text.trim()
+                            recentTranslations.append(text).append(" ")
+                            if (recentTranslations.length > 600) {
+                                recentTranslations.delete(0, recentTranslations.length - 350)
+                            }
+
+                            // Обновляем постоянное уведомление для телефона и часов Xiaomi Watch 2
+                            updateOngoingNotification(text.trim(), recentTranslations.toString().trim())
+
+                            onTextReceived?.invoke(text)
+                        }
                     }
-
-                    // Обновляем постоянное уведомление для телефона и часов Xiaomi Watch 2
-                    updateOngoingNotification(text.trim(), recentTranslations.toString().trim())
-
-                    onTextReceived?.invoke(text)
                 }
             }
 
@@ -532,10 +561,10 @@ class PocketService : Service() {
                             val base64Data = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
                             val chunkJson = JSONObject().apply {
                                 put("realtimeInput", JSONObject().apply {
-                                    put("mediaChunks", JSONArray().put(JSONObject().apply {
+                                    put("audio", JSONObject().apply {
                                         put("mimeType", "audio/pcm;rate=16000")
                                         put("data", base64Data)
-                                    }))
+                                    })
                                 })
                             }
                             webSocket?.send(chunkJson.toString())
