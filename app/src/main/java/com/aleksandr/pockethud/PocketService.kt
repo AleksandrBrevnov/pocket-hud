@@ -96,7 +96,19 @@ class PocketService : Service() {
         // Коллбэки в UI
         var onStatusChanged: ((String) -> Unit)? = null
         var onTextReceived: ((String) -> Unit)? = null
+        var onInputTextReceived: ((String) -> Unit)? = null
         var onTelemetryUpdated: ((micAmp: Int, chunks: Long, responses: Long) -> Unit)? = null
+
+        // Буферы текущей активной сессии для восстановления в UI при разблокировке экрана
+        private val sessionItalianBuilder = StringBuilder()
+        private val sessionRussianBuilder = StringBuilder()
+
+        fun getSessionItalianText(): String = synchronized(sessionItalianBuilder) { sessionItalianBuilder.toString() }
+        fun getSessionRussianText(): String = synchronized(sessionRussianBuilder) { sessionRussianBuilder.toString() }
+        fun clearSessionTexts() {
+            synchronized(sessionItalianBuilder) { sessionItalianBuilder.setLength(0) }
+            synchronized(sessionRussianBuilder) { sessionRussianBuilder.setLength(0) }
+        }
 
         @Volatile
         var currentInstance: PocketService? = null
@@ -119,7 +131,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.13\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.16\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -144,6 +156,7 @@ class PocketService : Service() {
         isAudioMuted = startMuted
 
         currentInstance = this
+        clearSessionTexts()
         serviceStartTime = System.currentTimeMillis()
         connectionState = "STARTING"
 
@@ -334,7 +347,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.13")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.16")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -406,7 +419,7 @@ class PocketService : Service() {
         val logFile = getLogFile(this)
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.13")
+            appendLine("Версия: v1.0.16")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Модель: models/gemini-3.8-live")
@@ -608,16 +621,42 @@ class PocketService : Service() {
                 }
             }
 
-            // Распознанная итальянская речь (inputAudioTranscription)
-            val inputText = serverContent.optJSONObject("inputTranscription")?.optString("text", "") ?: ""
+            // 1. Распознанная итальянская речь (inputAudioTranscription / inputTranscription / userTurn)
+            val inputObj = serverContent.optJSONObject("inputTranscription")
+                ?: serverContent.optJSONObject("inputAudioTranscription")
+            var inputText = inputObj?.optString("text", "") ?: ""
+
+            // Fallback на userTurn при наличии
+            if (inputText.isEmpty()) {
+                val userTurn = serverContent.optJSONObject("userTurn")
+                val userParts = userTurn?.optJSONArray("parts")
+                if (userParts != null) {
+                    val sb = StringBuilder()
+                    for (i in 0 until userParts.length()) {
+                        val pt = userParts.getJSONObject(i).optString("text", "")
+                        if (pt.isNotEmpty()) sb.append(pt)
+                    }
+                    inputText = sb.toString()
+                }
+            }
+
             if (inputText.isNotEmpty()) {
                 lastRecognizedInput = inputText.trim()
                 Log.d(tag, "Распознан итальянский: $inputText")
                 logEvent("INPUT_IT:", "\"$lastRecognizedInput\"")
+                synchronized(sessionItalianBuilder) {
+                    if (sessionItalianBuilder.isNotEmpty() && !sessionItalianBuilder.endsWith(" ") && !inputText.startsWith(" ")) {
+                        sessionItalianBuilder.append(" ")
+                    }
+                    sessionItalianBuilder.append(inputText)
+                }
+                onInputTextReceived?.invoke(inputText)
             }
 
-            // Субтитры перевода (outputAudioTranscription)
-            val outputText = serverContent.optJSONObject("outputTranscription")?.optString("text", "") ?: ""
+            // 2. Субтитры перевода (outputAudioTranscription / outputTranscription)
+            val outputObj = serverContent.optJSONObject("outputTranscription")
+                ?: serverContent.optJSONObject("outputAudioTranscription")
+            val outputText = outputObj?.optString("text", "") ?: ""
             if (outputText.isNotEmpty()) {
                 serverTextChunksReceived++
                 lastServerText = outputText.trim()
@@ -633,11 +672,18 @@ class PocketService : Service() {
                     }
                 }
 
+                synchronized(sessionRussianBuilder) {
+                    if (sessionRussianBuilder.isNotEmpty() && !sessionRussianBuilder.endsWith(" ") && !outputText.startsWith(" ")) {
+                        sessionRussianBuilder.append(" ")
+                    }
+                    sessionRussianBuilder.append(outputText)
+                }
+
                 updateOngoingNotification(outputText.trim(), recentTranslations.toString().trim())
                 onTextReceived?.invoke(outputText)
             }
 
-            // Аудио PCM и возможные текстовые фрагменты из modelTurn.parts
+            // 3. Аудио PCM и возможные текстовые фрагменты из modelTurn.parts
             val modelTurn = serverContent.optJSONObject("modelTurn")
             if (modelTurn != null) {
                 val parts = modelTurn.optJSONArray("parts")
@@ -668,6 +714,13 @@ class PocketService : Service() {
                                 } else {
                                     recentTranslations.delete(0, recentTranslations.length - 350)
                                 }
+                            }
+
+                            synchronized(sessionRussianBuilder) {
+                                if (sessionRussianBuilder.isNotEmpty() && !sessionRussianBuilder.endsWith(" ") && !text.startsWith(" ")) {
+                                    sessionRussianBuilder.append(" ")
+                                }
+                                sessionRussianBuilder.append(text)
                             }
 
                             updateOngoingNotification(text.trim(), recentTranslations.toString().trim())
