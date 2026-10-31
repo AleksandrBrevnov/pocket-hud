@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.View
@@ -17,19 +18,23 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var apiKeyInput: EditText
     private lateinit var toggleBtn: Button
+    private lateinit var muteBtn: Button
     private lateinit var statusText: TextView
     private lateinit var telemetryText: TextView
+    private lateinit var shareLogBtn: Button
     private lateinit var copySummaryBtn: Button
     private lateinit var subtitlesText: TextView
     private lateinit var scrollView: ScrollView
 
     private val prefsName = "pocket_hud_prefs"
     private val keyApiKey = "api_key"
+    private val keyAudioMuted = "audio_muted"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -37,6 +42,10 @@ class MainActivity : AppCompatActivity() {
 
         val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         apiKeyInput.setText(prefs.getString(keyApiKey, ""))
+
+        val isMuted = prefs.getBoolean(keyAudioMuted, false)
+        PocketService.isAudioMuted = isMuted
+        updateMuteButtonUi()
 
         setupServiceCallbacks()
         updateUi()
@@ -65,11 +74,38 @@ class MainActivity : AppCompatActivity() {
                 subtitlesText.text = "Ожидание итальянской речи..."
                 val intent = Intent(this, PocketService::class.java).apply {
                     putExtra(PocketService.EXTRA_API_KEY, key)
+                    putExtra(PocketService.EXTRA_IS_MUTED, PocketService.isAudioMuted)
                 }
                 ContextCompat.startForegroundService(this, intent)
                 PocketService.isServiceActive = true
                 updateUi()
             }
+        }
+
+        muteBtn.setOnClickListener {
+            val newMuted = !PocketService.isAudioMuted
+            PocketService.isAudioMuted = newMuted
+            prefs.edit().putBoolean(keyAudioMuted, newMuted).apply()
+            updateMuteButtonUi()
+
+            val toastMsg = if (newMuted) {
+                "🔇 Звук выключен (Режим только субтитров на часах и телефоне)"
+            } else {
+                "🔊 Звук включен (Голос в наушник)"
+            }
+            Toast.makeText(this, toastMsg, Toast.LENGTH_SHORT).show()
+        }
+
+        shareLogBtn.setOnClickListener {
+            shareLogFile()
+        }
+
+        copySummaryBtn.setOnClickListener {
+            val summary = PocketService.getDiagnosticSummary()
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val clip = android.content.ClipData.newPlainText("PocketHUD Diagnostics", summary)
+            clipboard.setPrimaryClip(clip)
+            Toast.makeText(this, "Сводка скопирована в буфер обмена! Отправьте её ассистенту.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -77,6 +113,42 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         setupServiceCallbacks()
         updateUi()
+        updateMuteButtonUi()
+    }
+
+    private fun updateMuteButtonUi() {
+        if (PocketService.isAudioMuted) {
+            muteBtn.text = "🔇 ЗВУК: ВЫКЛ (Только субтитры)"
+            muteBtn.setBackgroundColor(0xFFE65100.toInt())
+        } else {
+            muteBtn.text = "🔊 ЗВУК: ВКЛ (Голос в наушник)"
+            muteBtn.setBackgroundColor(0xFF1976D2.toInt())
+        }
+    }
+
+    private fun shareLogFile() {
+        val logFile = PocketService.getLogFile(this)
+        if (!logFile.exists() || logFile.length() == 0L) {
+            Toast.makeText(this, "Файл лога пока пуст. Запустите суфлёр!", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        try {
+            val uri: Uri = FileProvider.getUriForFile(
+                this,
+                "${applicationContext.packageName}.fileprovider",
+                logFile
+            )
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "PocketHUD Session Log")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, "Поделиться логом PocketHUD"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Ошибка экспорта лога: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun setupServiceCallbacks() {
@@ -153,12 +225,12 @@ class MainActivity : AppCompatActivity() {
     private fun createLayout(): View {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(40, 48, 40, 40)
+            setPadding(40, 40, 40, 36)
             setBackgroundColor(0xFF0A0A0A.toInt())
         }
 
         val title = TextView(this).apply {
-            text = "PocketHUD — Ушной суфлёр"
+            text = "PocketHUD — Ушной суфлёр v1.0.13"
             textSize = 20f
             setTextColor(0xFFFFFFFF.toInt())
             setTypeface(null, Typeface.BOLD)
@@ -176,22 +248,38 @@ class MainActivity : AppCompatActivity() {
         val apiParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { setMargins(0, 24, 0, 16) }
+        ).apply { setMargins(0, 20, 0, 14) }
         layout.addView(apiKeyInput, apiParams)
 
+        // Кнопка Старт/Стоп
         toggleBtn = Button(this).apply {
             text = "ЗАПУСТИТЬ В ФОНЕ"
             setTextColor(0xFFFFFFFF.toInt())
             setBackgroundColor(0xFF00AA55.toInt())
             textSize = 16f
             setTypeface(null, Typeface.BOLD)
-            setPadding(0, 28, 0, 28)
+            setPadding(0, 26, 0, 26)
         }
         val btnParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { setMargins(0, 8, 0, 16) }
+        ).apply { setMargins(0, 4, 0, 10) }
         layout.addView(toggleBtn, btnParams)
+
+        // Кнопка Mute звука
+        muteBtn = Button(this).apply {
+            text = "🔊 ЗВУК: ВКЛ (Голос в наушник)"
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF1976D2.toInt())
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 22, 0, 22)
+        }
+        val muteParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins(0, 0, 0, 12) }
+        layout.addView(muteBtn, muteParams)
 
         statusText = TextView(this).apply {
             text = "⚪ Суфлёр остановлен."
@@ -203,38 +291,58 @@ class MainActivity : AppCompatActivity() {
         telemetryText = TextView(this).apply {
             text = "🎙️ Мик: 0% | Чанков: 0 | Ответов: 0"
             textSize = 13f
-            setTextColor(0xFF00E5FF.toInt()) // Cyan телеметрия
+            setTextColor(0xFF00E5FF.toInt())
             setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-            setPadding(0, 12, 0, 8)
+            setPadding(0, 10, 0, 8)
         }
         layout.addView(telemetryText)
 
+        // Горизонтальный контейнер кнопок экспорта логов и сводки
+        val actionsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
         copySummaryBtn = Button(this).apply {
-            text = "📋 СКОПИРОВАТЬ СВОДКУ ДЛЯ АССИСТЕНТА"
+            text = "📋 СВОДКА"
             setTextColor(0xFFFFFFFF.toInt())
             setBackgroundColor(0xFF333333.toInt())
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
-            setPadding(0, 18, 0, 18)
-            setOnClickListener {
-                val summary = PocketService.getDiagnosticSummary()
-                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                val clip = android.content.ClipData.newPlainText("PocketHUD Diagnostics", summary)
-                clipboard.setPrimaryClip(clip)
-                Toast.makeText(this@MainActivity, "Сводка скопирована в буфер обмена! Отправьте её ассистенту.", Toast.LENGTH_LONG).show()
-            }
+            setPadding(12, 16, 12, 16)
         }
-        val copyParams = LinearLayout.LayoutParams(
+        val copySummaryParams = LinearLayout.LayoutParams(
+            0,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            1f
+        ).apply { setMargins(0, 0, 8, 0) }
+        actionsRow.addView(copySummaryBtn, copySummaryParams)
+
+        shareLogBtn = Button(this).apply {
+            text = "📤 ПОДЕЛИТЬСЯ ЛОГОМ"
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF2E7D32.toInt())
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(12, 16, 12, 16)
+        }
+        val shareLogParams = LinearLayout.LayoutParams(
+            0,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            1f
+        ).apply { setMargins(8, 0, 0, 0) }
+        actionsRow.addView(shareLogBtn, shareLogParams)
+
+        val actionsParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { setMargins(0, 4, 0, 12) }
-        layout.addView(copySummaryBtn, copyParams)
+        layout.addView(actionsRow, actionsParams)
 
         val subTitle = TextView(this).apply {
-            text = "Живые субтитры (HUD & Xiaomi Watch 2):"
+            text = "Живые субтитры (HUD & Xiaomi Watch 2 Wear OS 5):"
             textSize = 13f
-            setTextColor(0xFF777777.toInt())
-            setPadding(0, 12, 0, 8)
+            setTextColor(0xFF888888.toInt())
+            setPadding(0, 8, 0, 8)
         }
         layout.addView(subTitle)
 
@@ -252,7 +360,7 @@ class MainActivity : AppCompatActivity() {
         subtitlesText = TextView(this).apply {
             text = "Здесь в реальном времени будет появляться русский текст перевода..."
             textSize = 18f
-            setTextColor(0xFF00FF99.toInt()) // Высококонтрастный зелёный на чёрном OLED
+            setTextColor(0xFF00FF99.toInt())
             setTypeface(null, Typeface.BOLD)
             setLineSpacing(12f, 1.15f)
         }

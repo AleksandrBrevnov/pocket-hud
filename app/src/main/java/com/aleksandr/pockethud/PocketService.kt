@@ -3,6 +3,7 @@ package com.aleksandr.pockethud
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -29,6 +30,10 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -40,10 +45,14 @@ class PocketService : Service() {
     private var webSocket: WebSocket? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
+
+    // Потоки
     private var recordThread: Thread? = null
+    private var sendThread: Thread? = null
     private var playbackThread: Thread? = null
 
-    // Очередь для неблокирующего воспроизведения аудио
+    // Очереди: захват микрофона и воспроизведение аудио
+    private val audioSendQueue = LinkedBlockingQueue<ByteArray>(60)
     private val audioPlaybackQueue = LinkedBlockingQueue<ByteArray>()
 
     // Телеметрия и сводка диагностики
@@ -64,11 +73,25 @@ class PocketService : Service() {
     private var serviceStartTime = 0L
     private val recentTranslations = StringBuilder()
 
+    private val logDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+
     companion object {
-        const val CHANNEL_ID = "pocket_hud_service"
+        const val CHANNEL_SERVICE_ID = "pocket_hud_service_v2"
+        const val CHANNEL_SUBTITLES_ID = "pocket_hud_subtitles_v2"
         const val NOTIFICATION_ID = 1001
+        const val SUBTITLE_NOTIFICATION_ID = 1002
+
         const val EXTRA_API_KEY = "extra_api_key"
+        const val EXTRA_IS_MUTED = "extra_is_muted"
+
         var isServiceActive = false
+
+        @Volatile
+        var isAudioMuted: Boolean = false
+            set(value) {
+                field = value
+                currentInstance?.applyMuteState(value)
+            }
 
         // Коллбэки в UI
         var onStatusChanged: ((String) -> Unit)? = null
@@ -78,10 +101,15 @@ class PocketService : Service() {
         @Volatile
         var currentInstance: PocketService? = null
 
+        fun getLogFile(context: Context): File {
+            val dir = context.getExternalFilesDir(null) ?: context.filesDir
+            return File(dir, "pocket_hud_session.log")
+        }
+
         fun getDiagnosticSummary(): String {
             val inst = currentInstance
             if (inst == null) {
-                return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nСтатус: СЕРВИС ОСТАНОВЛЕН\nПоследнее состояние: ${if (isServiceActive) "АКТИВЕН" else "НЕАКТИВЕН"}\n======================================"
+                return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.13\nСтатус: СЕРВИС ОСТАНОВЛЕН\nПоследнее состояние: ${if (isServiceActive) "АКТИВЕН" else "НЕАКТИВЕН"}\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
             }
             return inst.buildDiagnosticSnapshot()
         }
@@ -92,7 +120,8 @@ class PocketService : Service() {
     override fun onCreate() {
         super.onCreate()
         currentInstance = this
-        createNotificationChannel()
+        createNotificationChannels()
+        logEvent("SERVICE_CREATE")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -103,9 +132,14 @@ class PocketService : Service() {
             return START_NOT_STICKY
         }
 
+        val startMuted = intent?.getBooleanExtra(EXTRA_IS_MUTED, isAudioMuted) ?: isAudioMuted
+        isAudioMuted = startMuted
+
         currentInstance = this
         serviceStartTime = System.currentTimeMillis()
         connectionState = "STARTING"
+
+        logEvent("SERVICE_START", "isAudioMuted=$isAudioMuted")
 
         val notification = buildNotification("Карманный суфлёр активен (экран можно выключить)")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -135,10 +169,44 @@ class PocketService : Service() {
         return START_NOT_STICKY
     }
 
+    @Synchronized
+    fun logEvent(event: String, details: String = "") {
+        try {
+            val timestamp = logDateFormat.format(Date())
+            val line = if (details.isBlank()) "[$timestamp] $event\n" else "[$timestamp] $event: $details\n"
+            val file = getLogFile(this)
+            file.appendText(line, Charsets.UTF_8)
+        } catch (e: Exception) {
+            Log.e(tag, "Ошибка записи лога: ${e.message}")
+        }
+    }
+
+    fun applyMuteState(muted: Boolean) {
+        logEvent("MUTE_STATE_CHANGED", "isMuted=$muted")
+        if (muted) {
+            audioPlaybackQueue.clear()
+            try {
+                audioTrack?.pause()
+                audioTrack?.flush()
+            } catch (e: Exception) {
+                Log.e(tag, "Ошибка паузы AudioTrack при отключении звука: ${e.message}")
+            }
+        } else {
+            try {
+                audioTrack?.play()
+            } catch (e: Exception) {
+                Log.e(tag, "Ошибка возобновления AudioTrack при включении звука: ${e.message}")
+            }
+        }
+    }
+
     private fun setupAudioRouting() {
         try {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isSpeakerphoneOn = false
+
+            var selectedDeviceName = "DEFAULT"
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val devices = audioManager.availableCommunicationDevices
@@ -149,16 +217,21 @@ class PocketService : Service() {
                 }
                 if (btDevice != null) {
                     audioManager.setCommunicationDevice(btDevice)
-                    Log.d(tag, "Установлено устройство связи: ${btDevice.productName} (${btDevice.type})")
+                    selectedDeviceName = "${btDevice.productName} (${btDevice.type})"
+                    Log.d(tag, "Установлено устройство связи: $selectedDeviceName")
                 }
             } else {
                 @Suppress("DEPRECATION")
                 audioManager.startBluetoothSco()
                 @Suppress("DEPRECATION")
                 audioManager.isBluetoothScoOn = true
+                selectedDeviceName = "Bluetooth SCO (Legacy)"
             }
+
+            logEvent("AUDIO_ROUTING_SETUP", selectedDeviceName)
         } catch (e: Exception) {
             Log.w(tag, "Предупреждение при настройке аудиомаршрутизации: ${e.message}")
+            logEvent("AUDIO_ROUTING_WARN", "${e.message}")
         }
     }
 
@@ -175,61 +248,141 @@ class PocketService : Service() {
                 }
             }
             audioManager.mode = AudioManager.MODE_NORMAL
+            logEvent("AUDIO_ROUTING_RESTORED")
         } catch (e: Exception) {
             Log.w(tag, "Ошибка восстановления аудиомаршрутизации: ${e.message}")
         }
     }
 
-    private fun createNotificationChannel() {
+    private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Pocket HUD Service",
-                NotificationManager.IMPORTANCE_LOW
+            val nm = getSystemService(NotificationManager::class.java) ?: return
+
+            // Канал 1: Фоновая служба
+            val serviceChannel = NotificationChannel(
+                CHANNEL_SERVICE_ID,
+                "Pocket HUD — Фоновый сервис",
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
-                description = "Канал трансляции перевода на телефон и часы Xiaomi Watch 2"
+                description = "Статус фоновой работы переводчика PocketHUD"
                 setShowBadge(false)
+                setSound(null, null)
+                enableVibration(false)
             }
-            val nm = getSystemService(NotificationManager::class.java)
-            nm?.createNotificationChannel(channel)
+            nm.createNotificationChannel(serviceChannel)
+
+            // Канал 2: Субтитры для экрана и часов (Xiaomi Watch 2, Wear OS 5)
+            val subtitlesChannel = NotificationChannel(
+                CHANNEL_SUBTITLES_ID,
+                "Pocket HUD — Субтитры (Часы и Экран)",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Трансляция живого перевода на часы Xiaomi Watch 2 (Wear OS 5)"
+                setShowBadge(true)
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 150)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+            nm.createNotificationChannel(subtitlesChannel)
         }
     }
 
     private fun buildNotification(text: String): Notification {
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр")
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val wearableExtender = NotificationCompat.WearableExtender()
+            .setContentIntentAvailableOffline(false)
+            .setHintShowBackgroundOnly(false)
+
+        return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.13")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setLocalOnly(false)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .extend(wearableExtender)
             .build()
     }
 
     private fun updateOngoingNotification(latestText: String, fullHistory: String) {
         val nm = getSystemService(NotificationManager::class.java) ?: return
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val wearableExtender = NotificationCompat.WearableExtender()
+            .setContentIntentAvailableOffline(false)
+            .setHintShowBackgroundOnly(false)
+
+        // 1. Обновляем статус постоянного сервиса
+        val fgNotification = NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
+            .setContentTitle("PocketHUD — Перевод")
+            .setContentText(latestText)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setLocalOnly(false)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .extend(wearableExtender)
+            .build()
+        nm.notify(NOTIFICATION_ID, fgNotification)
+
+        // 2. Карточка субтитров для часов Xiaomi Watch 2 (Wear OS 5)
+        // setOngoing(false) критично: Wear OS 5 и Mi Fitness скрывают ongoing карточки из карусели!
+        val subtitleNotification = NotificationCompat.Builder(this, CHANNEL_SUBTITLES_ID)
             .setContentTitle("PocketHUD (Субтитры)")
             .setContentText(latestText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(fullHistory))
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setOngoing(true)
-            .setOnlyAlertOnce(true) // Без повторной вибрации на часах Xiaomi Watch 2!
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setContentIntent(pendingIntent)
+            .setOngoing(false) // КРИТИЧНО для Wear OS 5!
+            .setOnlyAlertOnce(true) // Без повторной вибрации при каждом слове
+            .setLocalOnly(false) // Разрешено зеркалирование на часы
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .extend(wearableExtender)
             .build()
-        nm.notify(NOTIFICATION_ID, notification)
+        nm.notify(SUBTITLE_NOTIFICATION_ID, subtitleNotification)
     }
 
     fun buildDiagnosticSnapshot(): String {
         val uptimeSec = if (serviceStartTime > 0) (System.currentTimeMillis() - serviceStartTime) / 1000 else 0
         val mm = uptimeSec / 60
         val ss = uptimeSec % 60
+        val logFile = getLogFile(this)
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
+            appendLine("Версия: v1.0.13")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Модель: models/gemini-3.8-live")
+            appendLine("Режим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН (Только субтитры)" else "🔊 ВКЛЮЧЕН (Голос в наушник)"}")
             appendLine("Источник микрофона: $activeAudioSource (16 кГц Mono PCM16)")
+            appendLine("--- ОЧЕРЕДИ АУДИО ---")
+            appendLine("Очередь отправки mic (SendQueue): ${audioSendQueue.size} чанков")
+            appendLine("Очередь вывода (PlaybackQueue): ${audioPlaybackQueue.size} чанков")
             appendLine("--- МИКРОФОН ---")
             appendLine("Текущая громкость: $micPeakAmplitude% (Макс за сессию: $sessionMaxAmplitude%)")
             appendLine("Последний read результат: $lastAudioReadResult")
@@ -241,6 +394,9 @@ class PocketService : Service() {
             appendLine("Текстовых ответов (HUD/Часы): $serverTextChunksReceived")
             appendLine("Последний распознанный IT: ${if (lastRecognizedInput.isBlank()) "нет" else "\"$lastRecognizedInput\""}")
             appendLine("Последний текст RU: ${if (lastServerText.isBlank()) "нет" else "\"$lastServerText\""}")
+            appendLine("--- WEAR OS 5 & ЛОГИ ---")
+            appendLine("Канал часов: $CHANNEL_SUBTITLES_ID (IMPORTANCE_HIGH)")
+            appendLine("Файл логов: ${logFile.absolutePath} (${logFile.length()} байт)")
             appendLine("--- ОШИБКИ ---")
             appendLine("Последняя ошибка: ${lastError ?: "нет"}")
             appendLine("======================================")
@@ -275,10 +431,13 @@ class PocketService : Service() {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
-            audioTrack?.play()
+            if (!isAudioMuted) {
+                audioTrack?.play()
+            }
         } catch (e: Exception) {
             Log.e(tag, "Ошибка инициализации AudioTrack: ${e.message}")
             lastError = "AudioTrack init: ${e.message}"
+            logEvent("AUDIOTRACK_INIT_ERROR", "${e.message}")
             return
         }
 
@@ -286,7 +445,9 @@ class PocketService : Service() {
             while (isRunning) {
                 try {
                     val chunk = audioPlaybackQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
-                    audioTrack?.write(chunk, 0, chunk.size)
+                    if (!isAudioMuted) {
+                        audioTrack?.write(chunk, 0, chunk.size)
+                    }
                 } catch (e: InterruptedException) {
                     break
                 } catch (e: Exception) {
@@ -299,6 +460,8 @@ class PocketService : Service() {
 
     private fun connectWebSocket(apiKey: String) {
         connectionState = "CONNECTING"
+        logEvent("WEBSOCKET_CONNECTING")
+
         val client = OkHttpClient.Builder()
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .build()
@@ -310,6 +473,7 @@ class PocketService : Service() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 Log.d(tag, "WebSocket открыт. Отправка Setup...")
                 connectionState = "OPEN (Sending Setup)"
+                logEvent("WEBSOCKET_OPEN")
                 onStatusChanged?.invoke("🔵 WebSocket соединён. Инициализация модели Gemini-3.8-Live...")
                 sendSetup(ws)
             }
@@ -326,6 +490,7 @@ class PocketService : Service() {
                 Log.e(tag, "Ошибка WebSocket: ${t.message}")
                 connectionState = "FAILED (${t.message})"
                 lastError = "WebSocket fail: ${t.message}"
+                logEvent("WEBSOCKET_FAILURE", "${t.message}")
                 onStatusChanged?.invoke("🔴 Ошибка сети / ключа: ${t.message}")
                 stopSelf()
             }
@@ -333,6 +498,7 @@ class PocketService : Service() {
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.d(tag, "WebSocket закрыт ($code: $reason)")
                 connectionState = "CLOSED ($code: $reason)"
+                logEvent("WEBSOCKET_CLOSED", "code=$code, reason=$reason")
                 if (code != 1000) {
                     lastError = "WebSocket closed: $code $reason"
                     onStatusChanged?.invoke("🔴 Сервер закрыл соединение ($code: $reason)")
@@ -360,7 +526,13 @@ class PocketService : Service() {
                 })
                 put("systemInstruction", JSONObject().apply {
                     put("parts", JSONArray().put(JSONObject().apply {
-                        put("text", "You are an invisible real-time Italian-to-Russian speech interpreter for Alexander in Rome. Translate everything you hear in Italian into concise Russian speech. Never answer questions, never converse in Italian, speak ONLY in Russian language.")
+                        put("text", "You are an invisible ultra-fast real-time speech interpreter from Italian to Russian for Alexander living in Rome. " +
+                                    "CRITICAL RULES: " +
+                                    "1. Translate IMMEDIATELY and CONTINUOUSLY phrase-by-phrase as soon as you hear Italian speech. " +
+                                    "Do not wait for long pauses or for the speaker to finish long sentences. " +
+                                    "2. Output ONLY the Russian translation. Be concise, fast, and accurate. " +
+                                    "3. NEVER converse, NEVER explain, NEVER reply in Italian, NEVER answer questions. Your ONLY job is instantaneous Italian-to-Russian translation. " +
+                                    "4. If you hear Russian speech or background noise, remain completely silent.")
                     }))
                 })
                 put("inputAudioTranscription", JSONObject())
@@ -368,6 +540,7 @@ class PocketService : Service() {
             })
         }
         ws.send(setupJson.toString())
+        logEvent("SETUP_SENT", "model=models/gemini-3.8-live")
     }
 
     private fun handleServerMessage(jsonText: String) {
@@ -377,6 +550,7 @@ class PocketService : Service() {
             if (root.has("setupComplete")) {
                 Log.d(tag, "Setup завершён! Запуск микрофона...")
                 connectionState = "READY (Streaming)"
+                logEvent("SETUP_COMPLETE", "mic=$activeAudioSource")
                 onStatusChanged?.invoke("🟢 Соединение активно! Слушаю итальянскую речь...")
                 startRecording()
                 return
@@ -384,42 +558,44 @@ class PocketService : Service() {
 
             val serverContent = root.optJSONObject("serverContent") ?: return
 
-            // Мгновенный Barge-in: очищаем очередь звука и сбрасываем буфер динамика
+            // Мгновенный Barge-in: сбрасываем звук при прерывании
             if (serverContent.optBoolean("interrupted", false)) {
                 audioPlaybackQueue.clear()
                 try {
                     audioTrack?.pause()
                     audioTrack?.flush()
-                    audioTrack?.play()
+                    if (!isAudioMuted) {
+                        audioTrack?.play()
+                    }
                 } catch (e: Exception) {
                     Log.e(tag, "Ошибка сброса AudioTrack: ${e.message}")
                 }
             }
 
-            // Извлечение распознанной итальянской речи (inputTranscription) при наличии
+            // Распознанная итальянская речь (inputAudioTranscription)
             val inputText = serverContent.optJSONObject("inputTranscription")?.optString("text", "") ?: ""
             if (inputText.isNotEmpty()) {
                 lastRecognizedInput = inputText.trim()
                 Log.d(tag, "Распознан итальянский: $inputText")
+                logEvent("INPUT_IT", "\"$lastRecognizedInput\"")
             }
 
-            // Извлечение субтитров перевода (outputTranscription) ДО проверки modelTurn
+            // Субтитры перевода (outputAudioTranscription)
             val outputText = serverContent.optJSONObject("outputTranscription")?.optString("text", "") ?: ""
             if (outputText.isNotEmpty()) {
                 serverTextChunksReceived++
                 lastServerText = outputText.trim()
+                logEvent("TRANSLATION", "\"$lastServerText\" (IT: \"$lastRecognizedInput\")")
                 recentTranslations.append(outputText).append(" ")
                 if (recentTranslations.length > 600) {
                     recentTranslations.delete(0, recentTranslations.length - 350)
                 }
 
-                // Обновляем постоянное уведомление для телефона и часов Xiaomi Watch 2
                 updateOngoingNotification(outputText.trim(), recentTranslations.toString().trim())
-
                 onTextReceived?.invoke(outputText)
             }
 
-            // Извлечение аудио PCM из modelTurn.parts как и ранее
+            // Аудио PCM и возможные текстовые фрагменты из modelTurn.parts
             val modelTurn = serverContent.optJSONObject("modelTurn")
             if (modelTurn != null) {
                 val parts = modelTurn.optJSONArray("parts")
@@ -431,22 +607,23 @@ class PocketService : Service() {
                             val base64Pcm = inlineData.optString("data", "")
                             if (base64Pcm.isNotEmpty()) {
                                 serverAudioChunksReceived++
-                                val pcmBytes = Base64.decode(base64Pcm, Base64.DEFAULT)
-                                audioPlaybackQueue.offer(pcmBytes)
+                                if (!isAudioMuted) {
+                                    val pcmBytes = Base64.decode(base64Pcm, Base64.DEFAULT)
+                                    audioPlaybackQueue.offer(pcmBytes)
+                                }
                             }
                         }
                         val text = part.optString("text", "")
                         if (text.isNotEmpty()) {
                             serverTextChunksReceived++
                             lastServerText = text.trim()
+                            logEvent("TRANSLATION_PART", "\"$lastServerText\"")
                             recentTranslations.append(text).append(" ")
                             if (recentTranslations.length > 600) {
                                 recentTranslations.delete(0, recentTranslations.length - 350)
                             }
 
-                            // Обновляем постоянное уведомление для телефона и часов Xiaomi Watch 2
                             updateOngoingNotification(text.trim(), recentTranslations.toString().trim())
-
                             onTextReceived?.invoke(text)
                         }
                     }
@@ -457,6 +634,7 @@ class PocketService : Service() {
         } catch (e: Exception) {
             Log.e(tag, "Ошибка парсинга: ${e.message}")
             lastError = "Парсинг ответа: ${e.message}"
+            logEvent("PARSE_ERROR", "${e.message}")
         }
     }
 
@@ -498,12 +676,14 @@ class PocketService : Service() {
             AudioFormat.ENCODING_PCM_16BIT
         )
 
-        val bufferSize = if (minBufferSize <= 0) 4096 * 2 else minBufferSize * 2
+        // Буфер не менее 2 секунд (64 КБ), чтобы гарантировать отсутствие переполнения
+        val bufferSize = maxOf(minBufferSize * 4, sampleRate * 2 * 2)
 
         val (record, sourceName) = createAudioRecord(sampleRate, bufferSize)
         if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
             val err = "🔴 Ошибка: микрофон недоступен ни в одном режиме"
             lastError = err
+            logEvent("MIC_INIT_FAILED")
             onStatusChanged?.invoke(err)
             stopSelf()
             return
@@ -511,21 +691,23 @@ class PocketService : Service() {
 
         audioRecord = record
         activeAudioSource = sourceName
+        logEvent("RECORDING_START", "source=$activeAudioSource, bufferSize=$bufferSize")
 
         try {
             audioRecord?.startRecording()
         } catch (e: Exception) {
             val err = "🔴 Ошибка старта микрофона: ${e.message}"
             lastError = err
+            logEvent("MIC_START_ERROR", "${e.message}")
             onStatusChanged?.invoke(err)
             stopSelf()
             return
         }
 
+        // Поток 1: Неблокирующий захват PCM звука с микрофона в audioSendQueue
         recordThread = Thread {
             // Чанк 100 мс при 16 кГц Mono 16-бит = 1600 сэмплов (Shorts) = 3200 байт
             val shortBuffer = ShortArray(1600)
-            var lastTelemetryEmit = 0L
 
             while (isRunning) {
                 try {
@@ -551,38 +733,20 @@ class PocketService : Service() {
                             byteBuffer[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
                         }
 
-                        chunksSent++
-                        bytesSent += byteBuffer.size
-
-                        val now = System.currentTimeMillis()
-                        if (now - lastTelemetryEmit > 300) {
-                            lastTelemetryEmit = now
-                            onTelemetryUpdated?.invoke(
-                                micPeakAmplitude,
-                                chunksSent,
-                                serverTextChunksReceived + serverAudioChunksReceived
-                            )
-                        }
-
-                        if (webSocket != null) {
-                            val base64Data = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
-                            val chunkJson = JSONObject().apply {
-                                put("realtimeInput", JSONObject().apply {
-                                    put("audio", JSONObject().apply {
-                                        put("mimeType", "audio/pcm;rate=16000")
-                                        put("data", base64Data)
-                                    })
-                                })
-                            }
-                            webSocket?.send(chunkJson.toString())
+                        // Неблокирующее помещение в очередь отправки.
+                        // Если очередь переполнена (задержка сети), вытесняем старейший чанк для сохранения реал-тайма.
+                        if (!audioSendQueue.offer(byteBuffer)) {
+                            audioSendQueue.poll()
+                            audioSendQueue.offer(byteBuffer)
                         }
                     } else {
                         audioReadErrors++
                         if (read < 0) {
                             lastError = "AudioRecord.read ошибка: $read"
+                            logEvent("MIC_READ_ERROR", "readResult=$read")
                         }
                         try {
-                            Thread.sleep(50)
+                            Thread.sleep(20)
                         } catch (e: InterruptedException) {
                             break
                         }
@@ -592,11 +756,66 @@ class PocketService : Service() {
                 } catch (e: Exception) {
                     Log.e(tag, "Ошибка в потоке записи: ${e.message}")
                     lastError = "Поток записи: ${e.message}"
+                    logEvent("RECORD_THREAD_ERROR", "${e.message}")
                     break
                 }
             }
         }
         recordThread?.start()
+
+        // Поток 2: Отдельный независимый поток отправки аудиочанков в WebSocket
+        sendThread = Thread {
+            var lastTelemetryEmit = 0L
+            var lastLogStreamEmit = 0L
+
+            while (isRunning) {
+                try {
+                    val chunk = audioSendQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
+                    val ws = webSocket
+                    if (ws != null) {
+                        chunksSent++
+                        bytesSent += chunk.size
+
+                        val base64Data = Base64.encodeToString(chunk, Base64.NO_WRAP)
+                        val chunkJson = JSONObject().apply {
+                            put("realtimeInput", JSONObject().apply {
+                                put("audio", JSONObject().apply {
+                                    put("mimeType", "audio/pcm;rate=16000")
+                                    put("data", base64Data)
+                                })
+                            })
+                        }
+                        ws.send(chunkJson.toString())
+                    }
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastTelemetryEmit > 300) {
+                        lastTelemetryEmit = now
+                        onTelemetryUpdated?.invoke(
+                            micPeakAmplitude,
+                            chunksSent,
+                            serverTextChunksReceived + serverAudioChunksReceived
+                        )
+                    }
+
+                    // Периодический лог стриминга каждые 15 сек
+                    if (now - lastLogStreamEmit > 15000) {
+                        lastLogStreamEmit = now
+                        logEvent(
+                            "CHUNK_STREAMING",
+                            "chunksSent=$chunksSent, bytesSent=$bytesSent, micPeak=$micPeakAmplitude%, queueSize=${audioSendQueue.size}"
+                        )
+                    }
+                } catch (e: InterruptedException) {
+                    break
+                } catch (e: Exception) {
+                    Log.e(tag, "Ошибка в потоке отправки аудио: ${e.message}")
+                    lastError = "Поток отправки: ${e.message}"
+                    logEvent("SEND_THREAD_ERROR", "${e.message}")
+                }
+            }
+        }
+        sendThread?.start()
     }
 
     override fun onDestroy() {
@@ -604,11 +823,21 @@ class PocketService : Service() {
         isServiceActive = false
         connectionState = "STOPPED"
 
+        val uptimeSec = if (serviceStartTime > 0) (System.currentTimeMillis() - serviceStartTime) / 1000 else 0
+        logEvent(
+            "SERVICE_STOP",
+            "uptime=${uptimeSec}s, totalChunks=$chunksSent, totalBytes=$bytesSent, audioResp=$serverAudioChunksReceived, textResp=$serverTextChunksReceived, lastError=${lastError ?: "none"}"
+        )
+
         restoreAudioRouting()
-        
+
         audioPlaybackQueue.clear()
         playbackThread?.interrupt()
         playbackThread = null
+
+        audioSendQueue.clear()
+        sendThread?.interrupt()
+        sendThread = null
 
         recordThread?.interrupt()
         recordThread = null
@@ -632,6 +861,9 @@ class PocketService : Service() {
             if (it.isHeld) it.release()
         }
         wakeLock = null
+
+        val nm = getSystemService(NotificationManager::class.java)
+        nm?.cancel(SUBTITLE_NOTIFICATION_ID)
 
         onStatusChanged?.invoke("⚪ Суфлёр остановлен.")
         currentInstance = null
