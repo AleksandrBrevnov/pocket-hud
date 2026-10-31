@@ -27,15 +27,35 @@ import androidx.core.content.FileProvider
 
 class MainActivity : AppCompatActivity() {
 
+    enum class ScreenMode {
+        BOTH,
+        ITALIAN,
+        RUSSIAN
+    }
+
     private lateinit var apiKeyInput: EditText
     private lateinit var settingsToggleBtn: TextView
     private lateinit var apiSettingsContainer: LinearLayout
 
+    private lateinit var tabItalianBtn: TextView
+    private lateinit var tabRussianBtn: TextView
+    private lateinit var tabBothBtn: TextView
+
     private lateinit var statusBadgeText: TextView
     private lateinit var telemetryBadgeText: TextView
 
+    private lateinit var conversationContainer: LinearLayout
+    private lateinit var italianCard: LinearLayout
+    private lateinit var italianTitleText: TextView
+    private lateinit var expandItalianBtn: TextView
     private lateinit var italianTranscriptText: TextView
     private lateinit var italianScrollView: ScrollView
+
+    private lateinit var flowIndicator: LinearLayout
+
+    private lateinit var russianCard: LinearLayout
+    private lateinit var russianTitleText: TextView
+    private lateinit var expandRussianBtn: TextView
     private lateinit var russianTranscriptText: TextView
     private lateinit var russianScrollView: ScrollView
 
@@ -47,9 +67,12 @@ class MainActivity : AppCompatActivity() {
     private val prefsName = "pocket_hud_prefs"
     private val keyApiKey = "api_key"
     private val keyAudioMuted = "audio_muted"
+    private val keyScreenMode = "screen_mode"
+
+    private var currentMode = ScreenMode.BOTH
 
     companion object {
-        private const val IT_PLACEHOLDER = "Здесь появится распознанная итальянская речь..."
+        private const val IT_PLACEHOLDER = "Говорите по-итальянски — здесь появится распознанный текст..."
         private const val RU_PLACEHOLDER = "Здесь в реальном времени появится русский перевод..."
     }
 
@@ -73,6 +96,14 @@ class MainActivity : AppCompatActivity() {
         val isMuted = prefs.getBoolean(keyAudioMuted, false)
         PocketService.isAudioMuted = isMuted
         updateMuteButtonUi()
+
+        val savedModeStr = prefs.getString(keyScreenMode, ScreenMode.BOTH.name) ?: ScreenMode.BOTH.name
+        val savedMode = try {
+            ScreenMode.valueOf(savedModeStr)
+        } catch (e: Exception) {
+            ScreenMode.BOTH
+        }
+        setScreenMode(savedMode)
 
         setupServiceCallbacks()
         updateUi()
@@ -193,6 +224,101 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun setScreenMode(mode: ScreenMode) {
+        currentMode = mode
+        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        prefs.edit().putString(keyScreenMode, mode.name).apply()
+
+        updateTabStyles()
+
+        when (mode) {
+            ScreenMode.BOTH -> {
+                italianCard.visibility = View.VISIBLE
+                val itParams = italianCard.layoutParams as LinearLayout.LayoutParams
+                itParams.weight = 1f
+                itParams.height = 0
+                italianCard.layoutParams = itParams
+
+                flowIndicator.visibility = View.VISIBLE
+
+                russianCard.visibility = View.VISIBLE
+                val ruParams = russianCard.layoutParams as LinearLayout.LayoutParams
+                ruParams.weight = 1f
+                ruParams.height = 0
+                russianCard.layoutParams = ruParams
+
+                italianTitleText.text = "🇮🇹 ITALIANO"
+                russianTitleText.text = "🇷🇺 РУССКИЙ"
+                expandItalianBtn.text = "⛶ Экран"
+                expandRussianBtn.text = "⛶ Экран"
+                italianTranscriptText.textSize = 17.5f
+                russianTranscriptText.textSize = 18.5f
+            }
+            ScreenMode.ITALIAN -> {
+                italianCard.visibility = View.VISIBLE
+                val itParams = italianCard.layoutParams as LinearLayout.LayoutParams
+                itParams.weight = 1f
+                itParams.height = 0
+                italianCard.layoutParams = itParams
+
+                flowIndicator.visibility = View.GONE
+                russianCard.visibility = View.GONE
+
+                italianTitleText.text = "🇮🇹 ЭКРАН 1: ИТАЛЬЯНСКАЯ РЕЧЬ"
+                expandItalianBtn.text = "↕️ Разделить"
+                italianTranscriptText.textSize = 21f
+            }
+            ScreenMode.RUSSIAN -> {
+                italianCard.visibility = View.GONE
+                flowIndicator.visibility = View.GONE
+
+                russianCard.visibility = View.VISIBLE
+                val ruParams = russianCard.layoutParams as LinearLayout.LayoutParams
+                ruParams.weight = 1f
+                ruParams.height = 0
+                russianCard.layoutParams = ruParams
+
+                russianTitleText.text = "🇷🇺 ЭКРАН 2: РУССКИЙ ПЕРЕВОД"
+                expandRussianBtn.text = "↕️ Разделить"
+                russianTranscriptText.textSize = 22f
+            }
+        }
+    }
+
+    private fun updateTabStyles() {
+        val activeBgIt = createRoundedDrawable(0xFF1E3A5F.toInt(), 0xFF4285F4.toInt(), 1, 14f)
+        val activeBgRu = createRoundedDrawable(0xFF1A3B2A.toInt(), 0xFF34A853.toInt(), 1, 14f)
+        val activeBgBoth = createRoundedDrawable(0xFF28344D.toInt(), 0xFF5C6BC0.toInt(), 1, 14f)
+        val inactiveBg = createRoundedDrawable(0x00000000, cornerRadiusDp = 14f)
+
+        when (currentMode) {
+            ScreenMode.BOTH -> {
+                tabBothBtn.background = activeBgBoth
+                tabBothBtn.setTextColor(0xFF8AB4F8.toInt())
+                tabItalianBtn.background = inactiveBg
+                tabItalianBtn.setTextColor(0xFF9AA0A6.toInt())
+                tabRussianBtn.background = inactiveBg
+                tabRussianBtn.setTextColor(0xFF9AA0A6.toInt())
+            }
+            ScreenMode.ITALIAN -> {
+                tabItalianBtn.background = activeBgIt
+                tabItalianBtn.setTextColor(0xFF8AB4F8.toInt())
+                tabBothBtn.background = inactiveBg
+                tabBothBtn.setTextColor(0xFF9AA0A6.toInt())
+                tabRussianBtn.background = inactiveBg
+                tabRussianBtn.setTextColor(0xFF9AA0A6.toInt())
+            }
+            ScreenMode.RUSSIAN -> {
+                tabRussianBtn.background = activeBgRu
+                tabRussianBtn.setTextColor(0xFF81C995.toInt())
+                tabItalianBtn.background = inactiveBg
+                tabItalianBtn.setTextColor(0xFF9AA0A6.toInt())
+                tabBothBtn.background = inactiveBg
+                tabBothBtn.setTextColor(0xFF9AA0A6.toInt())
+            }
+        }
+    }
+
     private fun updateMuteButtonUi() {
         if (PocketService.isAudioMuted) {
             muteBtn.text = "🔇 ЗВУК: ВЫКЛ"
@@ -221,7 +347,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun appendItalianText(text: String) {
         val current = italianTranscriptText.text.toString()
-        if (current == IT_PLACEHOLDER || current.startsWith("Слушаю") || current.startsWith("Здесь")) {
+        if (current == IT_PLACEHOLDER || current.startsWith("Слушаю") || current.startsWith("Говорите") || current.startsWith("Здесь")) {
             italianTranscriptText.text = text
             italianTranscriptText.setTextColor(0xFFE8EAED.toInt())
         } else {
@@ -229,6 +355,13 @@ class MainActivity : AppCompatActivity() {
                 italianTranscriptText.append(text)
             } else {
                 italianTranscriptText.append(" $text")
+            }
+        }
+        if (italianTranscriptText.length() > 25000) {
+            val fullStr = italianTranscriptText.text.toString()
+            val cutIndex = fullStr.indexOf(" ", fullStr.length - 18000)
+            if (cutIndex != -1) {
+                italianTranscriptText.text = fullStr.substring(cutIndex + 1)
             }
         }
         italianScrollView.post { italianScrollView.fullScroll(View.FOCUS_DOWN) }
@@ -244,6 +377,13 @@ class MainActivity : AppCompatActivity() {
                 russianTranscriptText.append(text)
             } else {
                 russianTranscriptText.append(" $text")
+            }
+        }
+        if (russianTranscriptText.length() > 25000) {
+            val fullStr = russianTranscriptText.text.toString()
+            val cutIndex = fullStr.indexOf(" ", fullStr.length - 18000)
+            if (cutIndex != -1) {
+                russianTranscriptText.text = fullStr.substring(cutIndex + 1)
             }
         }
         russianScrollView.post { russianScrollView.fullScroll(View.FOCUS_DOWN) }
@@ -388,7 +528,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.16"
+            text = "v1.0.17"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
@@ -458,8 +598,90 @@ class MainActivity : AppCompatActivity() {
         apiSettingsContainer.addView(apiHint)
         root.addView(apiSettingsContainer)
 
+        // ========================================================
+        // 2. Google Translate Языковая панель / Режим двух экранов
+        // ========================================================
+        val languageBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = createRoundedDrawable(0xFF1A1D24.toInt(), 0xFF2B3240.toInt(), 1, 16f)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(8)) }
+            layoutParams = params
+        }
+
+        tabItalianBtn = TextView(this).apply {
+            text = "🇮🇹 Итальянский"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.1f)
+            layoutParams = params
+            isClickable = true
+            setOnClickListener {
+                setScreenMode(ScreenMode.ITALIAN)
+            }
+        }
+        languageBar.addView(tabItalianBtn)
+
+        val swapArrowBtn = TextView(this).apply {
+            text = "⇄"
+            textSize = 15f
+            setTextColor(0xFF80868B.toInt())
+            gravity = Gravity.CENTER
+            setPadding(dp(4), dp(7), dp(4), dp(7))
+            isClickable = true
+            setOnClickListener {
+                when (currentMode) {
+                    ScreenMode.ITALIAN -> setScreenMode(ScreenMode.RUSSIAN)
+                    ScreenMode.RUSSIAN -> setScreenMode(ScreenMode.ITALIAN)
+                    ScreenMode.BOTH -> setScreenMode(ScreenMode.RUSSIAN)
+                }
+            }
+        }
+        languageBar.addView(swapArrowBtn)
+
+        tabRussianBtn = TextView(this).apply {
+            text = "🇷🇺 Русский"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.1f)
+            layoutParams = params
+            isClickable = true
+            setOnClickListener {
+                setScreenMode(ScreenMode.RUSSIAN)
+            }
+        }
+        languageBar.addView(tabRussianBtn)
+
+        tabBothBtn = TextView(this).apply {
+            text = "↕️ Оба"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(dp(2), 0, 0, 0) }
+            layoutParams = params
+            isClickable = true
+            setOnClickListener {
+                setScreenMode(ScreenMode.BOTH)
+            }
+        }
+        languageBar.addView(tabBothBtn)
+
+        root.addView(languageBar)
+
         // ==========================================
-        // 2. Индикаторы: Статус + Телеметрия
+        // 3. Индикаторы: Статус + Телеметрия
         // ==========================================
         val statusRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -493,9 +715,9 @@ class MainActivity : AppCompatActivity() {
         root.addView(statusRow)
 
         // ==========================================
-        // 3. Google Translate Split Cards Container
+        // 4. Google Translate Conversation Container
         // ==========================================
-        val conversationContainer = LinearLayout(this).apply {
+        conversationContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -506,9 +728,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         // ------------------------------------------
-        // КАРТОЧКА 1: 🇮🇹 ITALIANO (Речь собеседника)
+        // ЭКРАН 1: 🇮🇹 ITALIANO (Речь собеседника)
         // ------------------------------------------
-        val italianCard = LinearLayout(this).apply {
+        italianCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = createRoundedDrawable(0xFF1E2026.toInt(), 0xFF2D323F.toInt(), 1, 18f)
             setPadding(dp(14), dp(12), dp(14), dp(12))
@@ -530,7 +752,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
         }
 
-        val italianFlagBadge = TextView(this).apply {
+        italianTitleText = TextView(this).apply {
             text = "🇮🇹 ITALIANO"
             textSize = 11.5f
             setTextColor(0xFF8AB4F8.toInt())
@@ -538,12 +760,29 @@ class MainActivity : AppCompatActivity() {
             background = createRoundedDrawable(0xFF28344D.toInt(), cornerRadiusDp = 8f)
             setPadding(dp(10), dp(4), dp(10), dp(4))
         }
-        italianHeader.addView(italianFlagBadge)
+        italianHeader.addView(italianTitleText)
 
         val italianHeaderSpacer = View(this).apply {
             layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
         }
         italianHeader.addView(italianHeaderSpacer)
+
+        expandItalianBtn = TextView(this).apply {
+            text = "⛶ Экран"
+            textSize = 11f
+            setTextColor(0xFF8AB4F8.toInt())
+            background = createRoundedDrawable(0xFF233045.toInt(), 0xFF354868.toInt(), 1, 6f)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            isClickable = true
+            setOnClickListener {
+                if (currentMode == ScreenMode.ITALIAN) {
+                    setScreenMode(ScreenMode.BOTH)
+                } else {
+                    setScreenMode(ScreenMode.ITALIAN)
+                }
+            }
+        }
+        italianHeader.addView(expandItalianBtn)
 
         val copyItalianBtn = TextView(this).apply {
             text = "📋 Копировать"
@@ -551,6 +790,11 @@ class MainActivity : AppCompatActivity() {
             setTextColor(0xFFCCCCCC.toInt())
             background = createRoundedDrawable(0xFF2A2E39.toInt(), cornerRadiusDp = 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(dp(6), 0, 0, 0) }
+            layoutParams = params
             isClickable = true
             setOnClickListener {
                 val txt = italianTranscriptText.text.toString()
@@ -576,6 +820,8 @@ class MainActivity : AppCompatActivity() {
             isClickable = true
             setOnClickListener {
                 resetItalianCard()
+                PocketService.clearItalianSessionText()
+                Toast.makeText(this@MainActivity, "Итальянский текст очищен", Toast.LENGTH_SHORT).show()
             }
         }
         italianHeader.addView(clearItalianBtn)
@@ -595,7 +841,7 @@ class MainActivity : AppCompatActivity() {
             text = IT_PLACEHOLDER
             textSize = 17.5f
             setTextColor(0xFF70757A.toInt())
-            setLineSpacing(dpF(4f), 1.2f)
+            setLineSpacing(dpF(4f), 1.25f)
         }
         italianScrollView.addView(italianTranscriptText)
         italianCard.addView(italianScrollView)
@@ -604,7 +850,7 @@ class MainActivity : AppCompatActivity() {
         // ------------------------------------------
         // РАЗДЕЛИТЕЛЬ / ИНДИКАТОР ПЕРЕВОДА
         // ------------------------------------------
-        val flowIndicator = LinearLayout(this).apply {
+        flowIndicator = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             val params = LinearLayout.LayoutParams(
@@ -626,11 +872,11 @@ class MainActivity : AppCompatActivity() {
         conversationContainer.addView(flowIndicator)
 
         // ------------------------------------------
-        // КАРТОЧКА 2: 🇷🇺 РУССКИЙ (Перевод)
+        // ЭКРАН 2: 🇷🇺 РУССКИЙ (Перевод)
         // ------------------------------------------
-        val russianCard = LinearLayout(this).apply {
+        russianCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundedDrawable(0xFF16231C.toInt(), 0xFF234431.toInt(), 1, 18f)
+            background = createRoundedDrawable(0xFF14201A.toInt(), 0xFF1E3A2B.toInt(), 1, 18f)
             setPadding(dp(14), dp(12), dp(14), dp(12))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -650,20 +896,37 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
         }
 
-        val russianFlagBadge = TextView(this).apply {
+        russianTitleText = TextView(this).apply {
             text = "🇷🇺 РУССКИЙ"
             textSize = 11.5f
             setTextColor(0xFF81C995.toInt())
             setTypeface(null, Typeface.BOLD)
-            background = createRoundedDrawable(0xFF1B3D2A.toInt(), cornerRadiusDp = 8f)
+            background = createRoundedDrawable(0xFF1A3828.toInt(), cornerRadiusDp = 8f)
             setPadding(dp(10), dp(4), dp(10), dp(4))
         }
-        russianHeader.addView(russianFlagBadge)
+        russianHeader.addView(russianTitleText)
 
         val russianHeaderSpacer = View(this).apply {
             layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
         }
         russianHeader.addView(russianHeaderSpacer)
+
+        expandRussianBtn = TextView(this).apply {
+            text = "⛶ Экран"
+            textSize = 11f
+            setTextColor(0xFF81C995.toInt())
+            background = createRoundedDrawable(0xFF1E3526.toInt(), 0xFF2D5539.toInt(), 1, 6f)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            isClickable = true
+            setOnClickListener {
+                if (currentMode == ScreenMode.RUSSIAN) {
+                    setScreenMode(ScreenMode.BOTH)
+                } else {
+                    setScreenMode(ScreenMode.RUSSIAN)
+                }
+            }
+        }
+        russianHeader.addView(expandRussianBtn)
 
         val copyRussianBtn = TextView(this).apply {
             text = "📋 Копировать"
@@ -671,6 +934,11 @@ class MainActivity : AppCompatActivity() {
             setTextColor(0xFFCCCCCC.toInt())
             background = createRoundedDrawable(0xFF23352A.toInt(), cornerRadiusDp = 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(dp(6), 0, 0, 0) }
+            layoutParams = params
             isClickable = true
             setOnClickListener {
                 val txt = russianTranscriptText.text.toString()
@@ -696,6 +964,8 @@ class MainActivity : AppCompatActivity() {
             isClickable = true
             setOnClickListener {
                 resetRussianCard()
+                PocketService.clearRussianSessionText()
+                Toast.makeText(this@MainActivity, "Русский перевод очищен", Toast.LENGTH_SHORT).show()
             }
         }
         russianHeader.addView(clearRussianBtn)
@@ -716,7 +986,7 @@ class MainActivity : AppCompatActivity() {
             textSize = 18.5f
             setTextColor(0xFF4A6B56.toInt())
             setTypeface(null, Typeface.BOLD)
-            setLineSpacing(dpF(5f), 1.22f)
+            setLineSpacing(dpF(5f), 1.25f)
         }
         russianScrollView.addView(russianTranscriptText)
         russianCard.addView(russianScrollView)
@@ -725,7 +995,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(conversationContainer)
 
         // ==========================================
-        // 4. Нижняя панель управления (Bottom Dock)
+        // 5. Нижняя панель управления (Bottom Dock)
         // ==========================================
         val dockLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL

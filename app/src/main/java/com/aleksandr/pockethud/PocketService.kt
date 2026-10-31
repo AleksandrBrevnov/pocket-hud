@@ -100,6 +100,7 @@ class PocketService : Service() {
         var onTelemetryUpdated: ((micAmp: Int, chunks: Long, responses: Long) -> Unit)? = null
 
         // Буферы текущей активной сессии для восстановления в UI при разблокировке экрана
+        private const val MAX_SESSION_BUILDER_LENGTH = 30000
         private val sessionItalianBuilder = StringBuilder()
         private val sessionRussianBuilder = StringBuilder()
 
@@ -108,6 +109,29 @@ class PocketService : Service() {
         fun clearSessionTexts() {
             synchronized(sessionItalianBuilder) { sessionItalianBuilder.setLength(0) }
             synchronized(sessionRussianBuilder) { sessionRussianBuilder.setLength(0) }
+        }
+        fun clearItalianSessionText() {
+            synchronized(sessionItalianBuilder) { sessionItalianBuilder.setLength(0) }
+        }
+        fun clearRussianSessionText() {
+            synchronized(sessionRussianBuilder) { sessionRussianBuilder.setLength(0) }
+        }
+
+        fun appendToSessionBuilder(builder: StringBuilder, text: String) {
+            synchronized(builder) {
+                if (builder.isNotEmpty() && !builder.endsWith(" ") && !text.startsWith(" ")) {
+                    builder.append(" ")
+                }
+                builder.append(text)
+                if (builder.length > MAX_SESSION_BUILDER_LENGTH) {
+                    val cutIndex = builder.indexOf(" ", builder.length - 20000)
+                    if (cutIndex != -1) {
+                        builder.delete(0, cutIndex + 1)
+                    } else {
+                        builder.delete(0, builder.length - 20000)
+                    }
+                }
+            }
         }
 
         @Volatile
@@ -131,7 +155,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.16\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.17\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -347,7 +371,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.16")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.17")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -419,7 +443,7 @@ class PocketService : Service() {
         val logFile = getLogFile(this)
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.16")
+            appendLine("Версия: v1.0.17")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Модель: models/gemini-3.8-live")
@@ -580,12 +604,14 @@ class PocketService : Service() {
                                     "4. Ignore background noise and street/cafe ambiance — focus on human voices. If someone speaks Russian, stay silent. Translate ONLY Italian speech into Russian.")
                     }))
                 })
-                put("inputAudioTranscription", JSONObject())
+                put("inputAudioTranscription", JSONObject().apply {
+                    put("languageCodes", JSONArray().put("it-IT"))
+                })
                 put("outputAudioTranscription", JSONObject())
             })
         }
         ws.send(setupJson.toString())
-        logEvent("SETUP_SENT", "model=models/gemini-3.8-live")
+        logEvent("SETUP_SENT", "model=models/gemini-3.8-live, lang=it-IT")
     }
 
     private fun handleServerMessage(jsonText: String) {
@@ -621,9 +647,10 @@ class PocketService : Service() {
                 }
             }
 
-            // 1. Распознанная итальянская речь (inputAudioTranscription / inputTranscription / userTurn)
+            // 1. Распознанная итальянская речь (inputAudioTranscription / inputTranscription / interimInputTranscription / userTurn)
             val inputObj = serverContent.optJSONObject("inputTranscription")
                 ?: serverContent.optJSONObject("inputAudioTranscription")
+                ?: serverContent.optJSONObject("interimInputTranscription")
             var inputText = inputObj?.optString("text", "") ?: ""
 
             // Fallback на userTurn при наличии
@@ -644,18 +671,14 @@ class PocketService : Service() {
                 lastRecognizedInput = inputText.trim()
                 Log.d(tag, "Распознан итальянский: $inputText")
                 logEvent("INPUT_IT:", "\"$lastRecognizedInput\"")
-                synchronized(sessionItalianBuilder) {
-                    if (sessionItalianBuilder.isNotEmpty() && !sessionItalianBuilder.endsWith(" ") && !inputText.startsWith(" ")) {
-                        sessionItalianBuilder.append(" ")
-                    }
-                    sessionItalianBuilder.append(inputText)
-                }
+                appendToSessionBuilder(sessionItalianBuilder, inputText)
                 onInputTextReceived?.invoke(inputText)
             }
 
-            // 2. Субтитры перевода (outputAudioTranscription / outputTranscription)
+            // 2. Субтитры перевода (outputAudioTranscription / outputTranscription / interimOutputTranscription)
             val outputObj = serverContent.optJSONObject("outputTranscription")
                 ?: serverContent.optJSONObject("outputAudioTranscription")
+                ?: serverContent.optJSONObject("interimOutputTranscription")
             val outputText = outputObj?.optString("text", "") ?: ""
             if (outputText.isNotEmpty()) {
                 serverTextChunksReceived++
@@ -672,12 +695,7 @@ class PocketService : Service() {
                     }
                 }
 
-                synchronized(sessionRussianBuilder) {
-                    if (sessionRussianBuilder.isNotEmpty() && !sessionRussianBuilder.endsWith(" ") && !outputText.startsWith(" ")) {
-                        sessionRussianBuilder.append(" ")
-                    }
-                    sessionRussianBuilder.append(outputText)
-                }
+                appendToSessionBuilder(sessionRussianBuilder, outputText)
 
                 updateOngoingNotification(outputText.trim(), recentTranslations.toString().trim())
                 onTextReceived?.invoke(outputText)
@@ -716,12 +734,7 @@ class PocketService : Service() {
                                 }
                             }
 
-                            synchronized(sessionRussianBuilder) {
-                                if (sessionRussianBuilder.isNotEmpty() && !sessionRussianBuilder.endsWith(" ") && !text.startsWith(" ")) {
-                                    sessionRussianBuilder.append(" ")
-                                }
-                                sessionRussianBuilder.append(text)
-                            }
+                            appendToSessionBuilder(sessionRussianBuilder, text)
 
                             updateOngoingNotification(text.trim(), recentTranslations.toString().trim())
                             onTextReceived?.invoke(text)
