@@ -55,22 +55,22 @@ class PocketService : Service() {
     private val audioSendQueue = LinkedBlockingQueue<ByteArray>(60)
     private val audioPlaybackQueue = LinkedBlockingQueue<ByteArray>()
 
-    // Телеметрия и сводка диагностики
-    private var chunksSent = 0L
-    private var bytesSent = 0L
-    private var micPeakAmplitude = 0 // 0..100%
-    private var sessionMaxAmplitude = 0
-    private var lastAudioReadResult = 0
-    private var audioReadErrors = 0L
-    private var serverMessagesReceived = 0L
-    private var serverAudioChunksReceived = 0L
-    private var serverTextChunksReceived = 0L
-    private var lastServerText = ""
-    private var lastRecognizedInput = ""
-    private var lastError: String? = null
-    private var connectionState = "DISCONNECTED"
-    private var activeAudioSource = "NONE"
-    private var serviceStartTime = 0L
+    // Телеметрия и сводка диагностики (Volatile для потокобезопасности между потоками mic, send, okhttp и UI)
+    @Volatile private var chunksSent = 0L
+    @Volatile private var bytesSent = 0L
+    @Volatile private var micPeakAmplitude = 0 // 0..100%
+    @Volatile private var sessionMaxAmplitude = 0
+    @Volatile private var lastAudioReadResult = 0
+    @Volatile private var audioReadErrors = 0L
+    @Volatile private var serverMessagesReceived = 0L
+    @Volatile private var serverAudioChunksReceived = 0L
+    @Volatile private var serverTextChunksReceived = 0L
+    @Volatile private var lastServerText = ""
+    @Volatile private var lastRecognizedInput = ""
+    @Volatile private var lastError: String? = null
+    @Volatile private var connectionState = "DISCONNECTED"
+    @Volatile private var activeAudioSource = "NONE"
+    @Volatile private var serviceStartTime = 0L
     private val recentTranslations = StringBuilder()
 
     private val logDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
@@ -101,6 +101,9 @@ class PocketService : Service() {
         @Volatile
         var currentInstance: PocketService? = null
 
+        @Volatile
+        var lastDiagnosticSnapshot: String = ""
+
         fun getLogFile(context: Context): File {
             val dir = context.getExternalFilesDir(null) ?: context.filesDir
             return File(dir, "pocket_hud_session.log")
@@ -108,10 +111,15 @@ class PocketService : Service() {
 
         fun getDiagnosticSummary(): String {
             val inst = currentInstance
-            if (inst == null) {
-                return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.13\nСтатус: СЕРВИС ОСТАНОВЛЕН\nПоследнее состояние: ${if (isServiceActive) "АКТИВЕН" else "НЕАКТИВЕН"}\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            if (inst != null) {
+                val snapshot = inst.buildDiagnosticSnapshot()
+                lastDiagnosticSnapshot = snapshot
+                return snapshot
             }
-            return inst.buildDiagnosticSnapshot()
+            if (lastDiagnosticSnapshot.isNotBlank()) {
+                return lastDiagnosticSnapshot
+            }
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.13\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -139,7 +147,7 @@ class PocketService : Service() {
         serviceStartTime = System.currentTimeMillis()
         connectionState = "STARTING"
 
-        logEvent("SERVICE_START", "isAudioMuted=$isAudioMuted")
+        logEvent("SERVICE_START", "(isAudioMuted=$isAudioMuted)")
 
         val notification = buildNotification("Карманный суфлёр активен (экран можно выключить)")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -152,6 +160,12 @@ class PocketService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+
+        // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
+        updateOngoingNotification(
+            "🔵 Подключение...",
+            "PocketHUD активен. Ожидание подключения к Gemini Live API..."
+        )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PocketHUD::WakeLock").apply {
@@ -173,8 +187,16 @@ class PocketService : Service() {
     fun logEvent(event: String, details: String = "") {
         try {
             val timestamp = logDateFormat.format(Date())
-            val line = if (details.isBlank()) "[$timestamp] $event\n" else "[$timestamp] $event: $details\n"
+            val line = if (details.isBlank()) "[$timestamp] $event\n" else "[$timestamp] $event $details\n"
             val file = getLogFile(this)
+
+            // Защита от переполнения: ротация при размере > 3 МБ
+            if (file.exists() && file.length() > 3 * 1024 * 1024L) {
+                val oldFile = File(file.parentFile, "pocket_hud_session.old.log")
+                if (oldFile.exists()) oldFile.delete()
+                file.renameTo(oldFile)
+            }
+
             file.appendText(line, Charsets.UTF_8)
         } catch (e: Exception) {
             Log.e(tag, "Ошибка записи лога: ${e.message}")
@@ -182,7 +204,7 @@ class PocketService : Service() {
     }
 
     fun applyMuteState(muted: Boolean) {
-        logEvent("MUTE_STATE_CHANGED", "isMuted=$muted")
+        logEvent("MUTE_STATE_CHANGED", "(isMuted=$muted)")
         if (muted) {
             audioPlaybackQueue.clear()
             try {
@@ -197,6 +219,16 @@ class PocketService : Service() {
             } catch (e: Exception) {
                 Log.e(tag, "Ошибка возобновления AudioTrack при включении звука: ${e.message}")
             }
+        }
+
+        // Обновляем текст постоянного сервиса при переключении звука
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            val modeStr = if (muted) "Карманный суфлёр (🔇 Режим только субтитров)" else "Карманный суфлёр (🔊 Звук в наушник)"
+            val updatedFg = buildNotification(modeStr)
+            nm?.notify(NOTIFICATION_ID, updatedFg)
+        } catch (e: Exception) {
+            Log.w(tag, "Ошибка обновления уведомления при смене mute: ${e.message}")
         }
     }
 
@@ -532,7 +564,7 @@ class PocketService : Service() {
                                     "Do not wait for long pauses or for the speaker to finish long sentences. " +
                                     "2. Output ONLY the Russian translation. Be concise, fast, and accurate. " +
                                     "3. NEVER converse, NEVER explain, NEVER reply in Italian, NEVER answer questions. Your ONLY job is instantaneous Italian-to-Russian translation. " +
-                                    "4. If you hear Russian speech or background noise, remain completely silent.")
+                                    "4. Ignore background noise and street/cafe ambiance — focus on human voices. If someone speaks Russian, stay silent. Translate ONLY Italian speech into Russian.")
                     }))
                 })
                 put("inputAudioTranscription", JSONObject())
@@ -550,8 +582,12 @@ class PocketService : Service() {
             if (root.has("setupComplete")) {
                 Log.d(tag, "Setup завершён! Запуск микрофона...")
                 connectionState = "READY (Streaming)"
-                logEvent("SETUP_COMPLETE", "mic=$activeAudioSource")
+                logEvent("SETUP_COMPLETE", "(model=gemini-3.8-live, mic=$activeAudioSource)")
                 onStatusChanged?.invoke("🟢 Соединение активно! Слушаю итальянскую речь...")
+                updateOngoingNotification(
+                    "🟢 Слушаю речь вокруг...",
+                    "PocketHUD готов к переводу. Слушаю итальянскую речь..."
+                )
                 startRecording()
                 return
             }
@@ -577,7 +613,7 @@ class PocketService : Service() {
             if (inputText.isNotEmpty()) {
                 lastRecognizedInput = inputText.trim()
                 Log.d(tag, "Распознан итальянский: $inputText")
-                logEvent("INPUT_IT", "\"$lastRecognizedInput\"")
+                logEvent("INPUT_IT:", "\"$lastRecognizedInput\"")
             }
 
             // Субтитры перевода (outputAudioTranscription)
@@ -585,10 +621,16 @@ class PocketService : Service() {
             if (outputText.isNotEmpty()) {
                 serverTextChunksReceived++
                 lastServerText = outputText.trim()
-                logEvent("TRANSLATION", "\"$lastServerText\" (IT: \"$lastRecognizedInput\")")
+                val itPrompt = if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
+                logEvent("TRANSLATION:", "IT=\"$itPrompt\" -> RU=\"$lastServerText\"")
                 recentTranslations.append(outputText).append(" ")
                 if (recentTranslations.length > 600) {
-                    recentTranslations.delete(0, recentTranslations.length - 350)
+                    val cutIndex = recentTranslations.indexOf(' ', recentTranslations.length - 350)
+                    if (cutIndex != -1) {
+                        recentTranslations.delete(0, cutIndex + 1)
+                    } else {
+                        recentTranslations.delete(0, recentTranslations.length - 350)
+                    }
                 }
 
                 updateOngoingNotification(outputText.trim(), recentTranslations.toString().trim())
@@ -617,10 +659,15 @@ class PocketService : Service() {
                         if (text.isNotEmpty()) {
                             serverTextChunksReceived++
                             lastServerText = text.trim()
-                            logEvent("TRANSLATION_PART", "\"$lastServerText\"")
+                            logEvent("TRANSLATION_PART:", "RU=\"$lastServerText\"")
                             recentTranslations.append(text).append(" ")
                             if (recentTranslations.length > 600) {
-                                recentTranslations.delete(0, recentTranslations.length - 350)
+                                val cutIndex = recentTranslations.indexOf(' ', recentTranslations.length - 350)
+                                if (cutIndex != -1) {
+                                    recentTranslations.delete(0, cutIndex + 1)
+                                } else {
+                                    recentTranslations.delete(0, recentTranslations.length - 350)
+                                }
                             }
 
                             updateOngoingNotification(text.trim(), recentTranslations.toString().trim())
@@ -803,7 +850,7 @@ class PocketService : Service() {
                         lastLogStreamEmit = now
                         logEvent(
                             "CHUNK_STREAMING",
-                            "chunksSent=$chunksSent, bytesSent=$bytesSent, micPeak=$micPeakAmplitude%, queueSize=${audioSendQueue.size}"
+                            "(chunks=$chunksSent, mic_peak=$micPeakAmplitude%)"
                         )
                     }
                 } catch (e: InterruptedException) {
@@ -824,10 +871,14 @@ class PocketService : Service() {
         connectionState = "STOPPED"
 
         val uptimeSec = if (serviceStartTime > 0) (System.currentTimeMillis() - serviceStartTime) / 1000 else 0
+        val totalResp = serverAudioChunksReceived + serverTextChunksReceived
         logEvent(
             "SERVICE_STOP",
-            "uptime=${uptimeSec}s, totalChunks=$chunksSent, totalBytes=$bytesSent, audioResp=$serverAudioChunksReceived, textResp=$serverTextChunksReceived, lastError=${lastError ?: "none"}"
+            "(uptime=${uptimeSec}s, total_chunks=$chunksSent, total_resp=$totalResp)"
         )
+
+        // Сохраняем полный финальный снимок диагностики перед обнулением instance
+        lastDiagnosticSnapshot = buildDiagnosticSnapshot()
 
         restoreAudioRouting()
 

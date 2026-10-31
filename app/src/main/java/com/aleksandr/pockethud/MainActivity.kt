@@ -15,6 +15,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -128,6 +129,19 @@ class MainActivity : AppCompatActivity() {
 
     private fun shareLogFile() {
         val logFile = PocketService.getLogFile(this)
+        
+        // Если файла нет или он пуст, записываем текущую сводку диагностики
+        if (!logFile.exists() || logFile.length() == 0L) {
+            val summary = PocketService.getDiagnosticSummary()
+            try {
+                logFile.writeText("=== POCKET HUD SESSION LOG ===\n$summary\n", Charsets.UTF_8)
+            } catch (e: Exception) {
+                Log.w("PocketHUD", "Не удалось записать начальную сводку в лог: ${e.message}")
+            }
+        } else {
+            PocketService.currentInstance?.logEvent("EXPORT_LOG_CLICKED")
+        }
+
         if (!logFile.exists() || logFile.length() == 0L) {
             Toast.makeText(this, "Файл лога пока пуст. Запустите суфлёр!", Toast.LENGTH_SHORT).show()
             return
@@ -142,6 +156,7 @@ class MainActivity : AppCompatActivity() {
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
                 putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = android.content.ClipData.newRawUri("PocketHUD Session Log", uri)
                 putExtra(Intent.EXTRA_SUBJECT, "PocketHUD Session Log")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
@@ -176,7 +191,11 @@ class MainActivity : AppCompatActivity() {
                 if (subtitlesText.text.startsWith("Ожидание") || subtitlesText.text.startsWith("Здесь")) {
                     subtitlesText.text = text
                 } else {
-                    subtitlesText.append(" " + text)
+                    if (text.startsWith(" ") || subtitlesText.text.endsWith(" ")) {
+                        subtitlesText.append(text)
+                    } else {
+                        subtitlesText.append(" $text")
+                    }
                 }
                 scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
             }
@@ -303,12 +322,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         copySummaryBtn = Button(this).apply {
-            text = "📋 СВОДКА"
+            text = "📋 СКОПИРОВАТЬ СВОДКУ"
             setTextColor(0xFFFFFFFF.toInt())
             setBackgroundColor(0xFF333333.toInt())
-            textSize = 12f
+            textSize = 11.5f
             setTypeface(null, Typeface.BOLD)
-            setPadding(12, 16, 12, 16)
+            setPadding(8, 16, 8, 16)
         }
         val copySummaryParams = LinearLayout.LayoutParams(
             0,
@@ -318,12 +337,12 @@ class MainActivity : AppCompatActivity() {
         actionsRow.addView(copySummaryBtn, copySummaryParams)
 
         shareLogBtn = Button(this).apply {
-            text = "📤 ПОДЕЛИТЬСЯ ЛОГОМ"
+            text = "📤 ПОДЕЛИТЬСЯ ЛОГОМ (ФАЙЛ)"
             setTextColor(0xFFFFFFFF.toInt())
             setBackgroundColor(0xFF2E7D32.toInt())
-            textSize = 12f
+            textSize = 11.5f
             setTypeface(null, Typeface.BOLD)
-            setPadding(12, 16, 12, 16)
+            setPadding(8, 16, 8, 16)
         }
         val shareLogParams = LinearLayout.LayoutParams(
             0,
