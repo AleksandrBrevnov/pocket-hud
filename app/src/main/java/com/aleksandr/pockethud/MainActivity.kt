@@ -69,7 +69,9 @@ class MainActivity : AppCompatActivity() {
         val container: View,
         val italianContainer: View,
         val italianText: TextView,
-        val russianText: TextView
+        val russianText: TextView,
+        val ruBadge: TextView,
+        val ruTimeView: TextView
     )
     private val turnViewHolders = mutableListOf<TurnViewHolder>()
 
@@ -416,6 +418,18 @@ class MainActivity : AppCompatActivity() {
     private fun updateDialogueOriginalVisibility() {
         for (holder in turnViewHolders) {
             holder.italianContainer.visibility = if (showOriginalText) View.VISIBLE else View.GONE
+            holder.ruBadge.text = if (showOriginalText) "➔ 🇷🇺 ПЕРЕВОД" else "🇷🇺 ПЕРЕВОД"
+            holder.ruTimeView.visibility = if (showOriginalText) View.GONE else View.VISIBLE
+        }
+        if (::dialogueTitleText.isInitialized) {
+            dialogueTitleText.text = if (showOriginalText) "💬 ДИАЛОГ (IT / EN ➔ RU)" else "💬 ДИАЛОГ (ТОЛЬКО ПЕРЕВОД)"
+        }
+        if (::dialogueEmptyPlaceholder.isInitialized && dialogueFeedLayout.childCount == 1 && dialogueEmptyPlaceholder.visibility == View.VISIBLE) {
+            dialogueEmptyPlaceholder.text = if (showOriginalText) {
+                "💬 Режим диалога (Google Translate)\n\nГоворите или слушайте речь на итальянском/английском языке.\nРеплики и синхронный перевод появятся здесь последовательно в единой прокручиваемой ленте."
+            } else {
+                "💬 Режим диалога (Только перевод)\n\nОригинал речи скрыт по настройке Google Translate.\nЗдесь появятся только карточки русского перевода в реальном времени."
+            }
         }
         if (::dialogueScrollView.isInitialized) {
             dialogueScrollView.post { dialogueScrollView.fullScroll(View.FOCUS_DOWN) }
@@ -423,15 +437,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateShowOriginalBadge(isChecked: Boolean) {
-        if (!::showOriginalBadge.isInitialized) return
-        if (isChecked) {
-            showOriginalBadge.text = "🇮🇹 IT/EN + 🇷🇺 RU"
-            showOriginalBadge.setTextColor(0xFF8AB4F8.toInt())
-            showOriginalBadge.background = createRoundedDrawable(0xFF1E2838.toInt(), 0xFF2A3850.toInt(), 1, 6f)
-        } else {
-            showOriginalBadge.text = "🇷🇺 ТОЛЬКО ПЕРЕВОД"
-            showOriginalBadge.setTextColor(0xFF81C995.toInt())
-            showOriginalBadge.background = createRoundedDrawable(0xFF162A1F.toInt(), 0xFF1E402B.toInt(), 1, 6f)
+        if (::showOriginalBadge.isInitialized) {
+            if (isChecked) {
+                showOriginalBadge.text = "🇮🇹 IT/EN + 🇷🇺 RU"
+                showOriginalBadge.setTextColor(0xFF8AB4F8.toInt())
+                showOriginalBadge.background = createRoundedDrawable(0xFF1E2838.toInt(), 0xFF2A3850.toInt(), 1, 6f)
+            } else {
+                showOriginalBadge.text = "🇷🇺 ТОЛЬКО ПЕРЕВОД"
+                showOriginalBadge.setTextColor(0xFF81C995.toInt())
+                showOriginalBadge.background = createRoundedDrawable(0xFF162A1F.toInt(), 0xFF1E402B.toInt(), 1, 6f)
+            }
+        }
+        if (::dialogueTitleText.isInitialized) {
+            dialogueTitleText.text = if (isChecked) "💬 ДИАЛОГ (IT / EN ➔ RU)" else "💬 ДИАЛОГ (ТОЛЬКО ПЕРЕВОД)"
         }
     }
 
@@ -590,6 +608,8 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
         }
 
+        val timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(turn.timestamp))
+
         // 1. Карточка речи собеседника (итальянский / английский)
         val itBubble = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -626,7 +646,6 @@ class MainActivity : AppCompatActivity() {
         }
         itHeader.addView(itSpacer)
 
-        val timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(turn.timestamp))
         val timeView = TextView(this).apply {
             text = timeStr
             textSize = 10f
@@ -667,12 +686,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         val ruBadge = TextView(this).apply {
-            text = "➔ 🇷🇺 ПЕРЕВОД"
+            text = if (showOriginalText) "➔ 🇷🇺 ПЕРЕВОД" else "🇷🇺 ПЕРЕВОД"
             textSize = 11f
             setTextColor(0xFF81C995.toInt())
             setTypeface(null, Typeface.BOLD)
         }
         ruHeader.addView(ruBadge)
+
+        val ruSpacer = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+        }
+        ruHeader.addView(ruSpacer)
+
+        val ruTimeView = TextView(this).apply {
+            text = timeStr
+            textSize = 10f
+            setTextColor(0xFF7B889B.toInt())
+            visibility = if (showOriginalText) View.GONE else View.VISIBLE
+        }
+        ruHeader.addView(ruTimeView)
         ruBubble.addView(ruHeader)
 
         val isRuBlank = turn.russianText.isBlank()
@@ -686,7 +718,7 @@ class MainActivity : AppCompatActivity() {
         ruBubble.addView(ruTv)
         container.addView(ruBubble)
 
-        return TurnViewHolder(container, itBubble, itTv, ruTv)
+        return TurnViewHolder(container, itBubble, itTv, ruTv, ruBadge, ruTimeView)
     }
 
     private fun onDialogueUpdated(turnIndex: Int, turn: DialogueTurn, isNew: Boolean) {
@@ -699,10 +731,16 @@ class MainActivity : AppCompatActivity() {
                 val holder = createTurnViewHolder(turn)
                 turnViewHolders.add(holder)
                 dialogueFeedLayout.addView(holder.container)
+                while (turnViewHolders.size > 200) {
+                    val oldest = turnViewHolders.removeAt(0)
+                    dialogueFeedLayout.removeView(oldest.container)
+                }
                 dialogueScrollView.post { dialogueScrollView.fullScroll(View.FOCUS_DOWN) }
             } else {
                 val holder = turnViewHolders[turnIndex]
                 holder.italianContainer.visibility = if (showOriginalText) View.VISIBLE else View.GONE
+                holder.ruBadge.text = if (showOriginalText) "➔ 🇷🇺 ПЕРЕВОД" else "🇷🇺 ПЕРЕВОД"
+                holder.ruTimeView.visibility = if (showOriginalText) View.GONE else View.VISIBLE
                 if (turn.italianText.isNotBlank()) {
                     holder.italianText.text = turn.italianText
                 }
@@ -812,7 +850,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.20"
+            text = "v1.0.21"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
@@ -1110,19 +1148,32 @@ class MainActivity : AppCompatActivity() {
                     return@setOnClickListener
                 }
                 val sb = StringBuilder()
-                sb.appendLine("=== POCKET HUD ДИАЛОГ ===")
-                for (t in turns) {
-                    if (showOriginalText && t.italianText.isNotBlank()) {
-                        sb.appendLine("🇮🇹 ${t.italianText}")
+                if (showOriginalText) {
+                    sb.appendLine("=== POCKET HUD ДИАЛОГ ===")
+                    for (t in turns) {
+                        if (t.italianText.isNotBlank()) {
+                            sb.appendLine("🇮🇹 ${t.italianText}")
+                        }
+                        if (t.russianText.isNotBlank()) {
+                            sb.appendLine("➔ 🇷🇺 ${t.russianText}")
+                        }
+                        sb.appendLine()
                     }
-                    if (t.russianText.isNotBlank()) {
-                        sb.appendLine(if (showOriginalText) "➔ 🇷🇺 ${t.russianText}" else t.russianText)
+                    sb.appendLine("=========================")
+                } else {
+                    val ruTurns = turns.filter { it.russianText.isNotBlank() }
+                    if (ruTurns.isEmpty()) {
+                        Toast.makeText(this@MainActivity, "Переводы ещё не получены", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
                     }
-                    sb.appendLine()
+                    sb.appendLine("=== POCKET HUD ПЕРЕВОД ===")
+                    for (t in ruTurns) {
+                        sb.appendLine(t.russianText)
+                    }
+                    sb.appendLine("=========================")
                 }
-                sb.appendLine("=========================")
                 copyToClipboard("PocketHUD Dialogue", sb.toString().trim())
-                Toast.makeText(this@MainActivity, "История диалога скопирована", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, if (showOriginalText) "История диалога скопирована" else "Русский перевод диалога скопирован", Toast.LENGTH_SHORT).show()
             }
         }
         dialogueHeader.addView(copyDialogueBtn)
@@ -1155,11 +1206,17 @@ class MainActivity : AppCompatActivity() {
         val dialogueOptionsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            background = createRoundedDrawable(0xFF1B202C.toInt(), 0xFF2A3448.toInt(), 1, 10f)
+            setPadding(dp(10), dp(6), dp(10), dp(6))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { setMargins(0, 0, 0, dp(8)) }
             layoutParams = params
+            isClickable = true
+            setOnClickListener {
+                showOriginalCheckBox.isChecked = !showOriginalCheckBox.isChecked
+            }
         }
 
         showOriginalCheckBox = MaterialCheckBox(this).apply {
@@ -1190,7 +1247,7 @@ class MainActivity : AppCompatActivity() {
         showOriginalBadge = TextView(this).apply {
             textSize = 10f
             setTypeface(null, Typeface.BOLD)
-            setPadding(dp(8), dp(3), dp(8), dp(3))
+            setPadding(dp(8), dp(4), dp(8), dp(4))
             isClickable = true
             setOnClickListener {
                 showOriginalCheckBox.isChecked = !showOriginalCheckBox.isChecked
