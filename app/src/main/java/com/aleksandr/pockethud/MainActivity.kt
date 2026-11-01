@@ -101,7 +101,7 @@ class MainActivity : AppCompatActivity() {
     private val keyShowOriginalText = "show_original_text"
 
     private var currentMode = ScreenMode.DIALOGUE
-    private var currentMicSource = MicSource.BLUETOOTH
+    private var currentMicSource = MicSource.SMARTPHONE
     private var showOriginalText = true
 
     companion object {
@@ -126,11 +126,11 @@ class MainActivity : AppCompatActivity() {
             settingsToggleBtn.text = "⚙️ API Ключ ▴"
         }
 
-        val savedMicStr = prefs.getString(keyMicSource, MicSource.BLUETOOTH.name) ?: MicSource.BLUETOOTH.name
+        val savedMicStr = prefs.getString(keyMicSource, MicSource.SMARTPHONE.name) ?: MicSource.SMARTPHONE.name
         currentMicSource = try {
             MicSource.valueOf(savedMicStr)
         } catch (e: Exception) {
-            MicSource.BLUETOOTH
+            MicSource.SMARTPHONE
         }
         PocketService.selectedMicSource = currentMicSource
         updateMicSourceStyles()
@@ -480,6 +480,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun appendItalianText(text: String) {
+        val wasAtBottom = !italianScrollView.canScrollVertically(1)
         val current = italianTranscriptText.text.toString()
         if (current == IT_PLACEHOLDER || current.startsWith("Слушаю") || current.startsWith("Говорите") || current.startsWith("Здесь")) {
             italianTranscriptText.text = text
@@ -498,10 +499,13 @@ class MainActivity : AppCompatActivity() {
                 italianTranscriptText.text = fullStr.substring(cutIndex + 1)
             }
         }
-        italianScrollView.post { italianScrollView.fullScroll(View.FOCUS_DOWN) }
+        if (wasAtBottom) {
+            italianScrollView.post { italianScrollView.fullScroll(View.FOCUS_DOWN) }
+        }
     }
 
     private fun appendRussianText(text: String) {
+        val wasAtBottom = !russianScrollView.canScrollVertically(1)
         val current = russianTranscriptText.text.toString()
         if (current == RU_PLACEHOLDER || current.startsWith("Ожидание") || current.startsWith("Здесь")) {
             russianTranscriptText.text = text
@@ -520,7 +524,9 @@ class MainActivity : AppCompatActivity() {
                 russianTranscriptText.text = fullStr.substring(cutIndex + 1)
             }
         }
-        russianScrollView.post { russianScrollView.fullScroll(View.FOCUS_DOWN) }
+        if (wasAtBottom) {
+            russianScrollView.post { russianScrollView.fullScroll(View.FOCUS_DOWN) }
+        }
     }
 
     private fun shareLogFile() {
@@ -727,6 +733,9 @@ class MainActivity : AppCompatActivity() {
                 dialogueEmptyPlaceholder.visibility = View.GONE
             }
 
+            // Sticky scroll: Autoscroll only if user was already at the bottom
+            val wasAtBottom = !dialogueScrollView.canScrollVertically(1)
+
             if (isNew || turnIndex >= turnViewHolders.size) {
                 val holder = createTurnViewHolder(turn)
                 turnViewHolders.add(holder)
@@ -735,7 +744,6 @@ class MainActivity : AppCompatActivity() {
                     val oldest = turnViewHolders.removeAt(0)
                     dialogueFeedLayout.removeView(oldest.container)
                 }
-                dialogueScrollView.post { dialogueScrollView.fullScroll(View.FOCUS_DOWN) }
             } else {
                 val holder = turnViewHolders[turnIndex]
                 holder.italianContainer.visibility = if (showOriginalText) View.VISIBLE else View.GONE
@@ -751,6 +759,9 @@ class MainActivity : AppCompatActivity() {
                     holder.russianText.text = "⏳ Ожидание перевода..."
                     holder.russianText.setTextColor(0xFF4A6B56.toInt())
                 }
+            }
+
+            if (wasAtBottom) {
                 dialogueScrollView.post { dialogueScrollView.fullScroll(View.FOCUS_DOWN) }
             }
         }
@@ -850,7 +861,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.21"
+            text = "v1.0.22"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)

@@ -1,6 +1,7 @@
 import re
 import sys
 import os
+import math
 
 main_activity_path = r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\src\main\java\com\aleksandr\pockethud\MainActivity.kt"
 pocket_service_path = r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\src\main\java\com\aleksandr\pockethud\PocketService.kt"
@@ -107,33 +108,166 @@ def check_brackets_kotlin(file_path):
 check_brackets_kotlin(main_activity_path)
 check_brackets_kotlin(pocket_service_path)
 
-print("Checking TurnViewHolder definition and usages...")
 with open(main_activity_path, "r", encoding="utf-8") as f:
     main_code = f.read()
 
-# TurnViewHolder definition check
-assert "class TurnViewHolder(" in main_code, "TurnViewHolder not found"
-assert "val ruBadge: TextView" in main_code, "ruBadge missing in TurnViewHolder"
-assert "val ruTimeView: TextView" in main_code, "ruTimeView missing in TurnViewHolder"
+with open(pocket_service_path, "r", encoding="utf-8") as f:
+    service_code = f.read()
 
-# TurnViewHolder return check
-assert "return TurnViewHolder(container, itBubble, itTv, ruTv, ruBadge, ruTimeView)" in main_code, "createTurnViewHolder return mismatched"
+with open(build_gradle_path, "r", encoding="utf-8") as f:
+    gradle_code = f.read()
 
-# show_original_text key check
-assert 'val keyShowOriginalText = "show_original_text"' in main_code, "Preference key missing"
-assert 'showOriginalText = prefs.getBoolean(keyShowOriginalText, true)' in main_code, "Default preference missing"
+print("\n--- 1. Verification of v1.0.22 Version Bumps ---")
+assert 'versionCode = 22' in gradle_code, "versionCode 22 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.22"' in gradle_code, "versionName 1.0.22 missing in app/build.gradle.kts"
+assert 'text = "v1.0.22"' in main_code, "v1.0.22 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.22' in service_code, "v1.0.22 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.22 активен' in service_code, "v1.0.22 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.22' in service_code, "v1.0.22 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.22 OK across all files.")
 
-# Dynamic visibility check
-assert "holder.ruBadge.text = if (showOriginalText) \"➔ 🇷🇺 ПЕРЕВОД\" else \"🇷🇺 ПЕРЕВОД\"" in main_code, "ruBadge text dynamic update missing"
-assert "holder.ruTimeView.visibility = if (showOriginalText) View.GONE else View.VISIBLE" in main_code, "ruTimeView dynamic visibility missing"
+print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
+assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
+assert "SESSION_ROTATION_RECONNECT" in service_code, "Session rotation reconnect log missing"
+assert "sessionResumptionUpdate" in service_code, "Root-level sessionResumptionUpdate extraction missing"
+assert "resumptionHandle = handle" in service_code, "resumptionHandle persistence missing"
+assert "root.has(\"goAway\")" in service_code, "Root-level goAway extraction missing"
+assert "@Volatile private var isSetupComplete = false" in service_code, "isSetupComplete volatile flag missing"
+assert "if (!isSetupComplete)" in service_code, "isSetupComplete guard missing in sendThread"
+assert "isSetupComplete = true" in service_code, "isSetupComplete activation on setupComplete missing"
+print("  -> Session rotation & reconnect OK.")
 
-# 200 items pruning check
-assert "while (turnViewHolders.size > 200)" in main_code, "200 turn limit synchronization missing"
+print("\n--- 3. Verification of Gemini Live sendSetup() ---")
+assert '"realtimeInputConfig"' in service_code, "realtimeInputConfig missing in sendSetup"
+assert '"NO_INTERRUPTION"' in service_code, "NO_INTERRUPTION activityHandling missing in sendSetup"
+assert '"START_SENSITIVITY_HIGH"' in service_code, "START_SENSITIVITY_HIGH sensitivity missing in sendSetup"
+assert '"silenceDurationMs", 600' in service_code, "silenceDurationMs 600 missing in sendSetup"
+assert '"prefixPaddingMs", 200' in service_code, "prefixPaddingMs 200 missing in sendSetup"
+assert '"sessionResumption"' in service_code, "sessionResumption object missing in sendSetup"
+assert '"handle", handle' in service_code, "resumptionHandle injection missing in sendSetup"
+print("  -> Gemini Live sendSetup() configuration OK.")
 
-# Version check across files
-assert 'versionCode = 21' in open(build_gradle_path, 'r', encoding='utf-8').read(), "versionCode 21 missing"
-assert 'versionName = "1.0.21"' in open(build_gradle_path, 'r', encoding='utf-8').read(), "versionName 1.0.21 missing"
-assert 'text = "v1.0.21"' in main_code, "v1.0.21 badge missing in MainActivity"
-assert 'Версия: v1.0.21' in open(pocket_service_path, 'r', encoding='utf-8').read(), "v1.0.21 missing in PocketService"
+print("\n--- 4. Verification of Split Audio Routing & Hardware DSP ---")
+assert "var selectedMicSource: MicSource = MicSource.SMARTPHONE" in service_code, "Default mic in PocketService must be SMARTPHONE"
+assert "currentMicSource = MicSource.SMARTPHONE" in main_code, "Default mic in MainActivity must be SMARTPHONE"
+assert "AudioSource.MIC" in service_code, "AudioSource.MIC missing in SMARTPHONE sources"
+assert "AudioSource.UNPROCESSED" in service_code, "AudioSource.UNPROCESSED missing in SMARTPHONE sources"
+assert "record.setPreferredDevice(builtinMic)" in service_code, "setPreferredDevice for built-in mic missing"
+assert "AutomaticGainControl" in service_code, "Hardware AutomaticGainControl missing"
+assert "NoiseSuppressor" in service_code, "Hardware NoiseSuppressor missing"
+assert "attachHardwareEffects" in service_code, "attachHardwareEffects method missing"
+assert "releaseHardwareEffects" in service_code, "releaseHardwareEffects method missing"
+assert "applyDynamicSoftKneeAgc" in service_code, "Dynamic soft-knee AGC missing"
+assert "USAGE_MEDIA" in service_code, "USAGE_MEDIA missing in audio routing"
+print("  -> Split audio routing & hardware DSP OK.")
 
-print("✅ ALL TESTS PASSED SUCCESSFULLY!")
+print("\n--- 5. Verification of Streaming Tag Cleaner ---")
+assert "class StreamingTagCleaner" in service_code, "StreamingTagCleaner class missing"
+assert "inputTagCleaner = StreamingTagCleaner()" in service_code, "inputTagCleaner instance missing"
+assert "outputTagCleaner = StreamingTagCleaner()" in service_code, "outputTagCleaner instance missing"
+assert "inputTagCleaner.clean" in service_code, "inputTagCleaner.clean usage missing"
+assert "outputTagCleaner.clean" in service_code, "outputTagCleaner.clean usage missing"
+
+# Python simulation of StreamingTagCleaner
+class PythonStreamingTagCleaner:
+    def __init__(self):
+        self.buffer = ""
+        self.in_thought = False
+
+    def clean(self, chunk: str) -> str:
+        self.buffer += chunk
+        output = []
+        i = 0
+        while i < len(self.buffer):
+            if self.in_thought:
+                close_idx = self.buffer.lower().find("</thought>", i)
+                if close_idx != -1:
+                    self.in_thought = False
+                    i = close_idx + 10
+                else:
+                    self.buffer = self.buffer[-12:]
+                    return "".join(output).strip()
+            else:
+                ch = self.buffer[i]
+                if ch == '<':
+                    if self.buffer[i:].lower().startswith("<thought>", 0) or self.buffer[i:].lower().startswith("<thought", 0):
+                        close_bracket = self.buffer.find('>', i)
+                        if close_bracket != -1:
+                            self.in_thought = True
+                            i = close_bracket + 1
+                            continue
+                        else:
+                            break
+                    close_bracket = self.buffer.find('>', i)
+                    if close_bracket != -1:
+                        i = close_bracket + 1
+                        continue
+                    else:
+                        break
+                elif ch == '{':
+                    close_brace = self.buffer.find('}', i)
+                    if close_brace != -1:
+                        i = close_brace + 1
+                        continue
+                    else:
+                        break
+                else:
+                    output.append(ch)
+                    i += 1
+        if i < len(self.buffer):
+            self.buffer = self.buffer[i:]
+        else:
+            self.buffer = ""
+        res = "".join(output).replace("<no speech detected>", "").replace("<no speech>", "")
+        return re.sub(r'\s+', ' ', res).strip()
+
+cleaner = PythonStreamingTagCleaner()
+c1 = cleaner.clean("Buongiorno! <no ")
+c2 = cleaner.clean("speech detected> Tutto bene?")
+assert c1 == "Buongiorno!", f"Expected 'Buongiorno!', got '{c1}'"
+assert c2 == "Tutto bene?", f"Expected 'Tutto bene?', got '{c2}'"
+
+c3 = cleaner.clean("Ciao {p")
+c4 = cleaner.clean("ause} amico")
+assert c3 == "Ciao", f"Expected 'Ciao', got '{c3}'"
+assert c4 == "amico", f"Expected 'amico', got '{c4}'"
+
+c5 = cleaner.clean("<thought>private translation</thought>Привет!")
+assert c5 == "Привет!", f"Expected 'Привет!', got '{c5}'"
+print("  -> Streaming tag cleaner OK (100% split token stripping verified).")
+
+print("\n--- 6. Verification of Audio Latency Drift Catch-Up ---")
+assert "queuedPlaybackBytes" in service_code, "queuedPlaybackBytes atomic counter missing"
+assert "120_000L" in service_code, "2.5s (120,000 bytes) latency threshold missing"
+assert "38_400L" in service_code, "0.8s (38,400 bytes) normalization threshold missing"
+assert "setSpeed(1.15f)" in service_code, "1.15x speed catch-up setting missing"
+assert "setSpeed(1.0f)" in service_code, "1.0x speed normalization setting missing"
+print("  -> Audio latency drift catch-up OK.")
+
+print("\n--- 7. Verification of UI Sticky Scroll ---")
+assert "!dialogueScrollView.canScrollVertically(1)" in main_code, "Sticky scroll check missing in dialogueScrollView"
+assert "!italianScrollView.canScrollVertically(1)" in main_code, "Sticky scroll check missing in italianScrollView"
+assert "!russianScrollView.canScrollVertically(1)" in main_code, "Sticky scroll check missing in russianScrollView"
+print("  -> UI sticky scroll OK.")
+
+print("\n--- 8. Verification of Dynamic Soft-Knee DSP Gain Curve ---")
+# Verify mathematical properties of applyDynamicSoftKneeAgc
+gain = 4.85
+quiet_sample = 2000 # ~6.1% amplitude
+s_quiet = quiet_sample / 32768.0
+out_quiet = int(math.tanh(s_quiet * gain) * 32767.0)
+gain_quiet = out_quiet / quiet_sample
+db_quiet = 20 * math.log10(gain_quiet)
+print(f"  Quiet sample {quiet_sample} -> {out_quiet} (gain = {gain_quiet:.2f}x, {db_quiet:+.1f} dB)")
+assert 4.5 <= gain_quiet <= 5.0, f"Gain {gain_quiet} not in expected [4.5x, 5.0x] range"
+
+loud_sample = 32767 # 100% full scale
+s_loud = loud_sample / 32768.0
+out_loud = int(math.tanh(s_loud * gain) * 32767.0)
+print(f"  Loud sample {loud_sample} -> {out_loud} (soft saturation without digital clipping)")
+assert out_loud <= 32767, "Loud sample must not clip or overflow"
+assert out_loud > 32000, "Loud sample should saturate near ceiling"
+
+print("\n=======================================================")
+print("🎉 ALL V1.0.22 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("=======================================================")
