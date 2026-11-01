@@ -47,6 +47,13 @@ enum class MicSource {
     BLUETOOTH   // 🎧 Микрофон гарнитуры (VOICE_COMMUNICATION, Bluetooth SCO)
 }
 
+data class DialogueTurn(
+    val id: Long = System.currentTimeMillis(),
+    var italianText: String = "",
+    var russianText: String = "",
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 class PocketService : Service() {
 
     private val tag = "PocketHUD"
@@ -89,10 +96,13 @@ class PocketService : Service() {
     private val maxReconnectAttempts = 5
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // Троттлинг обновлений уведомлений (не чаще 1 раза в 850 мс для защиты Binder IPC)
+    // Строгий троттлинг обновлений уведомлений для часов Xiaomi Watch 2 (Wear OS 5):
+    // не чаще 1 раза в 2.5–3.0 секунды или на границах предложений (. ! ?)
     @Volatile private var lastNotificationTime = 0L
     @Volatile private var pendingNotificationLatest: String? = null
     @Volatile private var pendingNotificationHistory: String? = null
+    @Volatile private var lastPostedSubtitleText: String = ""
+    @Volatile private var lastPostedSubtitleHistory: String = ""
     private val notificationFlushRunnable = Runnable { flushPendingNotification() }
 
     private val tagRegex = Regex("""<thought>.*?</thought>|<[^>]+>|\{[^}]+\}""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
@@ -129,7 +139,23 @@ class PocketService : Service() {
         var onStatusChanged: ((String) -> Unit)? = null
         var onTextReceived: ((String) -> Unit)? = null
         var onInputTextReceived: ((String) -> Unit)? = null
+        var onDialogueTurnUpdated: ((turnIndex: Int, turn: DialogueTurn, isNew: Boolean) -> Unit)? = null
         var onTelemetryUpdated: ((micAmp: Int, chunks: Long, responses: Long) -> Unit)? = null
+
+        // Диалог текущей сессии (Google Translate Conversation Mode)
+        private val sessionDialogueTurns = ArrayList<DialogueTurn>()
+
+        fun getSessionDialogueTurns(): List<DialogueTurn> {
+            synchronized(sessionDialogueTurns) {
+                return sessionDialogueTurns.map { it.copy() }
+            }
+        }
+
+        fun clearDialogueTurns() {
+            synchronized(sessionDialogueTurns) {
+                sessionDialogueTurns.clear()
+            }
+        }
 
         // Буферы текущей активной сессии для восстановления в UI при разблокировке экрана
         private const val MAX_SESSION_BUILDER_LENGTH = 30000
@@ -141,6 +167,7 @@ class PocketService : Service() {
         fun clearSessionTexts() {
             synchronized(sessionItalianBuilder) { sessionItalianBuilder.setLength(0) }
             synchronized(sessionRussianBuilder) { sessionRussianBuilder.setLength(0) }
+            synchronized(sessionDialogueTurns) { sessionDialogueTurns.clear() }
         }
         fun clearItalianSessionText() {
             synchronized(sessionItalianBuilder) { sessionItalianBuilder.setLength(0) }
@@ -187,7 +214,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.18\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.19\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -244,7 +271,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.18 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.19 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -379,22 +406,136 @@ class PocketService : Service() {
     private fun scheduleNotificationUpdate(latestText: String, fullHistory: String) {
         pendingNotificationLatest = latestText
         pendingNotificationHistory = fullHistory
+
         val now = System.currentTimeMillis()
         val elapsed = now - lastNotificationTime
-        if (elapsed >= 850L) {
+
+        val trimmed = latestText.trim()
+        val isSentenceBoundary = trimmed.isNotEmpty() && (
+            trimmed.endsWith(".") || trimmed.endsWith("!") ||
+            trimmed.endsWith("?") || trimmed.endsWith(";") ||
+            trimmed.endsWith(":") || trimmed.endsWith("\n")
+        )
+
+        // Строгий троттлинг для Xiaomi Watch 2: на границе фразы обновляем не ранее чем через 2.0 сек
+        if (isSentenceBoundary && elapsed >= 2000L) {
             mainHandler.removeCallbacks(notificationFlushRunnable)
             flushPendingNotification()
         } else {
+            // При непрерывном потоке слов обновляем не чаще 1 раза в 2.8 сек
+            val targetDelay = if (isSentenceBoundary) {
+                maxOf(2000L - elapsed, 300L)
+            } else {
+                maxOf(2800L - elapsed, 2000L)
+            }
             mainHandler.removeCallbacks(notificationFlushRunnable)
-            mainHandler.postDelayed(notificationFlushRunnable, 850L - elapsed)
+            mainHandler.postDelayed(notificationFlushRunnable, targetDelay)
         }
     }
 
     private fun flushPendingNotification() {
         val latest = pendingNotificationLatest ?: return
         val history = pendingNotificationHistory ?: latest
+
+        // Защита от повторного вызова notify() при идентичном тексте (исключает сброс скролла на часах)
+        if (latest == lastPostedSubtitleText && history == lastPostedSubtitleHistory) {
+            return
+        }
+
         lastNotificationTime = System.currentTimeMillis()
+        lastPostedSubtitleText = latest
+        lastPostedSubtitleHistory = history
+
         updateOngoingNotification(latest, history)
+    }
+
+    private fun recordInputSpeech(cleanedInput: String) {
+        lastRecognizedInput = cleanedInput
+        Log.d(tag, "Распознана речь (IT/EN): $cleanedInput")
+        logEvent("INPUT_SPEECH:", "\"$lastRecognizedInput\"")
+        appendToSessionBuilder(sessionItalianBuilder, cleanedInput)
+        onInputTextReceived?.invoke(cleanedInput)
+
+        // Обновление диалога в режиме Google Translate Conversation
+        synchronized(sessionDialogueTurns) {
+            val lastTurn = sessionDialogueTurns.lastOrNull()
+            val now = System.currentTimeMillis()
+            // Если в последней реплике еще нет перевода и прошло меньше 8 секунд - дополняем ее
+            if (lastTurn != null && lastTurn.russianText.isBlank() && (now - lastTurn.timestamp < 8000L)) {
+                if (lastTurn.italianText.isNotBlank() && !lastTurn.italianText.endsWith(" ") && !cleanedInput.startsWith(" ")) {
+                    lastTurn.italianText += " $cleanedInput"
+                } else {
+                    lastTurn.italianText += cleanedInput
+                }
+                val idx = sessionDialogueTurns.size - 1
+                val turnCopy = lastTurn.copy()
+                onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
+            } else {
+                // Создаем новую пару диалога
+                val newTurn = DialogueTurn(
+                    italianText = cleanedInput,
+                    russianText = "",
+                    timestamp = now
+                )
+                sessionDialogueTurns.add(newTurn)
+                if (sessionDialogueTurns.size > 200) {
+                    sessionDialogueTurns.removeAt(0)
+                }
+                val idx = sessionDialogueTurns.size - 1
+                val turnCopy = newTurn.copy()
+                onDialogueTurnUpdated?.invoke(idx, turnCopy, true)
+            }
+        }
+    }
+
+    private fun recordTranslationOutput(cleanedText: String) {
+        serverTextChunksReceived++
+        lastServerText = cleanedText
+        val origPrompt = if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
+        logEvent("TRANSLATION:", "ORIG=\"$origPrompt\" -> RU=\"$lastServerText\"")
+
+        recentTranslations.append(cleanedText).append(" ")
+        if (recentTranslations.length > 800) {
+            val cutIndex = recentTranslations.indexOf(". ", recentTranslations.length - 450)
+            if (cutIndex != -1) {
+                recentTranslations.delete(0, cutIndex + 2)
+            } else {
+                recentTranslations.delete(0, recentTranslations.length - 450)
+            }
+        }
+
+        appendToSessionBuilder(sessionRussianBuilder, cleanedText)
+        onTextReceived?.invoke(cleanedText)
+
+        // Обновление диалога в режиме Google Translate Conversation
+        synchronized(sessionDialogueTurns) {
+            val lastTurn = sessionDialogueTurns.lastOrNull()
+            if (lastTurn != null && (lastTurn.russianText.isBlank() || lastTurn.italianText.isNotBlank())) {
+                if (lastTurn.russianText.isNotBlank() && !lastTurn.russianText.endsWith(" ") && !cleanedText.startsWith(" ")) {
+                    lastTurn.russianText += " $cleanedText"
+                } else {
+                    lastTurn.russianText += cleanedText
+                }
+                val idx = sessionDialogueTurns.size - 1
+                val turnCopy = lastTurn.copy()
+                onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
+            } else {
+                val newTurn = DialogueTurn(
+                    italianText = "",
+                    russianText = cleanedText,
+                    timestamp = System.currentTimeMillis()
+                )
+                sessionDialogueTurns.add(newTurn)
+                if (sessionDialogueTurns.size > 200) {
+                    sessionDialogueTurns.removeAt(0)
+                }
+                val idx = sessionDialogueTurns.size - 1
+                val turnCopy = newTurn.copy()
+                onDialogueTurnUpdated?.invoke(idx, turnCopy, true)
+            }
+        }
+
+        scheduleNotificationUpdate(cleanedText, recentTranslations.toString().trim())
     }
 
     private fun setupAudioRouting() {
@@ -516,7 +657,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.18")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.19")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -532,6 +673,9 @@ class PocketService : Service() {
 
     private fun updateOngoingNotification(latestText: String, fullHistory: String) {
         val nm = getSystemService(NotificationManager::class.java) ?: return
+
+        lastPostedSubtitleText = latestText
+        lastPostedSubtitleHistory = fullHistory
 
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -588,7 +732,7 @@ class PocketService : Service() {
         val logFile = getLogFile(this)
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.18")
+            appendLine("Версия: v1.0.19")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Модель: models/gemini-3.8-live")
@@ -860,11 +1004,7 @@ class PocketService : Service() {
             if (inputText.isNotEmpty()) {
                 val cleanedInput = cleanServerTags(inputText)
                 if (cleanedInput.isNotEmpty()) {
-                    lastRecognizedInput = cleanedInput
-                    Log.d(tag, "Распознана речь (IT/EN): $cleanedInput")
-                    logEvent("INPUT_SPEECH:", "\"$lastRecognizedInput\"")
-                    appendToSessionBuilder(sessionItalianBuilder, cleanedInput)
-                    onInputTextReceived?.invoke(cleanedInput)
+                    recordInputSpeech(cleanedInput)
                 }
             }
 
@@ -876,23 +1016,7 @@ class PocketService : Service() {
             if (outputText.isNotEmpty()) {
                 val cleanedOutput = cleanServerTags(outputText)
                 if (cleanedOutput.isNotEmpty()) {
-                    serverTextChunksReceived++
-                    lastServerText = cleanedOutput
-                    val origPrompt = if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
-                    logEvent("TRANSLATION:", "ORIG=\"$origPrompt\" -> RU=\"$lastServerText\"")
-                    recentTranslations.append(cleanedOutput).append(" ")
-                    if (recentTranslations.length > 600) {
-                        val cutIndex = recentTranslations.indexOf(' ', recentTranslations.length - 350)
-                        if (cutIndex != -1) {
-                            recentTranslations.delete(0, cutIndex + 1)
-                        } else {
-                            recentTranslations.delete(0, recentTranslations.length - 350)
-                        }
-                    }
-
-                    appendToSessionBuilder(sessionRussianBuilder, cleanedOutput)
-                    scheduleNotificationUpdate(cleanedOutput, recentTranslations.toString().trim())
-                    onTextReceived?.invoke(cleanedOutput)
+                    recordTranslationOutput(cleanedOutput)
                 }
             }
 
@@ -918,22 +1042,7 @@ class PocketService : Service() {
                         if (text.isNotEmpty()) {
                             val cleanedText = cleanServerTags(text)
                             if (cleanedText.isNotEmpty()) {
-                                serverTextChunksReceived++
-                                lastServerText = cleanedText
-                                logEvent("TRANSLATION_PART:", "RU=\"$lastServerText\"")
-                                recentTranslations.append(cleanedText).append(" ")
-                                if (recentTranslations.length > 600) {
-                                    val cutIndex = recentTranslations.indexOf(' ', recentTranslations.length - 350)
-                                    if (cutIndex != -1) {
-                                        recentTranslations.delete(0, cutIndex + 1)
-                                    } else {
-                                        recentTranslations.delete(0, recentTranslations.length - 350)
-                                    }
-                                }
-
-                                appendToSessionBuilder(sessionRussianBuilder, cleanedText)
-                                scheduleNotificationUpdate(cleanedText, recentTranslations.toString().trim())
-                                onTextReceived?.invoke(cleanedText)
+                                recordTranslationOutput(cleanedText)
                             }
                         }
                     }
@@ -1194,11 +1303,6 @@ class PocketService : Service() {
         wakeLock = null
 
         mainHandler.removeCallbacks(notificationFlushRunnable)
-        pendingNotificationLatest?.let { latest ->
-            val history = pendingNotificationHistory ?: latest
-            updateOngoingNotification(latest, history)
-        }
-
         val nm = getSystemService(NotificationManager::class.java)
         nm?.cancel(SUBTITLE_NOTIFICATION_ID)
 
