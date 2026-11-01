@@ -16,8 +16,13 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -36,6 +41,11 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+
+enum class MicSource {
+    SMARTPHONE, // 📱 Микрофон смартфона (VOICE_RECOGNITION, 2.8x gain boost)
+    BLUETOOTH   // 🎧 Микрофон гарнитуры (VOICE_COMMUNICATION, Bluetooth SCO)
+}
 
 class PocketService : Service() {
 
@@ -73,6 +83,20 @@ class PocketService : Service() {
     @Volatile private var serviceStartTime = 0L
     private val recentTranslations = StringBuilder()
 
+    // Состояние переподключения и троттлинга
+    @Volatile private var activeApiKey: String = ""
+    @Volatile private var reconnectAttempts = 0
+    private val maxReconnectAttempts = 5
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // Троттлинг обновлений уведомлений (не чаще 1 раза в 850 мс для защиты Binder IPC)
+    @Volatile private var lastNotificationTime = 0L
+    @Volatile private var pendingNotificationLatest: String? = null
+    @Volatile private var pendingNotificationHistory: String? = null
+    private val notificationFlushRunnable = Runnable { flushPendingNotification() }
+
+    private val tagRegex = Regex("""<thought>.*?</thought>|<[^>]+>|\{[^}]+\}""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
+
     private val logDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
     companion object {
@@ -83,6 +107,7 @@ class PocketService : Service() {
 
         const val EXTRA_API_KEY = "extra_api_key"
         const val EXTRA_IS_MUTED = "extra_is_muted"
+        const val EXTRA_MIC_SOURCE = "extra_mic_source"
 
         var isServiceActive = false
 
@@ -91,6 +116,13 @@ class PocketService : Service() {
             set(value) {
                 field = value
                 currentInstance?.applyMuteState(value)
+            }
+
+        @Volatile
+        var selectedMicSource: MicSource = MicSource.BLUETOOTH
+            set(value) {
+                field = value
+                currentInstance?.applyMicSourceChange(value)
             }
 
         // Коллбэки в UI
@@ -155,7 +187,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.17\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.18\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -179,12 +211,23 @@ class PocketService : Service() {
         val startMuted = intent?.getBooleanExtra(EXTRA_IS_MUTED, isAudioMuted) ?: isAudioMuted
         isAudioMuted = startMuted
 
+        val micExtra = intent?.getStringExtra(EXTRA_MIC_SOURCE)
+        if (micExtra != null) {
+            selectedMicSource = try {
+                MicSource.valueOf(micExtra)
+            } catch (e: Exception) {
+                MicSource.BLUETOOTH
+            }
+        }
+
+        activeApiKey = apiKey
+        reconnectAttempts = 0
         currentInstance = this
         clearSessionTexts()
         serviceStartTime = System.currentTimeMillis()
         connectionState = "STARTING"
 
-        logEvent("SERVICE_START", "(isAudioMuted=$isAudioMuted)")
+        logEvent("SERVICE_START", "(mic=$selectedMicSource, isAudioMuted=$isAudioMuted)")
 
         val notification = buildNotification("Карманный суфлёр активен (экран можно выключить)")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -201,7 +244,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.18 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -269,35 +312,137 @@ class PocketService : Service() {
         }
     }
 
+    fun applyMicSourceChange(newSource: MicSource) {
+        logEvent("MIC_SOURCE_CHANGE_REQUESTED", "newSource=$newSource")
+        if (!isRunning) return
+
+        Thread {
+            try {
+                audioRecord?.stop()
+                audioRecord?.release()
+            } catch (e: Exception) {
+                Log.w(tag, "Ошибка остановки AudioRecord: ${e.message}")
+            }
+            audioRecord = null
+
+            setupAudioRouting()
+
+            val sampleRate = 16000
+            val minBufferSize = AudioRecord.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+            val bufferSize = maxOf(minBufferSize * 4, sampleRate * 2 * 2)
+            val (record, sourceName) = createAudioRecord(sampleRate, bufferSize)
+            if (record != null && record.state == AudioRecord.STATE_INITIALIZED) {
+                audioRecord = record
+                activeAudioSource = sourceName
+                try {
+                    record.startRecording()
+                    logEvent("MIC_SOURCE_RESTARTED", "source=$activeAudioSource")
+                } catch (e: Exception) {
+                    logEvent("MIC_SOURCE_START_FAILED", "${e.message}")
+                }
+            } else {
+                logEvent("MIC_SOURCE_INIT_FAILED")
+            }
+        }.start()
+    }
+
+    private fun triggerFailureHaptic() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                val vibrator = vibratorManager?.defaultVibrator
+                vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 200, 100, 200), -1))
+            } else {
+                @Suppress("DEPRECATION")
+                val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                @Suppress("DEPRECATION")
+                vibrator?.vibrate(longArrayOf(0, 200, 100, 200), -1)
+            }
+        } catch (e: Exception) {
+            Log.w(tag, "Не удалось выполнить виброотклик: ${e.message}")
+        }
+    }
+
+    private fun cleanServerTags(raw: String): String {
+        if (raw.isBlank()) return ""
+        var cleaned = raw.replace(tagRegex, " ")
+        cleaned = cleaned.replace("<no speech detected>", "", ignoreCase = true)
+        cleaned = cleaned.replace("<no speech>", "", ignoreCase = true)
+        cleaned = cleaned.replace(Regex("""\s+"""), " ").trim()
+        return cleaned
+    }
+
+    private fun scheduleNotificationUpdate(latestText: String, fullHistory: String) {
+        pendingNotificationLatest = latestText
+        pendingNotificationHistory = fullHistory
+        val now = System.currentTimeMillis()
+        val elapsed = now - lastNotificationTime
+        if (elapsed >= 850L) {
+            mainHandler.removeCallbacks(notificationFlushRunnable)
+            flushPendingNotification()
+        } else {
+            mainHandler.removeCallbacks(notificationFlushRunnable)
+            mainHandler.postDelayed(notificationFlushRunnable, 850L - elapsed)
+        }
+    }
+
+    private fun flushPendingNotification() {
+        val latest = pendingNotificationLatest ?: return
+        val history = pendingNotificationHistory ?: latest
+        lastNotificationTime = System.currentTimeMillis()
+        updateOngoingNotification(latest, history)
+    }
+
     private fun setupAudioRouting() {
         try {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-            audioManager.isSpeakerphoneOn = false
 
-            var selectedDeviceName = "DEFAULT"
+            if (selectedMicSource == MicSource.BLUETOOTH) {
+                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                audioManager.isSpeakerphoneOn = false
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                val devices = audioManager.availableCommunicationDevices
-                val btDevice = devices.firstOrNull {
-                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
-                    it.type == AudioDeviceInfo.TYPE_HEARING_AID
+                var selectedDeviceName = "DEFAULT_COMMUNICATION"
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val devices = audioManager.availableCommunicationDevices
+                    val btDevice = devices.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                        it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                        it.type == AudioDeviceInfo.TYPE_HEARING_AID
+                    }
+                    if (btDevice != null) {
+                        audioManager.setCommunicationDevice(btDevice)
+                        selectedDeviceName = "${btDevice.productName} (${btDevice.type})"
+                        Log.d(tag, "Установлено устройство связи: $selectedDeviceName")
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    audioManager.startBluetoothSco()
+                    @Suppress("DEPRECATION")
+                    audioManager.isBluetoothScoOn = true
+                    selectedDeviceName = "Bluetooth SCO (Legacy)"
                 }
-                if (btDevice != null) {
-                    audioManager.setCommunicationDevice(btDevice)
-                    selectedDeviceName = "${btDevice.productName} (${btDevice.type})"
-                    Log.d(tag, "Установлено устройство связи: $selectedDeviceName")
-                }
+
+                logEvent("AUDIO_ROUTING_SETUP", "BLUETOOTH: $selectedDeviceName")
             } else {
-                @Suppress("DEPRECATION")
-                audioManager.startBluetoothSco()
-                @Suppress("DEPRECATION")
-                audioManager.isBluetoothScoOn = true
-                selectedDeviceName = "Bluetooth SCO (Legacy)"
+                // Режим SMARTPHONE: встроенный микрофон телефона с широкой диаграммой для комнаты/зала
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    audioManager.clearCommunicationDevice()
+                } else {
+                    @Suppress("DEPRECATION")
+                    if (audioManager.isBluetoothScoOn) {
+                        audioManager.stopBluetoothSco()
+                        audioManager.isBluetoothScoOn = false
+                    }
+                }
+                audioManager.mode = AudioManager.MODE_NORMAL
+                audioManager.isSpeakerphoneOn = false
+                logEvent("AUDIO_ROUTING_SETUP", "SMARTPHONE_MIC (MODE_NORMAL)")
             }
-
-            logEvent("AUDIO_ROUTING_SETUP", selectedDeviceName)
         } catch (e: Exception) {
             Log.w(tag, "Предупреждение при настройке аудиомаршрутизации: ${e.message}")
             logEvent("AUDIO_ROUTING_WARN", "${e.message}")
@@ -371,7 +516,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.17")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.18")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -443,12 +588,15 @@ class PocketService : Service() {
         val logFile = getLogFile(this)
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.17")
+            appendLine("Версия: v1.0.18")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Модель: models/gemini-3.8-live")
+            appendLine("Режим микрофона: $selectedMicSource (${if (selectedMicSource == MicSource.SMARTPHONE) "Встроенный + усиление 2.8x" else "Гарнитура / Bluetooth SCO"})")
             appendLine("Режим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН (Только субтитры)" else "🔊 ВКЛЮЧЕН (Голос в наушник)"}")
             appendLine("Источник микрофона: $activeAudioSource (16 кГц Mono PCM16)")
+            appendLine("Языки распознавания: [it-IT, en-US] -> RU")
+            appendLine("Попыток переподключения: $reconnectAttempts/$maxReconnectAttempts")
             appendLine("--- ОЧЕРЕДИ АУДИО ---")
             appendLine("Очередь отправки mic (SendQueue): ${audioSendQueue.size} чанков")
             appendLine("Очередь вывода (PlaybackQueue): ${audioPlaybackQueue.size} чанков")
@@ -461,7 +609,7 @@ class PocketService : Service() {
             appendLine("Сообщений получено: $serverMessagesReceived")
             appendLine("Аудио-ответов (звук в ухо): $serverAudioChunksReceived")
             appendLine("Текстовых ответов (HUD/Часы): $serverTextChunksReceived")
-            appendLine("Последний распознанный IT: ${if (lastRecognizedInput.isBlank()) "нет" else "\"$lastRecognizedInput\""}")
+            appendLine("Последний распознанный (IT/EN): ${if (lastRecognizedInput.isBlank()) "нет" else "\"$lastRecognizedInput\""}")
             appendLine("Последний текст RU: ${if (lastServerText.isBlank()) "нет" else "\"$lastServerText\""}")
             appendLine("--- WEAR OS 5 & ЛОГИ ---")
             appendLine("Канал часов: $CHANNEL_SUBTITLES_ID (IMPORTANCE_HIGH)")
@@ -481,11 +629,17 @@ class PocketService : Service() {
         )
         val bufferSize = if (minBufferSize <= 0) 4096 * 2 else minBufferSize * 2
 
+        val audioUsage = if (selectedMicSource == MicSource.BLUETOOTH) {
+            AudioAttributes.USAGE_VOICE_COMMUNICATION
+        } else {
+            AudioAttributes.USAGE_MEDIA
+        }
+
         try {
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setUsage(audioUsage)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
@@ -528,11 +682,14 @@ class PocketService : Service() {
     }
 
     private fun connectWebSocket(apiKey: String) {
-        connectionState = "CONNECTING"
-        logEvent("WEBSOCKET_CONNECTING")
+        if (!isRunning) return
+        connectionState = if (reconnectAttempts > 0) "RECONNECTING ($reconnectAttempts)" else "CONNECTING"
+        logEvent("WEBSOCKET_CONNECTING", "(attempt=$reconnectAttempts)")
 
         val client = OkHttpClient.Builder()
             .readTimeout(0, TimeUnit.MILLISECONDS)
+            .pingInterval(15, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
             .build()
 
         val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$apiKey"
@@ -543,7 +700,7 @@ class PocketService : Service() {
                 Log.d(tag, "WebSocket открыт. Отправка Setup...")
                 connectionState = "OPEN (Sending Setup)"
                 logEvent("WEBSOCKET_OPEN")
-                onStatusChanged?.invoke("🔵 WebSocket соединён. Инициализация модели Gemini-3.8-Live...")
+                onStatusChanged?.invoke("🔵 WebSocket соединён. Инициализация Gemini-3.8-Live...")
                 sendSetup(ws)
             }
 
@@ -556,27 +713,51 @@ class PocketService : Service() {
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                Log.e(tag, "Ошибка WebSocket: ${t.message}")
-                connectionState = "FAILED (${t.message})"
-                lastError = "WebSocket fail: ${t.message}"
-                logEvent("WEBSOCKET_FAILURE", "${t.message}")
-                onStatusChanged?.invoke("🔴 Ошибка сети / ключа: ${t.message}")
-                stopSelf()
+                handleConnectionDrop("Сбой сети: ${t.message}")
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.d(tag, "WebSocket закрыт ($code: $reason)")
-                connectionState = "CLOSED ($code: $reason)"
-                logEvent("WEBSOCKET_CLOSED", "code=$code, reason=$reason")
-                if (code != 1000) {
-                    lastError = "WebSocket closed: $code $reason"
-                    onStatusChanged?.invoke("🔴 Сервер закрыл соединение ($code: $reason)")
+                if (code != 1000 && isRunning) {
+                    handleConnectionDrop("Сервер закрыл ($code: $reason)")
                 } else {
+                    connectionState = "CLOSED ($code: $reason)"
+                    logEvent("WEBSOCKET_CLOSED", "code=$code, reason=$reason")
                     onStatusChanged?.invoke("⚪ Суфлёр остановлен.")
+                    stopSelf()
                 }
-                stopSelf()
             }
         })
+    }
+
+    private fun handleConnectionDrop(reason: String) {
+        if (!isRunning) return
+        Log.e(tag, "Потеря соединения: $reason")
+        logEvent("CONNECTION_DROP", reason)
+        triggerFailureHaptic()
+
+        if (reconnectAttempts < maxReconnectAttempts && isRunning) {
+            reconnectAttempts++
+            val delaySec = minOf(reconnectAttempts * 2, 8)
+            connectionState = "RECONNECTING ($reconnectAttempts/$maxReconnectAttempts in ${delaySec}s)"
+            onStatusChanged?.invoke("🟠 Связь прервана ($reason). Авто-переподключение через ${delaySec}с ($reconnectAttempts/$maxReconnectAttempts)...")
+
+            mainHandler.postDelayed({
+                if (isRunning && activeApiKey.isNotBlank()) {
+                    try {
+                        webSocket?.cancel()
+                    } catch (e: Exception) {}
+                    webSocket = null
+                    connectWebSocket(activeApiKey)
+                }
+            }, delaySec * 1000L)
+        } else {
+            connectionState = "FAILED (Max reconnects reached)"
+            lastError = "Связь потеряна: $reason"
+            logEvent("RECONNECT_FAILED_FINAL")
+            onStatusChanged?.invoke("🔴 Соединение разорвано: $reason")
+            stopSelf()
+        }
     }
 
     private fun sendSetup(ws: WebSocket) {
@@ -595,23 +776,26 @@ class PocketService : Service() {
                 })
                 put("systemInstruction", JSONObject().apply {
                     put("parts", JSONArray().put(JSONObject().apply {
-                        put("text", "You are an invisible ultra-fast real-time speech interpreter from Italian to Russian for Alexander living in Rome. " +
-                                    "CRITICAL RULES: " +
-                                    "1. Translate IMMEDIATELY and CONTINUOUSLY phrase-by-phrase as soon as you hear Italian speech. " +
-                                    "Do not wait for long pauses or for the speaker to finish long sentences. " +
-                                    "2. Output ONLY the Russian translation. Be concise, fast, and accurate. " +
-                                    "3. NEVER converse, NEVER explain, NEVER reply in Italian, NEVER answer questions. Your ONLY job is instantaneous Italian-to-Russian translation. " +
-                                    "4. Ignore background noise and street/cafe ambiance — focus on human voices. If someone speaks Russian, stay silent. Translate ONLY Italian speech into Russian.")
+                        put("text", "You are an invisible real-time speech interpreter into Russian for Alexander living in Rome. " +
+                                    "CRITICAL TRANSLATION RULES: " +
+                                    "1. Translate IMMEDIATELY and CONTINUOUSLY sentence-by-sentence whenever you hear Italian OR English speech. " +
+                                    "Provide a COMPLETE sentence-by-sentence translation into Russian without omitting details, numbers, nuances, or technical context. Do not summarize or abbreviate. " +
+                                    "2. Output ONLY the Russian translation. " +
+                                    "3. NEVER converse, NEVER explain, NEVER reply in the original language, NEVER answer questions. Your ONLY job is faithful, instantaneous speech translation into Russian. " +
+                                    "4. Ignore background noise and street/cafe ambiance — focus on human voices. If someone speaks Russian, stay silent. Translate ALL Italian and English speech into Russian.")
                     }))
                 })
                 put("inputAudioTranscription", JSONObject().apply {
-                    put("languageCodes", JSONArray().put("it-IT"))
+                    put("languageCodes", JSONArray().apply {
+                        put("it-IT")
+                        put("en-US")
+                    })
                 })
                 put("outputAudioTranscription", JSONObject())
             })
         }
         ws.send(setupJson.toString())
-        logEvent("SETUP_SENT", "model=models/gemini-3.8-live, lang=it-IT")
+        logEvent("SETUP_SENT", "model=models/gemini-3.8-live, languages=[it-IT, en-US]")
     }
 
     private fun handleServerMessage(jsonText: String) {
@@ -621,13 +805,19 @@ class PocketService : Service() {
             if (root.has("setupComplete")) {
                 Log.d(tag, "Setup завершён! Запуск микрофона...")
                 connectionState = "READY (Streaming)"
+                if (reconnectAttempts > 0) {
+                    logEvent("RECONNECT_SUCCESS", "attempts=$reconnectAttempts")
+                    reconnectAttempts = 0
+                }
                 logEvent("SETUP_COMPLETE", "(model=gemini-3.8-live, mic=$activeAudioSource)")
-                onStatusChanged?.invoke("🟢 Соединение активно! Слушаю итальянскую речь...")
+                onStatusChanged?.invoke("🟢 Соединение активно! Слушаю итальянскую и английскую речь...")
                 updateOngoingNotification(
                     "🟢 Слушаю речь вокруг...",
-                    "PocketHUD готов к переводу. Слушаю итальянскую речь..."
+                    "PocketHUD готов к переводу. Слушаю итальянскую и английскую речь..."
                 )
-                startRecording()
+                if (audioRecord == null || audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                    startRecording()
+                }
                 return
             }
 
@@ -647,7 +837,7 @@ class PocketService : Service() {
                 }
             }
 
-            // 1. Распознанная итальянская речь (inputAudioTranscription / inputTranscription / interimInputTranscription / userTurn)
+            // 1. Распознанная речь (inputAudioTranscription / inputTranscription / interimInputTranscription / userTurn)
             val inputObj = serverContent.optJSONObject("inputTranscription")
                 ?: serverContent.optJSONObject("inputAudioTranscription")
                 ?: serverContent.optJSONObject("interimInputTranscription")
@@ -668,11 +858,14 @@ class PocketService : Service() {
             }
 
             if (inputText.isNotEmpty()) {
-                lastRecognizedInput = inputText.trim()
-                Log.d(tag, "Распознан итальянский: $inputText")
-                logEvent("INPUT_IT:", "\"$lastRecognizedInput\"")
-                appendToSessionBuilder(sessionItalianBuilder, inputText)
-                onInputTextReceived?.invoke(inputText)
+                val cleanedInput = cleanServerTags(inputText)
+                if (cleanedInput.isNotEmpty()) {
+                    lastRecognizedInput = cleanedInput
+                    Log.d(tag, "Распознана речь (IT/EN): $cleanedInput")
+                    logEvent("INPUT_SPEECH:", "\"$lastRecognizedInput\"")
+                    appendToSessionBuilder(sessionItalianBuilder, cleanedInput)
+                    onInputTextReceived?.invoke(cleanedInput)
+                }
             }
 
             // 2. Субтитры перевода (outputAudioTranscription / outputTranscription / interimOutputTranscription)
@@ -681,24 +874,26 @@ class PocketService : Service() {
                 ?: serverContent.optJSONObject("interimOutputTranscription")
             val outputText = outputObj?.optString("text", "") ?: ""
             if (outputText.isNotEmpty()) {
-                serverTextChunksReceived++
-                lastServerText = outputText.trim()
-                val itPrompt = if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
-                logEvent("TRANSLATION:", "IT=\"$itPrompt\" -> RU=\"$lastServerText\"")
-                recentTranslations.append(outputText).append(" ")
-                if (recentTranslations.length > 600) {
-                    val cutIndex = recentTranslations.indexOf(' ', recentTranslations.length - 350)
-                    if (cutIndex != -1) {
-                        recentTranslations.delete(0, cutIndex + 1)
-                    } else {
-                        recentTranslations.delete(0, recentTranslations.length - 350)
+                val cleanedOutput = cleanServerTags(outputText)
+                if (cleanedOutput.isNotEmpty()) {
+                    serverTextChunksReceived++
+                    lastServerText = cleanedOutput
+                    val origPrompt = if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
+                    logEvent("TRANSLATION:", "ORIG=\"$origPrompt\" -> RU=\"$lastServerText\"")
+                    recentTranslations.append(cleanedOutput).append(" ")
+                    if (recentTranslations.length > 600) {
+                        val cutIndex = recentTranslations.indexOf(' ', recentTranslations.length - 350)
+                        if (cutIndex != -1) {
+                            recentTranslations.delete(0, cutIndex + 1)
+                        } else {
+                            recentTranslations.delete(0, recentTranslations.length - 350)
+                        }
                     }
+
+                    appendToSessionBuilder(sessionRussianBuilder, cleanedOutput)
+                    scheduleNotificationUpdate(cleanedOutput, recentTranslations.toString().trim())
+                    onTextReceived?.invoke(cleanedOutput)
                 }
-
-                appendToSessionBuilder(sessionRussianBuilder, outputText)
-
-                updateOngoingNotification(outputText.trim(), recentTranslations.toString().trim())
-                onTextReceived?.invoke(outputText)
             }
 
             // 3. Аудио PCM и возможные текстовые фрагменты из modelTurn.parts
@@ -721,23 +916,25 @@ class PocketService : Service() {
                         }
                         val text = part.optString("text", "")
                         if (text.isNotEmpty()) {
-                            serverTextChunksReceived++
-                            lastServerText = text.trim()
-                            logEvent("TRANSLATION_PART:", "RU=\"$lastServerText\"")
-                            recentTranslations.append(text).append(" ")
-                            if (recentTranslations.length > 600) {
-                                val cutIndex = recentTranslations.indexOf(' ', recentTranslations.length - 350)
-                                if (cutIndex != -1) {
-                                    recentTranslations.delete(0, cutIndex + 1)
-                                } else {
-                                    recentTranslations.delete(0, recentTranslations.length - 350)
+                            val cleanedText = cleanServerTags(text)
+                            if (cleanedText.isNotEmpty()) {
+                                serverTextChunksReceived++
+                                lastServerText = cleanedText
+                                logEvent("TRANSLATION_PART:", "RU=\"$lastServerText\"")
+                                recentTranslations.append(cleanedText).append(" ")
+                                if (recentTranslations.length > 600) {
+                                    val cutIndex = recentTranslations.indexOf(' ', recentTranslations.length - 350)
+                                    if (cutIndex != -1) {
+                                        recentTranslations.delete(0, cutIndex + 1)
+                                    } else {
+                                        recentTranslations.delete(0, recentTranslations.length - 350)
+                                    }
                                 }
+
+                                appendToSessionBuilder(sessionRussianBuilder, cleanedText)
+                                scheduleNotificationUpdate(cleanedText, recentTranslations.toString().trim())
+                                onTextReceived?.invoke(cleanedText)
                             }
-
-                            appendToSessionBuilder(sessionRussianBuilder, text)
-
-                            updateOngoingNotification(text.trim(), recentTranslations.toString().trim())
-                            onTextReceived?.invoke(text)
                         }
                     }
                 }
@@ -752,12 +949,20 @@ class PocketService : Service() {
     }
 
     private fun createAudioRecord(sampleRate: Int, bufferSize: Int): Pair<AudioRecord?, String> {
-        val sources = listOf(
-            Pair(MediaRecorder.AudioSource.VOICE_COMMUNICATION, "VOICE_COMMUNICATION (Гарнитура/Bluetooth SCO)"),
-            Pair(MediaRecorder.AudioSource.VOICE_RECOGNITION, "VOICE_RECOGNITION (Распознавание речи)"),
-            Pair(MediaRecorder.AudioSource.MIC, "MIC (Стандартный микрофон)"),
-            Pair(MediaRecorder.AudioSource.DEFAULT, "DEFAULT")
-        )
+        val sources = if (selectedMicSource == MicSource.SMARTPHONE) {
+            listOf(
+                Pair(MediaRecorder.AudioSource.VOICE_RECOGNITION, "VOICE_RECOGNITION (Микрофон смартфона, зал/комната)"),
+                Pair(MediaRecorder.AudioSource.MIC, "MIC (Стандартный встроенный микрофон)"),
+                Pair(MediaRecorder.AudioSource.DEFAULT, "DEFAULT")
+            )
+        } else {
+            listOf(
+                Pair(MediaRecorder.AudioSource.VOICE_COMMUNICATION, "VOICE_COMMUNICATION (Гарнитура/Bluetooth SCO)"),
+                Pair(MediaRecorder.AudioSource.VOICE_RECOGNITION, "VOICE_RECOGNITION (Распознавание речи)"),
+                Pair(MediaRecorder.AudioSource.MIC, "MIC (Стандартный микрофон)"),
+                Pair(MediaRecorder.AudioSource.DEFAULT, "DEFAULT")
+            )
+        }
 
         for ((source, name) in sources) {
             try {
@@ -828,6 +1033,15 @@ class PocketService : Service() {
                     lastAudioReadResult = read
 
                     if (read > 0) {
+                        // Если выбран микрофон смартфона, применяем программное цифровое усиление (Gain Booster 2.8x с защитой от клиппинга)
+                        if (selectedMicSource == MicSource.SMARTPHONE) {
+                            val gainMultiplier = 2.8f
+                            for (i in 0 until read) {
+                                val boosted = (shortBuffer[i] * gainMultiplier).toInt()
+                                shortBuffer[i] = boosted.coerceIn(-32768, 32767).toShort()
+                            }
+                        }
+
                         var maxVal = 0
                         for (i in 0 until read) {
                             val absVal = kotlin.math.abs(shortBuffer[i].toInt())
@@ -978,6 +1192,12 @@ class PocketService : Service() {
             if (it.isHeld) it.release()
         }
         wakeLock = null
+
+        mainHandler.removeCallbacks(notificationFlushRunnable)
+        pendingNotificationLatest?.let { latest ->
+            val history = pendingNotificationHistory ?: latest
+            updateOngoingNotification(latest, history)
+        }
 
         val nm = getSystemService(NotificationManager::class.java)
         nm?.cancel(SUBTITLE_NOTIFICATION_ID)

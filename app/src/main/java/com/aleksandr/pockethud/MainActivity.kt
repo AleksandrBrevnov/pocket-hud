@@ -37,6 +37,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var settingsToggleBtn: TextView
     private lateinit var apiSettingsContainer: LinearLayout
 
+    private lateinit var micPhoneBtn: TextView
+    private lateinit var micBluetoothBtn: TextView
+
     private lateinit var tabItalianBtn: TextView
     private lateinit var tabRussianBtn: TextView
     private lateinit var tabBothBtn: TextView
@@ -68,12 +71,14 @@ class MainActivity : AppCompatActivity() {
     private val keyApiKey = "api_key"
     private val keyAudioMuted = "audio_muted"
     private val keyScreenMode = "screen_mode"
+    private val keyMicSource = "mic_source"
 
     private var currentMode = ScreenMode.BOTH
+    private var currentMicSource = MicSource.BLUETOOTH
 
     companion object {
-        private const val IT_PLACEHOLDER = "Говорите по-итальянски — здесь появится распознанный текст..."
-        private const val RU_PLACEHOLDER = "Здесь в реальном времени появится русский перевод..."
+        private const val IT_PLACEHOLDER = "Слушаю итальянскую или английскую речь (собеседник, лекция)..."
+        private const val RU_PLACEHOLDER = "Здесь в реальном времени появится полный русский перевод..."
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -92,6 +97,15 @@ class MainActivity : AppCompatActivity() {
             apiSettingsContainer.visibility = View.VISIBLE
             settingsToggleBtn.text = "⚙️ API Ключ ▴"
         }
+
+        val savedMicStr = prefs.getString(keyMicSource, MicSource.BLUETOOTH.name) ?: MicSource.BLUETOOTH.name
+        currentMicSource = try {
+            MicSource.valueOf(savedMicStr)
+        } catch (e: Exception) {
+            MicSource.BLUETOOTH
+        }
+        PocketService.selectedMicSource = currentMicSource
+        updateMicSourceStyles()
 
         val isMuted = prefs.getBoolean(keyAudioMuted, false)
         PocketService.isAudioMuted = isMuted
@@ -131,7 +145,7 @@ class MainActivity : AppCompatActivity() {
                 updateUi()
             } else {
                 statusBadgeText.text = "🔵 Запуск сервиса..."
-                italianTranscriptText.text = "Слушаю итальянскую речь..."
+                italianTranscriptText.text = "Слушаю итальянскую и английскую речь..."
                 italianTranscriptText.setTextColor(0xFF8AB4F8.toInt())
                 russianTranscriptText.text = "Ожидание перевода..."
                 russianTranscriptText.setTextColor(0xFF81C995.toInt())
@@ -139,6 +153,7 @@ class MainActivity : AppCompatActivity() {
                 val intent = Intent(this, PocketService::class.java).apply {
                     putExtra(PocketService.EXTRA_API_KEY, key)
                     putExtra(PocketService.EXTRA_IS_MUTED, PocketService.isAudioMuted)
+                    putExtra(PocketService.EXTRA_MIC_SOURCE, currentMicSource.name)
                 }
                 ContextCompat.startForegroundService(this, intent)
                 PocketService.isServiceActive = true
@@ -176,6 +191,7 @@ class MainActivity : AppCompatActivity() {
         setupServiceCallbacks()
         updateUi()
         updateMuteButtonUi()
+        updateMicSourceStyles()
 
         // Восстановление истории текущей сессии
         if (PocketService.isServiceActive) {
@@ -247,7 +263,7 @@ class MainActivity : AppCompatActivity() {
                 ruParams.height = 0
                 russianCard.layoutParams = ruParams
 
-                italianTitleText.text = "🇮🇹 ITALIANO"
+                italianTitleText.text = "🇮🇹/🇬🇧 РЕЧЬ (IT / EN)"
                 russianTitleText.text = "🇷🇺 РУССКИЙ"
                 expandItalianBtn.text = "⛶ Экран"
                 expandRussianBtn.text = "⛶ Экран"
@@ -264,7 +280,7 @@ class MainActivity : AppCompatActivity() {
                 flowIndicator.visibility = View.GONE
                 russianCard.visibility = View.GONE
 
-                italianTitleText.text = "🇮🇹 ЭКРАН 1: ИТАЛЬЯНСКАЯ РЕЧЬ"
+                italianTitleText.text = "🇮🇹/🇬🇧 ЭКРАН 1: РЕЧЬ (IT / EN)"
                 expandItalianBtn.text = "↕️ Разделить"
                 italianTranscriptText.textSize = 21f
             }
@@ -282,6 +298,41 @@ class MainActivity : AppCompatActivity() {
                 expandRussianBtn.text = "↕️ Разделить"
                 russianTranscriptText.textSize = 22f
             }
+        }
+    }
+
+    private fun setMicSource(source: MicSource) {
+        currentMicSource = source
+        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        prefs.edit().putString(keyMicSource, source.name).apply()
+        PocketService.selectedMicSource = source
+        updateMicSourceStyles()
+
+        val toastMsg = if (source == MicSource.SMARTPHONE) {
+            "📱 Включен микрофон смартфона (+2.8x усиление для зала/лекций)"
+        } else {
+            "🎧 Включен микрофон гарнитуры (Bluetooth SCO)"
+        }
+        Toast.makeText(this, toastMsg, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun updateMicSourceStyles() {
+        if (!::micPhoneBtn.isInitialized || !::micBluetoothBtn.isInitialized) return
+
+        val activePhoneBg = createRoundedDrawable(0xFF1E3A5F.toInt(), 0xFF4285F4.toInt(), 1, 12f)
+        val activeBtBg = createRoundedDrawable(0xFF1A3B2A.toInt(), 0xFF34A853.toInt(), 1, 12f)
+        val inactiveBg = createRoundedDrawable(0x00000000, cornerRadiusDp = 12f)
+
+        if (currentMicSource == MicSource.SMARTPHONE) {
+            micPhoneBtn.background = activePhoneBg
+            micPhoneBtn.setTextColor(0xFF8AB4F8.toInt())
+            micBluetoothBtn.background = inactiveBg
+            micBluetoothBtn.setTextColor(0xFF9AA0A6.toInt())
+        } else {
+            micBluetoothBtn.background = activeBtBg
+            micBluetoothBtn.setTextColor(0xFF81C995.toInt())
+            micPhoneBtn.background = inactiveBg
+            micPhoneBtn.setTextColor(0xFF9AA0A6.toInt())
         }
     }
 
@@ -477,13 +528,19 @@ class MainActivity : AppCompatActivity() {
         val postNotif = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         } else true
-        return recordAudio && postNotif
+        val btConnect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+        } else true
+        return recordAudio && postNotif && btConnect
     }
 
     private fun requestPermissions() {
         val perms = mutableListOf(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            perms.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
         ActivityCompat.requestPermissions(this, perms.toTypedArray(), 101)
     }
@@ -494,7 +551,7 @@ class MainActivity : AppCompatActivity() {
             if (checkPermissions()) {
                 Toast.makeText(this, "Разрешения предоставлены! Нажмите 'ЗАПУСТИТЬ СУФЛЁР'", Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(this, "Требуется разрешение на запись звука для суфлёра", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Требуются разрешения на запись звука для суфлёра", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -528,7 +585,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.17"
+            text = "v1.0.18"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
@@ -598,8 +655,56 @@ class MainActivity : AppCompatActivity() {
         apiSettingsContainer.addView(apiHint)
         root.addView(apiSettingsContainer)
 
+        // ==========================================
+        // 2. Селектор микрофона (v1.0.18): Смартфон vs Гарнитура
+        // ==========================================
+        val micSelectorBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = createRoundedDrawable(0xFF1A1D24.toInt(), 0xFF2B3240.toInt(), 1, 14f)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(8)) }
+            layoutParams = params
+        }
+
+        micPhoneBtn = TextView(this).apply {
+            text = "📱 Микрофон смартфона"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+            isClickable = true
+            setOnClickListener {
+                setMicSource(MicSource.SMARTPHONE)
+            }
+        }
+        micSelectorBar.addView(micPhoneBtn)
+
+        micBluetoothBtn = TextView(this).apply {
+            text = "🎧 Микрофон гарнитуры (BT)"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+            isClickable = true
+            setOnClickListener {
+                setMicSource(MicSource.BLUETOOTH)
+            }
+        }
+        micSelectorBar.addView(micBluetoothBtn)
+        root.addView(micSelectorBar)
+
+        updateMicSourceStyles()
+
         // ========================================================
-        // 2. Google Translate Языковая панель / Режим двух экранов
+        // 3. Google Translate Языковая панель / Режим двух экранов
         // ========================================================
         val languageBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -614,7 +719,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         tabItalianBtn = TextView(this).apply {
-            text = "🇮🇹 Итальянский"
+            text = "🇮🇹/🇬🇧 Речь"
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             gravity = Gravity.CENTER
@@ -799,8 +904,8 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 val txt = italianTranscriptText.text.toString()
                 if (txt.isNotBlank() && txt != IT_PLACEHOLDER) {
-                    copyToClipboard("PocketHUD Italian Transcript", txt)
-                    Toast.makeText(this@MainActivity, "Итальянский текст скопирован", Toast.LENGTH_SHORT).show()
+                    copyToClipboard("PocketHUD Speech Transcript", txt)
+                    Toast.makeText(this@MainActivity, "Текст речи (IT/EN) скопирован", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -821,7 +926,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 resetItalianCard()
                 PocketService.clearItalianSessionText()
-                Toast.makeText(this@MainActivity, "Итальянский текст очищен", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "Текст речи очищен", Toast.LENGTH_SHORT).show()
             }
         }
         italianHeader.addView(clearItalianBtn)
@@ -861,7 +966,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val flowPill = TextView(this).apply {
-            text = "🇮🇹  ➔  🇷🇺  СИНХРОННЫЙ ПЕРЕВОД"
+            text = "🇮🇹 / 🇬🇧  ➔  🇷🇺  СИНХРОННЫЙ ПЕРЕВОД"
             textSize = 10.5f
             setTextColor(0xFF7B889B.toInt())
             setTypeface(null, Typeface.BOLD)
