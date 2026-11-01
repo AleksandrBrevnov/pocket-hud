@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -24,6 +25,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.google.android.material.checkbox.MaterialCheckBox
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -57,6 +59,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var dialogueTitleText: TextView
     private lateinit var copyDialogueBtn: TextView
     private lateinit var clearDialogueBtn: TextView
+    private lateinit var showOriginalCheckBox: MaterialCheckBox
+    private lateinit var showOriginalBadge: TextView
     private lateinit var dialogueScrollView: ScrollView
     private lateinit var dialogueFeedLayout: LinearLayout
     private lateinit var dialogueEmptyPlaceholder: TextView
@@ -92,9 +96,11 @@ class MainActivity : AppCompatActivity() {
     private val keyAudioMuted = "audio_muted"
     private val keyScreenMode = "screen_mode"
     private val keyMicSource = "mic_source"
+    private val keyShowOriginalText = "show_original_text"
 
     private var currentMode = ScreenMode.DIALOGUE
     private var currentMicSource = MicSource.BLUETOOTH
+    private var showOriginalText = true
 
     companion object {
         private const val IT_PLACEHOLDER = "Слушаю итальянскую или английскую речь (собеседник, лекция)..."
@@ -130,6 +136,18 @@ class MainActivity : AppCompatActivity() {
         val isMuted = prefs.getBoolean(keyAudioMuted, false)
         PocketService.isAudioMuted = isMuted
         updateMuteButtonUi()
+
+        showOriginalText = prefs.getBoolean(keyShowOriginalText, true)
+        showOriginalCheckBox.isChecked = showOriginalText
+        updateShowOriginalBadge(showOriginalText)
+        updateDialogueOriginalVisibility()
+
+        showOriginalCheckBox.setOnCheckedChangeListener { _, isChecked ->
+            showOriginalText = isChecked
+            prefs.edit().putBoolean(keyShowOriginalText, isChecked).apply()
+            updateShowOriginalBadge(isChecked)
+            updateDialogueOriginalVisibility()
+        }
 
         val savedModeStr = prefs.getString(keyScreenMode, ScreenMode.DIALOGUE.name) ?: ScreenMode.DIALOGUE.name
         val savedMode = when (savedModeStr) {
@@ -214,6 +232,14 @@ class MainActivity : AppCompatActivity() {
         updateUi()
         updateMuteButtonUi()
         updateMicSourceStyles()
+
+        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        val savedShowOriginal = prefs.getBoolean(keyShowOriginalText, true)
+        if (::showOriginalCheckBox.isInitialized && showOriginalCheckBox.isChecked != savedShowOriginal) {
+            showOriginalCheckBox.isChecked = savedShowOriginal
+            showOriginalText = savedShowOriginal
+            updateShowOriginalBadge(savedShowOriginal)
+        }
 
         restoreDialogueView()
 
@@ -387,6 +413,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun updateDialogueOriginalVisibility() {
+        for (holder in turnViewHolders) {
+            holder.italianContainer.visibility = if (showOriginalText) View.VISIBLE else View.GONE
+        }
+        if (::dialogueScrollView.isInitialized) {
+            dialogueScrollView.post { dialogueScrollView.fullScroll(View.FOCUS_DOWN) }
+        }
+    }
+
+    private fun updateShowOriginalBadge(isChecked: Boolean) {
+        if (!::showOriginalBadge.isInitialized) return
+        if (isChecked) {
+            showOriginalBadge.text = "🇮🇹 IT/EN + 🇷🇺 RU"
+            showOriginalBadge.setTextColor(0xFF8AB4F8.toInt())
+            showOriginalBadge.background = createRoundedDrawable(0xFF1E2838.toInt(), 0xFF2A3850.toInt(), 1, 6f)
+        } else {
+            showOriginalBadge.text = "🇷🇺 ТОЛЬКО ПЕРЕВОД"
+            showOriginalBadge.setTextColor(0xFF81C995.toInt())
+            showOriginalBadge.background = createRoundedDrawable(0xFF162A1F.toInt(), 0xFF1E402B.toInt(), 1, 6f)
+        }
+    }
+
     private fun updateMuteButtonUi() {
         if (PocketService.isAudioMuted) {
             muteBtn.text = "🔇 ЗВУК: ВЫКЛ"
@@ -552,6 +600,7 @@ class MainActivity : AppCompatActivity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { setMargins(0, 0, 0, dp(4)) }
             layoutParams = params
+            visibility = if (showOriginalText) View.VISIBLE else View.GONE
         }
 
         val itHeader = LinearLayout(this).apply {
@@ -653,6 +702,7 @@ class MainActivity : AppCompatActivity() {
                 dialogueScrollView.post { dialogueScrollView.fullScroll(View.FOCUS_DOWN) }
             } else {
                 val holder = turnViewHolders[turnIndex]
+                holder.italianContainer.visibility = if (showOriginalText) View.VISIBLE else View.GONE
                 if (turn.italianText.isNotBlank()) {
                     holder.italianText.text = turn.italianText
                 }
@@ -762,7 +812,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.19"
+            text = "v1.0.20"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
@@ -1062,11 +1112,11 @@ class MainActivity : AppCompatActivity() {
                 val sb = StringBuilder()
                 sb.appendLine("=== POCKET HUD ДИАЛОГ ===")
                 for (t in turns) {
-                    if (t.italianText.isNotBlank()) {
+                    if (showOriginalText && t.italianText.isNotBlank()) {
                         sb.appendLine("🇮🇹 ${t.italianText}")
                     }
                     if (t.russianText.isNotBlank()) {
-                        sb.appendLine("➔ 🇷🇺 ${t.russianText}")
+                        sb.appendLine(if (showOriginalText) "➔ 🇷🇺 ${t.russianText}" else t.russianText)
                     }
                     sb.appendLine()
                 }
@@ -1100,6 +1150,56 @@ class MainActivity : AppCompatActivity() {
         }
         dialogueHeader.addView(clearDialogueBtn)
         dialogueCard.addView(dialogueHeader)
+
+        // Подпанель настроек диалога (Google Translate Conversation Mode: чекбокс скрытия оригинала)
+        val dialogueOptionsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(8)) }
+            layoutParams = params
+        }
+
+        showOriginalCheckBox = MaterialCheckBox(this).apply {
+            text = "Показывать оригинал"
+            textSize = 12f
+            setTextColor(0xFFE8EAED.toInt())
+            isChecked = showOriginalText
+            minHeight = 0
+            minimumHeight = 0
+            val states = arrayOf(
+                intArrayOf(android.R.attr.state_checked),
+                intArrayOf(-android.R.attr.state_checked)
+            )
+            val colors = intArrayOf(
+                0xFF8AB4F8.toInt(),
+                0xFF80868B.toInt()
+            )
+            buttonTintList = ColorStateList(states, colors)
+            compoundDrawablePadding = dp(6)
+        }
+        dialogueOptionsRow.addView(showOriginalCheckBox)
+
+        val optionsSpacer = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
+        }
+        dialogueOptionsRow.addView(optionsSpacer)
+
+        showOriginalBadge = TextView(this).apply {
+            textSize = 10f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(8), dp(3), dp(8), dp(3))
+            isClickable = true
+            setOnClickListener {
+                showOriginalCheckBox.isChecked = !showOriginalCheckBox.isChecked
+            }
+        }
+        updateShowOriginalBadge(showOriginalText)
+        dialogueOptionsRow.addView(showOriginalBadge)
+
+        dialogueCard.addView(dialogueOptionsRow)
 
         dialogueScrollView = ScrollView(this).apply {
             val params = LinearLayout.LayoutParams(
