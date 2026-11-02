@@ -354,7 +354,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.27\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.28\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -411,7 +411,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.27 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.28 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -541,11 +541,31 @@ class PocketService : Service() {
         return outputTagCleaner.clean(raw)
     }
 
+    private val ABBREVIATIONS = setOf(
+        "sig.", "dott.", "prof.", "ing.", "avv.", "ecc.", "etc.", "e.g.", "i.e.",
+        "т.д.", "т.п.", "г.", "руб.", "ул.", "д.", "кв.", "стр.", "корп."
+    )
+
     private fun isSentenceEnding(text: String): Boolean {
         val trimmed = text.trimEnd()
         if (trimmed.isEmpty()) return false
         val s = trimmed.trimEnd('"', '\'', '»', '«', ')', ']', '}', '”', '’')
-        return s.endsWith('.') || s.endsWith('!') || s.endsWith('?') || s.endsWith('…')
+        if (s.isEmpty()) return false
+
+        // Многоточие (...) или знак эллипсиса (…) — это пауза размышления / заминка, а не завершение мысли
+        if (s.endsWith("...") || s.endsWith("…")) return false
+
+        // Проверка на частые аббревиатуры в итальянском и русском
+        val lastWord = s.substringAfterLast(' ').lowercase()
+        if (lastWord in ABBREVIATIONS) return false
+
+        // Проверка: внутренняя точка в числе (например "1." перед цифрой)
+        if (s.endsWith('.') && s.length >= 2 && s[s.length - 2].isDigit()) {
+            val wordBefore = s.substringAfterLast(' ')
+            if (wordBefore.dropLast(1).all { it.isDigit() }) return false
+        }
+
+        return s.endsWith('.') || s.endsWith('!') || s.endsWith('?')
     }
 
     private fun isContinuation(text: String): Boolean {
@@ -560,8 +580,10 @@ class PocketService : Service() {
         if (trimmedAdd.isEmpty()) return existing
         if (existing.isBlank()) return trimmedAdd
 
-        val startsWithPunctuation = trimmedAdd[0] in listOf('.', ',', '!', '?', ';', ':', '…', ')', ']', '}')
-        return if (existing.endsWith(" ") || startsWithPunctuation) {
+        val startsWithPunctuation = trimmedAdd[0] in listOf('.', ',', '!', '?', ';', ':', '…', ')', ']', '}', '»', '"', '\'', '”', '’')
+        val endsWithOpeningQuoteOrBracket = existing.lastOrNull() in listOf('(', '[', '{', '«', '"', '“', '‘')
+
+        return if (existing.endsWith(" ") || startsWithPunctuation || endsWithOpeningQuoteOrBracket) {
             existing + trimmedAdd
         } else {
             "$existing $trimmedAdd"
@@ -637,12 +659,12 @@ class PocketService : Service() {
             val now = System.currentTimeMillis()
 
             // Предложение считается законченным только если:
-            // 1) Реплика уже была финализирована (таймером тишины simulIdleRunnable или turnComplete),
-            // 2) ИЛИ в реплике уже есть перевод, и либо перевод, либо исходная речь оканчиваются на знаки конца мысли (. ! ? …),
-            //    при условии, что ни одна из частей не обрывается на запятой или двоеточии.
+            // 1) Реплика уже была финализирована (таймером тишины simulIdleRunnable или barge-in),
+            // 2) ИЛИ в реплике уже есть перевод на русском, и русский перевод оканчивается на точку/восклицательный/вопросительный знак,
+            //    при условии, что ни русская, ни итальянская фраза не обрываются на запятой, тире или двоеточии.
             val isSentenceComplete = lastTurn != null && !lastTurn.isFinalized &&
                 lastTurn.russianText.isNotBlank() &&
-                (isSentenceEnding(lastTurn.russianText) || isSentenceEnding(lastTurn.italianText)) &&
+                isSentenceEnding(lastTurn.russianText) &&
                 !isContinuation(lastTurn.russianText) &&
                 !isContinuation(lastTurn.italianText)
 
@@ -719,7 +741,7 @@ class PocketService : Service() {
         val currentSentence: String
         synchronized(sessionDialogueTurns) {
             val lastTurn = sessionDialogueTurns.lastOrNull()
-            if (lastTurn != null && !lastTurn.isFinalized) {
+            if (lastTurn != null && (!lastTurn.isFinalized || lastTurn.russianText.isBlank())) {
                 lastTurn.russianText = appendWithPunctuationAwareSpace(lastTurn.russianText, cleanedText)
                 lastTurn.lastActivityTime = System.currentTimeMillis()
                 val idx = sessionDialogueTurns.size - 1
@@ -867,7 +889,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.27")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.28")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -943,7 +965,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.27")
+            appendLine("Версия: v1.0.28")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
@@ -1448,9 +1470,7 @@ class PocketService : Service() {
             // Управление скользящим таймером бездействия при получении чанков перевода
             if (translationReceived) {
                 mainHandler.removeCallbacks(simulIdleRunnable)
-                if (!isFinished) {
-                    mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)
-                }
+                mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)
             }
 
             // 7. Проверка завершения хода (turnComplete / finished) и финализация карточки
@@ -1459,8 +1479,32 @@ class PocketService : Service() {
                                root.optBoolean("turnComplete", false) ||
                                (modelTurn?.optBoolean("turnComplete", false) == true)
             if (turnComplete) {
-                finalizeCurrentTurn()
-                if (hasPendingTranslation) {
+                val shouldFinalizeNow = synchronized(sessionDialogueTurns) {
+                    val lastTurn = sessionDialogueTurns.lastOrNull()
+                    if (lastTurn == null || lastTurn.isFinalized) {
+                        false
+                    } else if (hasPendingTranslation && lastTurn.russianText.isBlank()) {
+                        // Речь зафиксирована, но перевод пуст (шум / кашель)
+                        true
+                    } else if (lastTurn.russianText.isNotBlank() &&
+                        isSentenceEnding(lastTurn.russianText) &&
+                        !isContinuation(lastTurn.russianText) &&
+                        !isContinuation(lastTurn.italianText)
+                    ) {
+                        // Предложение грамматически завершено (. ! ?)
+                        true
+                    } else {
+                        // Предложение всё ещё продолжается (нет финальной точки или есть запятая)
+                        // НЕ финализируем преждевременно! Ждём следующего чанка или таймера тишины simulIdleRunnable
+                        false
+                    }
+                }
+
+                if (shouldFinalizeNow) {
+                    finalizeCurrentTurn()
+                }
+
+                if (hasPendingTranslation && shouldFinalizeNow) {
                     val origPrompt = currentTurnInputSpeech
                         ?: synchronized(sessionDialogueTurns) { sessionDialogueTurns.lastOrNull()?.italianText?.ifBlank { null } }
                         ?: if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput

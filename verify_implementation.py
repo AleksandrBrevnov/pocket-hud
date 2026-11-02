@@ -117,14 +117,14 @@ with open(pocket_service_path, "r", encoding="utf-8") as f:
 with open(build_gradle_path, "r", encoding="utf-8") as f:
     gradle_code = f.read()
 
-print("\n--- 1. Verification of v1.0.27 Version Bumps ---")
-assert 'versionCode = 31' in gradle_code, "versionCode 31 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.27"' in gradle_code, "versionName 1.0.27 missing in app/build.gradle.kts"
-assert 'text = "v1.0.27"' in main_code, "v1.0.27 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.27' in service_code, "v1.0.27 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.27 активен' in service_code, "v1.0.27 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.27' in service_code, "v1.0.27 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.27 OK across all files.")
+print("\n--- 1. Verification of v1.0.28 Version Bumps ---")
+assert 'versionCode = 32' in gradle_code, "versionCode 32 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.28"' in gradle_code, "versionName 1.0.28 missing in app/build.gradle.kts"
+assert 'text = "v1.0.28"' in main_code, "v1.0.28 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.28' in service_code, "v1.0.28 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.28 активен' in service_code, "v1.0.28 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.28' in service_code, "v1.0.28 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.28 OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -369,12 +369,34 @@ assert "isSentenceEnding" in service_code, "isSentenceEnding helper missing in P
 assert "isContinuation" in service_code, "isContinuation helper missing in PocketService.kt"
 assert "appendWithPunctuationAwareSpace" in service_code, "appendWithPunctuationAwareSpace helper missing in PocketService.kt"
 
+ABBREVIATIONS = {
+    "sig.", "dott.", "prof.", "ing.", "avv.", "ecc.", "etc.", "e.g.", "i.e.",
+    "т.д.", "т.п.", "г.", "руб.", "ул.", "д.", "кв.", "стр.", "корп."
+}
+
 def isSentenceEnding(text: str) -> bool:
-    s = text.rstrip().rstrip('"' + "'" + '»«)]}”’')
-    return s.endswith('.') or s.endswith('!') or s.endswith('?') or s.endswith('…')
+    trimmed = text.strip()
+    if not trimmed:
+        return False
+    s = trimmed.rstrip('\"\'»«)]}”’')
+    if not s:
+        return False
+    if s.endswith("...") or s.endswith("…"):
+        return False
+    last_word = s.split()[-1].lower() if ' ' in s else s.lower()
+    if last_word in ABBREVIATIONS:
+        return False
+    if s.endswith('.') and len(s) >= 2 and s[-2].isdigit():
+        word_before = s.split()[-1]
+        if word_before[:-1].isdigit():
+            return False
+    return s.endswith('.') or s.endswith('!') or s.endswith('?')
 
 def isContinuation(text: str) -> bool:
-    s = text.rstrip().rstrip('"' + "'" + '»«)]}”’')
+    trimmed = text.strip()
+    if not trimmed:
+        return False
+    s = trimmed.rstrip('\"\'»«)]}”’')
     return s.endswith(',') or s.endswith(';') or s.endswith(':') or s.endswith('-') or s.endswith('—')
 
 def appendWithPunctuationAwareSpace(existing: str, addition: str) -> str:
@@ -383,8 +405,9 @@ def appendWithPunctuationAwareSpace(existing: str, addition: str) -> str:
         return existing
     if not existing.strip():
         return trimmed_add
-    starts_with_punct = trimmed_add[0] in ['.', ',', '!', '?', ';', ':', '…', ')', ']', '}']
-    if existing.endswith(" ") or starts_with_punct:
+    starts_with_punct = trimmed_add[0] in ['.', ',', '!', '?', ';', ':', '…', ')', ']', '}', '»', '"', '\'', '”', '’']
+    ends_with_opening = existing[-1] in ['(', '[', '{', '«', '"', '“', '‘']
+    if existing.endswith(" ") or starts_with_punct or ends_with_opening:
         return existing + trimmed_add
     else:
         return f"{existing} {trimmed_add}"
@@ -419,7 +442,7 @@ class SynchronousTurnStateMachine:
 
         isSentenceComplete = (lastTurn is not None and not lastTurn.isFinalized and
             bool(lastTurn.russianText.strip()) and
-            (isSentenceEnding(lastTurn.russianText) or isSentenceEnding(lastTurn.italianText)) and
+            isSentenceEnding(lastTurn.russianText) and
             not isContinuation(lastTurn.russianText) and
             not isContinuation(lastTurn.italianText))
 
@@ -449,28 +472,36 @@ class SynchronousTurnStateMachine:
         self.logged_events.append(("TRANSLATION", f'ORIG="{origPrompt}" -> RU="{cleanedText}"'))
 
         lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
-        if lastTurn and not lastTurn.isFinalized:
+        if lastTurn and (not lastTurn.isFinalized or not lastTurn.russianText.strip()):
             lastTurn.russianText = appendWithPunctuationAwareSpace(lastTurn.russianText, cleanedText)
         else:
             newTurn = DialogueTurnSim("", cleanedText, now, isFinalized=False)
             self.sessionDialogueTurns.append(newTurn)
 
+        self.idleTimerDeadline = now + 2000
         if isFinished:
-            self.finalizeCurrentTurn()
-        else:
-            self.idleTimerDeadline = now + 2000
+            self.onTurnComplete()
 
     def checkIdleTimer(self, now: int):
         if self.idleTimerDeadline is not None and now >= self.idleTimerDeadline:
             self.finalizeCurrentTurn()
 
     def onTurnComplete(self):
-        self.finalizeCurrentTurn()
-        if self.hasPendingTranslation:
-            origPrompt = self.currentTurnInputSpeech or (self.sessionDialogueTurns[-1].italianText if self.sessionDialogueTurns else "") or self.lastRecognizedInput
+        lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
+        if not lastTurn or lastTurn.isFinalized:
+            return
+        if self.hasPendingTranslation and not lastTurn.russianText.strip():
+            self.finalizeCurrentTurn()
+            origPrompt = self.currentTurnInputSpeech or (lastTurn.italianText if lastTurn else "") or self.lastRecognizedInput
             self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{origPrompt}"'))
             self.hasPendingTranslation = False
             self.currentTurnInputSpeech = None
+            return
+        if (lastTurn.russianText.strip() and
+            isSentenceEnding(lastTurn.russianText) and
+            not isContinuation(lastTurn.russianText) and
+            not isContinuation(lastTurn.italianText)):
+            self.finalizeCurrentTurn()
 
     def onInterrupted(self):
         self.idleTimerDeadline = None
@@ -524,21 +555,21 @@ sm3.onTurnComplete()
 assert len(sm3.logged_events) == 1
 assert sm3.logged_events[0] == ("TRANSLATION_EMPTY", 'ORIG="Pronto"')
 
-# Scenario 4: Fast finished flag from server finalizes immediately without 2s delay
+# Scenario 4: Sentence-ending punctuation with finished flag finalizes immediately without waiting for 2s idle timer
 sm4 = SynchronousTurnStateMachine()
-sm4.recordInputSpeech("Si", now=1000)
-sm4.recordTranslationOutput("Да", now=1300, isFinished=True)
-assert sm4.sessionDialogueTurns[0].isFinalized == True, "Finished flag must finalize turn immediately"
-assert sm4.idleTimerDeadline is None
+sm4.recordInputSpeech("Si.", now=1000)
+sm4.recordTranslationOutput("Да.", now=1300, isFinished=True)
+assert sm4.sessionDialogueTurns[0].isFinalized == True, "Finished flag with punctuation must finalize turn immediately"
 
-# Scenario 5: Multiple chunks with finished flag recorded in message do NOT fragment turn
+# Scenario 5: Multiple chunks with finished flag without punctuation do NOT fragment turn, and finalize upon silence timeout
 sm5 = SynchronousTurnStateMachine()
 sm5.recordInputSpeech("Buonasera", now=1000)
-sm5.recordTranslationOutput("Добрый", now=1200, isFinished=False)
-sm5.recordTranslationOutput("вечер", now=1250, isFinished=True)
+sm5.recordTranslationOutput("Добрый", now=1200, isFinished=True)
+assert sm5.sessionDialogueTurns[0].isFinalized == False, "Incomplete sentence without punctuation must NOT be finalized"
+sm5.recordTranslationOutput("вечер.", now=1250, isFinished=True)
 assert len(sm5.sessionDialogueTurns) == 1, f"Expected 1 turn, got {len(sm5.sessionDialogueTurns)}"
-assert sm5.sessionDialogueTurns[0].russianText == "Добрый вечер"
-assert sm5.sessionDialogueTurns[0].isFinalized == True
+assert sm5.sessionDialogueTurns[0].russianText == "Добрый вечер."
+assert sm5.sessionDialogueTurns[0].isFinalized == True, "Turn must be finalized once dot is received"
 
 # Scenario 6: User interruption cancels idle timer and immediately finalizes
 sm6 = SynchronousTurnStateMachine()
@@ -547,52 +578,90 @@ sm6.recordTranslationOutput("Я хотел бы знать...", now=1300, isFini
 assert sm6.idleTimerDeadline == 3300
 sm6.onInterrupted()
 assert sm6.idleTimerDeadline is None
-# Scenario 7: In-place streaming accumulation across multiple interleaved micro-chunks (user bug from Session Log 4)
+# Scenario 7: In-place streaming accumulation across multiple interleaved micro-chunks WITH turnComplete/isFinished on every chunk (real Gemini WebSocket behavior from Session Log 4 & 5)
 sm7 = SynchronousTurnStateMachine()
 sm7.recordInputSpeech("Sei venuta", now=1000)
-sm7.recordTranslationOutput("Ты пришла", now=1200, isFinished=False)
+sm7.recordTranslationOutput("Ты пришла", now=1200, isFinished=True)
 assert len(sm7.sessionDialogueTurns) == 1
 assert sm7.sessionDialogueTurns[0].russianText == "Ты пришла"
+assert sm7.sessionDialogueTurns[0].isFinalized == False, "Incomplete sentence must NOT be finalized by interim turnComplete!"
 
 # 2nd micro-chunk: same sentence continues without punctuation
 sm7.recordInputSpeech("a contatto con", now=1800)
-sm7.recordTranslationOutput("в контакт с", now=2000, isFinished=False)
+sm7.recordTranslationOutput("в контакт с", now=2000, isFinished=True)
 assert len(sm7.sessionDialogueTurns) == 1, "Micro-chunks must NOT create a new card every 2-3 words!"
 assert sm7.sessionDialogueTurns[0].italianText == "Sei venuta a contatto con"
 assert sm7.sessionDialogueTurns[0].russianText == "Ты пришла в контакт с"
+assert sm7.sessionDialogueTurns[0].isFinalized == False
 
 # 3rd micro-chunk
 sm7.recordInputSpeech("con una", now=2800)
-sm7.recordTranslationOutput("одной", now=3000, isFinished=False)
+sm7.recordTranslationOutput("одной", now=3000, isFinished=True)
 assert len(sm7.sessionDialogueTurns) == 1
+assert sm7.sessionDialogueTurns[0].isFinalized == False
 
 # 4th micro-chunk
 sm7.recordInputSpeech("che non", now=3800)
-sm7.recordTranslationOutput("которая не", now=4000, isFinished=False)
+sm7.recordTranslationOutput("которая не", now=4000, isFinished=True)
 assert len(sm7.sessionDialogueTurns) == 1
+assert sm7.sessionDialogueTurns[0].isFinalized == False
 
 # 5th micro-chunk with comma (continuation)
 sm7.recordInputSpeech("dovevi,", now=4800)
-sm7.recordTranslationOutput("должна была,", now=5000, isFinished=False)
+sm7.recordTranslationOutput("должна была,", now=5000, isFinished=True)
 assert len(sm7.sessionDialogueTurns) == 1
 assert sm7.sessionDialogueTurns[0].russianText == "Ты пришла в контакт с одной которая не должна была,"
+assert sm7.sessionDialogueTurns[0].isFinalized == False
 
 # 6th micro-chunk with sentence ending dot
 sm7.recordInputSpeech("di farlo.", now=5800)
-sm7.recordTranslationOutput("это сделать.", now=6000, isFinished=False)
+sm7.recordTranslationOutput("это сделать.", now=6000, isFinished=True)
 assert len(sm7.sessionDialogueTurns) == 1
 assert sm7.sessionDialogueTurns[0].russianText == "Ты пришла в контакт с одной которая не должна была, это сделать."
+assert sm7.sessionDialogueTurns[0].isFinalized == True, "Final chunk with dot MUST finalize turn on turnComplete"
 
 # Scenario 8: Punctuation boundary (. ! ?) properly triggers new card on subsequent sentence
 sm7.recordInputSpeech("Va bene.", now=6800)
 assert len(sm7.sessionDialogueTurns) == 2, "Completed sentence with dot must create new card on next speech"
 assert sm7.sessionDialogueTurns[0].isFinalized == True
 assert sm7.sessionDialogueTurns[1].italianText == "Va bene."
-sm7.recordTranslationOutput("Хорошо.", now=7000, isFinished=False)
+sm7.recordTranslationOutput("Хорошо.", now=7000, isFinished=True)
 assert sm7.sessionDialogueTurns[1].russianText == "Хорошо."
+assert sm7.sessionDialogueTurns[1].isFinalized == True
+
+# Scenario 9: Delayed translation arriving to finalized turn with blank Russian text attaches correctly
+sm9 = SynchronousTurnStateMachine()
+sm9.recordInputSpeech("Ciao", now=1000)
+# Silence timeout triggers finalization before translation arrives
+sm9.checkIdleTimer(now=3500)
+sm9.finalizeCurrentTurn()
+assert sm9.sessionDialogueTurns[0].isFinalized == True
+assert sm9.sessionDialogueTurns[0].russianText == ""
+# Delayed translation arrives
+sm9.recordTranslationOutput("Привет", now=3600, isFinished=True)
+assert len(sm9.sessionDialogueTurns) == 1, "Delayed translation must attach to existing turn with blank Russian text!"
+assert sm9.sessionDialogueTurns[0].russianText == "Привет"
+
+# Scenario 10: Abbreviations (sig., dott., руб.) and hesitation ellipsis (...) do not prematurely split cards
+sm10 = SynchronousTurnStateMachine()
+sm10.recordInputSpeech("Il sig.", now=1000)
+sm10.recordTranslationOutput("Господин", now=1200, isFinished=True)
+assert len(sm10.sessionDialogueTurns) == 1
+assert sm10.sessionDialogueTurns[0].isFinalized == False, "Abbreviation 'sig.' must not finalize card"
+
+sm10.recordInputSpeech("Rossi ha pagato 10 руб.", now=1800)
+sm10.recordTranslationOutput("Росси заплатил 10 руб.", now=2000, isFinished=True)
+assert len(sm10.sessionDialogueTurns) == 1
+assert sm10.sessionDialogueTurns[0].isFinalized == False, "Abbreviation 'руб.' must not finalize card"
+
+sm10.recordInputSpeech("in contanti.", now=2800)
+sm10.recordTranslationOutput("наличными.", now=3000, isFinished=True)
+assert len(sm10.sessionDialogueTurns) == 1
+assert sm10.sessionDialogueTurns[0].isFinalized == True, "Final period must finalize card"
+assert sm10.sessionDialogueTurns[0].russianText == "Господин Росси заплатил 10 руб. наличными."
 
 print("  -> Synchronous streaming state machine, sentence accumulation & sliding idle timer verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.27 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.28 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")

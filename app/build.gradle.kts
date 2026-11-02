@@ -11,8 +11,8 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 31
-        versionName = "1.0.27"
+        versionCode = 32
+        versionName = "1.0.28"
     }
 
     buildTypes {
