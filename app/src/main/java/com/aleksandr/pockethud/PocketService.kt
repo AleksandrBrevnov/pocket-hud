@@ -242,6 +242,7 @@ class PocketService : Service() {
     @Volatile private var lastPostedSubtitleText: String = ""
     @Volatile private var lastPostedSubtitleHistory: String = ""
     private val notificationFlushRunnable = Runnable { flushPendingNotification() }
+    private val simulIdleRunnable = Runnable { finalizeCurrentTurn() }
 
     private val tagRegex = Regex("""<thought>.*?</thought>|<[^>]+>|\{[^}]+\}""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
 
@@ -252,6 +253,7 @@ class PocketService : Service() {
         const val CHANNEL_SUBTITLES_ID = "pocket_hud_subtitles_v2"
         const val NOTIFICATION_ID = 1001
         const val SUBTITLE_NOTIFICATION_ID = 1002
+        const val SIMUL_IDLE_DELAY_MS = 2000L
 
         const val EXTRA_API_KEY = "extra_api_key"
         const val EXTRA_IS_MUTED = "extra_is_muted"
@@ -352,7 +354,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.25\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.26\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -409,7 +411,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.25 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.26 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -585,12 +587,27 @@ class PocketService : Service() {
         updateOngoingNotification(latest, history)
     }
 
+    private fun finalizeCurrentTurn() {
+        mainHandler.removeCallbacks(simulIdleRunnable)
+        synchronized(sessionDialogueTurns) {
+            val lastTurn = sessionDialogueTurns.lastOrNull()
+            if (lastTurn != null && !lastTurn.isFinalized) {
+                lastTurn.isFinalized = true
+                lastTurn.lastActivityTime = System.currentTimeMillis()
+                val idx = sessionDialogueTurns.size - 1
+                val turnCopy = lastTurn.copy()
+                onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
+            }
+        }
+    }
+
     private fun recordInputSpeech(cleanedInput: String) {
         Log.d(tag, "Распознана речь (IT/EN): $cleanedInput")
         logEvent("INPUT_SPEECH:", "\"$cleanedInput\"")
         appendToSessionBuilder(sessionItalianBuilder, cleanedInput)
         onInputTextReceived?.invoke(cleanedInput)
         silenceFramesCount = 0
+        mainHandler.removeCallbacks(simulIdleRunnable)
 
         // Обновление диалога в режиме Google Translate Conversation
         synchronized(sessionDialogueTurns) {
@@ -822,7 +839,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.25")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.26")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -898,16 +915,16 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.25")
+            appendLine("Версия: v1.0.26")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
-            appendLine("Сессионная ротация (Resumption): ${if (resumptionHandle.isNullOrBlank()) "нет" else "активна (${resumptionHandle?.take(16)}...)"}")
-            appendLine("Модель: models/gemini-3.8-live")
+            appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
+            appendLine("Модель: models/gemini-3.5-live-translate-preview")
             appendLine("Режим микрофона: $selectedMicSource (${if (selectedMicSource == MicSource.SMARTPHONE) "Встроенный + Hardware DSP + Soft-knee AGC" else "Гарнитура / Bluetooth SCO"})")
             appendLine("Hardware DSP: AGC=${hwAgc?.enabled ?: false}, NS=${hwNs?.enabled ?: false}")
             appendLine("Режим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН (Только субтитры)" else "🔊 ВКЛЮЧЕН (Голос в наушник)"}")
             appendLine("Источник микрофона: $activeAudioSource (16 кГц Mono PCM16)")
-            appendLine("Языки распознавания: [it-IT, en-US] -> RU")
+            appendLine("Языки распознавания: Live Translate -> RU")
             appendLine("Попыток переподключения: $reconnectAttempts/$maxReconnectAttempts")
             appendLine("--- ОЧЕРЕДИ АУДИО ---")
             appendLine("Очередь отправки mic (SendQueue): ${audioSendQueue.size} чанков")
@@ -1099,6 +1116,7 @@ class PocketService : Service() {
                 currentTurnInputSpeech = null
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
+                mainHandler.removeCallbacks(simulIdleRunnable)
                 if (isRunning) {
                     if (code == 1000) {
                         // Google 10-15 min Session Rotation: DO NOT call stopSelf()!
@@ -1161,7 +1179,7 @@ class PocketService : Service() {
 
     private fun sendSetup(ws: WebSocket) {
         val setupObj = JSONObject().apply {
-            put("model", "models/gemini-3.8-live")
+            put("model", "models/gemini-3.5-live-translate-preview")
             put("generationConfig", JSONObject().apply {
                 put("responseModalities", JSONArray().put("AUDIO"))
                 put("speechConfig", JSONObject().apply {
@@ -1171,7 +1189,13 @@ class PocketService : Service() {
                         })
                     })
                 })
+                put("translationConfig", JSONObject().apply {
+                    put("targetLanguageCode", "ru")
+                    put("echoTargetLanguage", false)
+                })
             })
+            put("inputAudioTranscription", JSONObject())
+            put("outputAudioTranscription", JSONObject())
             put("systemInstruction", JSONObject().apply {
                 put("parts", JSONArray().put(JSONObject().apply {
                     put("text", "You are an invisible real-time speech interpreter into Russian for Alexander living in Rome. " +
@@ -1193,26 +1217,13 @@ class PocketService : Service() {
                     put("prefixPaddingMs", 150)
                 })
             })
-            put("inputAudioTranscription", JSONObject().apply {
-                put("languageCodes", JSONArray().apply {
-                    put("it-IT")
-                    put("en-US")
-                })
-            })
-            put("outputAudioTranscription", JSONObject())
-            val resumptionObj = JSONObject()
-            val handle = resumptionHandle
-            if (!handle.isNullOrBlank()) {
-                resumptionObj.put("handle", handle)
-            }
-            put("sessionResumption", resumptionObj)
         }
 
         val setupJson = JSONObject().apply {
             put("setup", setupObj)
         }
         ws.send(setupJson.toString())
-        logEvent("SETUP_SENT", "model=models/gemini-3.8-live, languages=[it-IT, en-US], vad=[silence=400ms, NO_INTERRUPTION], resumed=${!resumptionHandle.isNullOrBlank()}")
+        logEvent("SETUP_SENT", "model=models/gemini-3.5-live-translate-preview, target=ru, vad=[silence=400ms, NO_INTERRUPTION]")
     }
 
     private fun handleServerMessage(jsonText: String) {
@@ -1270,7 +1281,7 @@ class PocketService : Service() {
                     logEvent("RECONNECT_SUCCESS", "attempts=$reconnectAttempts")
                     reconnectAttempts = 0
                 }
-                logEvent("SETUP_COMPLETE", "(model=gemini-3.8-live, mic=$activeAudioSource)")
+                logEvent("SETUP_COMPLETE", "(model=gemini-3.5-live-translate-preview, mic=$activeAudioSource)")
                 onStatusChanged?.invoke("🟢 Соединение активно! Слушаю итальянскую и английскую речь...")
                 updateOngoingNotification(
                     "🟢 Слушаю речь вокруг...",
@@ -1338,12 +1349,26 @@ class PocketService : Service() {
             val outputObj = serverContent.optJSONObject("outputTranscription")
                 ?: serverContent.optJSONObject("outputAudioTranscription")
                 ?: serverContent.optJSONObject("interimOutputTranscription")
+                ?: root.optJSONObject("outputTranscription")
+                ?: root.optJSONObject("outputAudioTranscription")
             val outputText = outputObj?.optString("text", "") ?: ""
+            val isFinished = outputObj?.optBoolean("finished", false) == true ||
+                             serverContent.optBoolean("finished", false) ||
+                             root.optBoolean("finished", false)
+
             if (outputText.isNotEmpty()) {
                 val cleanedOutput = cleanServerTags(outputText)
                 if (cleanedOutput.isNotEmpty()) {
                     recordTranslationOutput(cleanedOutput)
+                    mainHandler.removeCallbacks(simulIdleRunnable)
+                    if (isFinished) {
+                        finalizeCurrentTurn()
+                    } else {
+                        mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)
+                    }
                 }
+            } else if (isFinished) {
+                finalizeCurrentTurn()
             }
 
             // 6. Аудио PCM и возможные текстовые фрагменты из modelTurn.parts
@@ -1370,6 +1395,12 @@ class PocketService : Service() {
                             val cleanedText = cleanServerTags(text)
                             if (cleanedText.isNotEmpty()) {
                                 recordTranslationOutput(cleanedText)
+                                mainHandler.removeCallbacks(simulIdleRunnable)
+                                if (isFinished) {
+                                    finalizeCurrentTurn()
+                                } else {
+                                    mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)
+                                }
                             }
                         }
                     }
@@ -1377,20 +1408,12 @@ class PocketService : Service() {
             }
 
             // 7. Проверка завершения хода (turnComplete) и логирование пустых переводов
-            val turnComplete = serverContent.optBoolean("turnComplete", false) ||
+            val turnComplete = isFinished ||
+                               serverContent.optBoolean("turnComplete", false) ||
                                root.optBoolean("turnComplete", false) ||
                                (modelTurn?.optBoolean("turnComplete", false) == true)
             if (turnComplete) {
-                synchronized(sessionDialogueTurns) {
-                    val lastTurn = sessionDialogueTurns.lastOrNull()
-                    if (lastTurn != null && !lastTurn.isFinalized) {
-                        lastTurn.isFinalized = true
-                        lastTurn.lastActivityTime = System.currentTimeMillis()
-                        val idx = sessionDialogueTurns.size - 1
-                        val turnCopy = lastTurn.copy()
-                        onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
-                    }
-                }
+                finalizeCurrentTurn()
                 if (hasPendingTranslation) {
                     val origPrompt = currentTurnInputSpeech
                         ?: synchronized(sessionDialogueTurns) { sessionDialogueTurns.lastOrNull()?.italianText?.ifBlank { null } }
@@ -1624,26 +1647,6 @@ class PocketService : Service() {
                             silenceFramesCount = 0
                         } else {
                             silenceFramesCount++
-                            // 25 кадров по 100 мс = 2.5 сек физической тишины микрофона
-                            if (silenceFramesCount == 25) {
-                                synchronized(sessionDialogueTurns) {
-                                    val lastTurn = sessionDialogueTurns.lastOrNull()
-                                    if (lastTurn != null && !lastTurn.isFinalized) {
-                                        lastTurn.isFinalized = true
-                                        lastTurn.lastActivityTime = now
-                                        if (lastTurn.russianText.isBlank() && lastTurn.italianText.isNotBlank() && hasPendingTranslation) {
-                                            val prevPrompt = currentTurnInputSpeech ?: lastTurn.italianText
-                                            logEvent("TRANSLATION_EMPTY", "ORIG=\"$prevPrompt\" (silence timeout)")
-                                            Log.d(tag, "Речь зафиксирована ($prevPrompt), но перевод не получен за 2.5с тишины (TRANSLATION_EMPTY)")
-                                            hasPendingTranslation = false
-                                            currentTurnInputSpeech = null
-                                        }
-                                        val prevIdx = sessionDialogueTurns.size - 1
-                                        val prevCopy = lastTurn.copy()
-                                        onDialogueTurnUpdated?.invoke(prevIdx, prevCopy, false)
-                                    }
-                                }
-                            }
                         }
 
                         // Конвертация ShortArray в little-endian ByteArray
@@ -1779,6 +1782,7 @@ class PocketService : Service() {
 
         goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
         goAwayRunnable = null
+        mainHandler.removeCallbacks(simulIdleRunnable)
 
         audioPlaybackQueue.clear()
         playbackThread?.interrupt()

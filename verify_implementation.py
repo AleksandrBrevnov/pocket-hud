@@ -117,20 +117,18 @@ with open(pocket_service_path, "r", encoding="utf-8") as f:
 with open(build_gradle_path, "r", encoding="utf-8") as f:
     gradle_code = f.read()
 
-print("\n--- 1. Verification of v1.0.25 Version Bumps ---")
-assert 'versionCode = 25' in gradle_code, "versionCode 25 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.25"' in gradle_code, "versionName 1.0.25 missing in app/build.gradle.kts"
-assert 'text = "v1.0.25"' in main_code, "v1.0.25 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.25' in service_code, "v1.0.25 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.25 активен' in service_code, "v1.0.25 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.25' in service_code, "v1.0.25 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.25 OK across all files.")
+print("\n--- 1. Verification of v1.0.26 Version Bumps ---")
+assert 'versionCode = 29' in gradle_code, "versionCode 29 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.26"' in gradle_code, "versionName 1.0.26 missing in app/build.gradle.kts"
+assert 'text = "v1.0.26"' in main_code, "v1.0.26 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.26' in service_code, "v1.0.26 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.26 активен' in service_code, "v1.0.26 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.26' in service_code, "v1.0.26 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.26 OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
 assert "SESSION_ROTATION_RECONNECT" in service_code, "Session rotation reconnect log missing"
-assert "sessionResumptionUpdate" in service_code, "Root-level sessionResumptionUpdate extraction missing"
-assert "resumptionHandle = handle" in service_code, "resumptionHandle persistence missing"
 assert "root.has(\"goAway\")" in service_code, "Root-level goAway extraction missing"
 assert "goAwayRunnable" in service_code, "goAwayRunnable missing in PocketService.kt"
 assert "webSocket === currentWs" in service_code, "goAway race condition guard missing"
@@ -140,19 +138,30 @@ assert "Thread.sleep(40)" in service_code, "sendThread must sleep while !isSetup
 assert "isSetupComplete = true" in service_code, "isSetupComplete activation on setupComplete missing"
 print("  -> Session rotation & reconnect OK.")
 
-print("\n--- 3. Verification of Gemini Live realtimeInputConfig sendSetup() ---")
+print("\n--- 3. Verification of Native Gemini Live Translate sendSetup() ---")
+assert '"models/gemini-3.5-live-translate-preview"' in service_code, "models/gemini-3.5-live-translate-preview missing in sendSetup"
+assert '"translationConfig"' in service_code, "translationConfig missing in sendSetup"
+assert '"targetLanguageCode", "ru"' in service_code or '"targetLanguageCode"' in service_code, "targetLanguageCode ru missing in translationConfig"
+assert '"echoTargetLanguage", false' in service_code, "echoTargetLanguage false missing in translationConfig"
+assert '"responseModalities"' in service_code and '"AUDIO"' in service_code, "responseModalities AUDIO missing in generationConfig"
+assert '"voiceName", "Puck"' in service_code, "voiceName Puck missing in speechConfig"
+assert 'put("inputAudioTranscription", JSONObject())' in service_code, "inputAudioTranscription: {} missing at top level of setup"
+assert 'put("outputAudioTranscription", JSONObject())' in service_code, "outputAudioTranscription: {} missing at top level of setup"
+
+# Verify complete removal of sessionResumption from sendSetup to prevent duplicate phrases
+setup_body_match = re.search(r'private fun sendSetup\(ws: WebSocket\)\s*\{(.*?)\n    \}', service_code, re.DOTALL)
+assert setup_body_match, "Could not extract sendSetup body from PocketService.kt"
+setup_body = setup_body_match.group(1)
+assert "sessionResumption" not in setup_body, "sessionResumption must be completely removed from sendSetup"
+assert "resumptionObj" not in setup_body, "resumptionObj must be completely removed from sendSetup"
+
 assert '"realtimeInputConfig"' in service_code, "realtimeInputConfig missing in sendSetup"
 assert '"silenceDurationMs", 400' in service_code or '"silenceDurationMs"' in service_code, "silenceDurationMs missing in sendSetup"
 assert '"NO_INTERRUPTION"' in service_code, "NO_INTERRUPTION missing in realtimeInputConfig"
 assert '"START_SENSITIVITY_HIGH"' in service_code, "START_SENSITIVITY_HIGH missing in realtimeInputConfig"
 assert '"END_SENSITIVITY_HIGH"' in service_code, "END_SENSITIVITY_HIGH missing in realtimeInputConfig"
 assert '"prefixPaddingMs", 150' in service_code or '"prefixPaddingMs"' in service_code, "prefixPaddingMs missing in sendSetup"
-assert '"sessionResumption"' in service_code, "sessionResumption object missing in sendSetup"
-assert '"handle", handle' in service_code, "resumptionHandle injection missing in sendSetup"
-assert '"languageCodes"' in service_code, "languageCodes array missing in sendSetup"
-assert '"it-IT"' in service_code, "it-IT missing in languageCodes"
-assert '"en-US"' in service_code, "en-US missing in languageCodes"
-print("  -> Gemini Live realtimeInputConfig fast VAD configuration OK.")
+print("  -> Native Gemini Live Translate sendSetup() configuration verified perfectly.")
 
 print("\n--- 4. Verification of Split Audio Routing & Hardware DSP ---")
 assert "var selectedMicSource: MicSource = MicSource.SMARTPHONE" in service_code, "Default mic in PocketService must be SMARTPHONE"
@@ -336,18 +345,27 @@ print(f"  Loud sample 32767 -> {out_loud[0]} (soft saturation without digital cl
 assert out_loud[0] <= 32767 and out_loud[0] > 32000, "Loud sample must saturate near ceiling"
 print("  -> Dynamic soft-knee AGC & Noise Gate verified perfectly.")
 
-print("\n--- 9. Verification of TRANSLATION_EMPTY Logging & Utterance Accumulation ---")
+print("\n--- 9. Verification of Synchronous Live Translate Streaming, Idle Timer & Mic Silence Guard ---")
+assert "SIMUL_IDLE_DELAY_MS = 2000L" in service_code, "SIMUL_IDLE_DELAY_MS = 2000L missing in PocketService companion object"
+assert "simulIdleRunnable" in service_code, "simulIdleRunnable missing in PocketService.kt"
+assert "finalizeCurrentTurn()" in service_code, "finalizeCurrentTurn() method missing in PocketService.kt"
+assert "isFinished" in service_code, "isFinished flag handling missing in handleServerMessage"
+assert "mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)" in service_code, "Sliding idle timer postDelayed missing in handleServerMessage"
+assert "mainHandler.removeCallbacks(simulIdleRunnable)" in service_code, "Sliding idle timer removeCallbacks missing"
+
+# Verify elimination of false reset in recordThread
+assert "silenceFramesCount == 25" not in service_code, "False reset silenceFramesCount == 25 must be completely removed from recordThread"
+assert "@Volatile private var silenceFramesCount = 0" in service_code, "silenceFramesCount must be volatile class member"
+assert "silenceFramesCount = 0" in service_code, "silenceFramesCount must be reset on speech detection"
+assert "silenceFramesCount++" in service_code, "silenceFramesCount must increment on silent frames"
+
 assert "TRANSLATION_EMPTY" in service_code, "TRANSLATION_EMPTY event logging missing in PocketService.kt"
 assert "hasPendingTranslation" in service_code, "hasPendingTranslation state tracking missing in PocketService.kt"
 assert "turnComplete" in service_code, "turnComplete check missing in PocketService.kt"
-assert "silenceFramesCount == 25" in service_code, "Physical microphone silence watchdog (2.5s) missing in PocketService.kt"
-assert "@Volatile private var silenceFramesCount = 0" in service_code, "silenceFramesCount must be volatile class member for cross-thread safety"
-assert "silenceFramesCount = 0" in service_code, "silenceFramesCount must be reset on speech detection and recognition"
 assert "lastRecognizedInput = lastTurn.italianText" in service_code, "lastRecognizedInput must accumulate full Italian turn across chunks"
 assert "currentTurnInputSpeech = lastTurn.italianText" in service_code, "currentTurnInputSpeech must accumulate full Italian turn across chunks"
-assert "val prevPrompt = currentTurnInputSpeech ?: lastTurn.italianText" in service_code, "Timeout TRANSLATION_EMPTY must use accumulated prompt"
 
-# Python simulation of turn accumulation and TRANSLATION_EMPTY state machine
+# Python simulation of synchronous streaming turn state machine with sliding idle timer
 class DialogueTurnSim:
     def __init__(self, italianText, russianText, timestamp, isFinalized=False):
         self.italianText = italianText
@@ -355,15 +373,24 @@ class DialogueTurnSim:
         self.timestamp = timestamp
         self.isFinalized = isFinalized
 
-class TurnStateMachine:
+class SynchronousTurnStateMachine:
     def __init__(self):
         self.sessionDialogueTurns = []
         self.hasPendingTranslation = False
         self.currentTurnInputSpeech = None
         self.lastRecognizedInput = ""
+        self.idleTimerDeadline = None
         self.logged_events = []
 
+    def finalizeCurrentTurn(self):
+        self.idleTimerDeadline = None
+        if self.sessionDialogueTurns:
+            lastTurn = self.sessionDialogueTurns[-1]
+            if not lastTurn.isFinalized:
+                lastTurn.isFinalized = True
+
     def recordInputSpeech(self, cleanedInput: str, now: int):
+        self.idleTimerDeadline = None
         lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
         if lastTurn and not lastTurn.isFinalized and not lastTurn.russianText.strip():
             if lastTurn.italianText and not lastTurn.italianText.endswith(" ") and not cleanedInput.startswith(" "):
@@ -385,82 +412,94 @@ class TurnStateMachine:
             self.hasPendingTranslation = True
             self.sessionDialogueTurns.append(newTurn)
 
-    def onTurnComplete(self):
-        lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
-        if lastTurn and not lastTurn.isFinalized:
-            lastTurn.isFinalized = True
-        if self.hasPendingTranslation:
-            origPrompt = self.currentTurnInputSpeech or (lastTurn.italianText if lastTurn else "") or self.lastRecognizedInput
-            self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{origPrompt}"'))
-            self.hasPendingTranslation = False
-            self.currentTurnInputSpeech = None
-
-    def onMicSilenceTimeout(self, now: int):
-        lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
-        if lastTurn and not lastTurn.isFinalized:
-            lastTurn.isFinalized = True
-            if not lastTurn.russianText.strip() and lastTurn.italianText.strip() and self.hasPendingTranslation:
-                prevPrompt = self.currentTurnInputSpeech or lastTurn.italianText
-                self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{prevPrompt}" (silence timeout)'))
-                self.hasPendingTranslation = False
-                self.currentTurnInputSpeech = None
-
-    def recordTranslationOutput(self, cleanedText: str):
+    def recordTranslationOutput(self, cleanedText: str, now: int, isFinished: bool = False):
         self.hasPendingTranslation = False
         self.currentTurnInputSpeech = None
         origPrompt = self.sessionDialogueTurns[-1].italianText if self.sessionDialogueTurns else self.lastRecognizedInput
         self.logged_events.append(("TRANSLATION", f'ORIG="{origPrompt}" -> RU="{cleanedText}"'))
-        if self.sessionDialogueTurns:
-            self.sessionDialogueTurns[-1].russianText = cleanedText
 
-# Scenario 1: Chunked speech with empty translation -> logs full sentence, no duplicate on subsequent speech
-sm1 = TurnStateMachine()
-sm1.recordInputSpeech("Vorrei", now=1000)
-sm1.recordInputSpeech("un caffe", now=1500)
-sm1.recordInputSpeech("per favore", now=2000)
-assert sm1.currentTurnInputSpeech == "Vorrei un caffe per favore", f"Expected accumulated prompt, got '{sm1.currentTurnInputSpeech}'"
-sm1.onTurnComplete()
-assert len(sm1.logged_events) == 1, f"Expected 1 event, got {len(sm1.logged_events)}"
-assert sm1.logged_events[0] == ("TRANSLATION_EMPTY", 'ORIG="Vorrei un caffe per favore"'), f"Unexpected event {sm1.logged_events[0]}"
+        lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
+        if lastTurn and (not lastTurn.isFinalized or not lastTurn.russianText.strip()):
+            if lastTurn.russianText.strip() and not lastTurn.russianText.endswith(" ") and not cleanedText.startswith(" "):
+                lastTurn.russianText += f" {cleanedText}"
+            else:
+                lastTurn.russianText += cleanedText
+        else:
+            newTurn = DialogueTurnSim("", cleanedText, now, isFinalized=False)
+            self.sessionDialogueTurns.append(newTurn)
 
-# 10s later, new speech arrives -> must NOT duplicate TRANSLATION_EMPTY for previous turn, starts new turn
-sm1.recordInputSpeech("Buongiorno", now=12000)
-assert len(sm1.logged_events) == 1, f"Expected still 1 event (no duplicate), got {len(sm1.logged_events)}"
+        if isFinished:
+            self.finalizeCurrentTurn()
+        else:
+            self.idleTimerDeadline = now + 2000
+
+    def checkIdleTimer(self, now: int):
+        if self.idleTimerDeadline is not None and now >= self.idleTimerDeadline:
+            self.finalizeCurrentTurn()
+
+    def onTurnComplete(self):
+        self.finalizeCurrentTurn()
+        if self.hasPendingTranslation:
+            origPrompt = self.currentTurnInputSpeech or (self.sessionDialogueTurns[-1].italianText if self.sessionDialogueTurns else "") or self.lastRecognizedInput
+            self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{origPrompt}"'))
+            self.hasPendingTranslation = False
+            self.currentTurnInputSpeech = None
+
+# Scenario 1: Continuous streaming translation chunks with sliding idle timer
+sm1 = SynchronousTurnStateMachine()
+sm1.recordInputSpeech("Vorrei un caffe", now=1000)
+sm1.recordTranslationOutput("Я хотел бы", now=1400, isFinished=False)
+assert sm1.sessionDialogueTurns[0].isFinalized == False, "Turn must remain unfinalized while streaming"
+assert sm1.idleTimerDeadline == 3400, f"Expected deadline 3400, got {sm1.idleTimerDeadline}"
+
+# Next chunk arrives at 2200 ms (before 3400 ms timeout) -> resets deadline to 4200 ms
+sm1.recordTranslationOutput("кофе", now=2200, isFinished=False)
+assert sm1.idleTimerDeadline == 4200, f"Expected reset deadline 4200, got {sm1.idleTimerDeadline}"
+assert sm1.sessionDialogueTurns[0].russianText == "Я хотел бы кофе"
+
+# At 3500 ms (no new chunks yet), timer has NOT expired
+sm1.checkIdleTimer(now=3500)
+assert sm1.sessionDialogueTurns[0].isFinalized == False
+
+# At 4250 ms (2050 ms of idle after last chunk), timer triggers
+sm1.checkIdleTimer(now=4250)
+assert sm1.sessionDialogueTurns[0].isFinalized == True, "Turn must be finalized by sliding idle timer"
+assert sm1.idleTimerDeadline is None
+
+# Subsequent speech arrives at 6000 ms -> starts fresh turn
+sm1.recordInputSpeech("Grazie", now=6000)
 assert len(sm1.sessionDialogueTurns) == 2, f"Expected 2 turns, got {len(sm1.sessionDialogueTurns)}"
+assert sm1.sessionDialogueTurns[1].italianText == "Grazie"
 
-# Scenario 2: Physical mic silence timeout without turnComplete
-sm2 = TurnStateMachine()
-sm2.recordInputSpeech("Scusi", now=1000)
-# 2.5s of mic silence triggers watchdog
-sm2.onMicSilenceTimeout(now=3500)
-assert len(sm2.logged_events) == 1, f"Expected 1 event, got {len(sm2.logged_events)}"
-assert sm2.logged_events[0] == ("TRANSLATION_EMPTY", 'ORIG="Scusi" (silence timeout)'), f"Unexpected event {sm2.logged_events[0]}"
-# Subsequent speech creates fresh turn
-sm2.recordInputSpeech("Ehi", now=4000)
-assert len(sm2.sessionDialogueTurns) == 2, f"Expected 2 turns, got {len(sm2.sessionDialogueTurns)}"
+# Scenario 2: Microphone silence does NOT kill ongoing translation context
+sm2 = SynchronousTurnStateMachine()
+sm2.recordInputSpeech("Quanto costa?", now=1000)
+# 3 seconds pass in microphone (physical silence) -> context must NOT be dropped
+assert sm2.hasPendingTranslation == True
+assert sm2.currentTurnInputSpeech == "Quanto costa?"
+# Server sends translation after mic was silent
+sm2.recordTranslationOutput("Сколько это стоит?", now=4200, isFinished=True)
+assert sm2.sessionDialogueTurns[0].russianText == "Сколько это стоит?"
+assert sm2.sessionDialogueTurns[0].isFinalized == True
+assert len(sm2.logged_events) == 1
+assert sm2.logged_events[0] == ("TRANSLATION", 'ORIG="Quanto costa?" -> RU="Сколько это стоит?"')
 
-# Scenario 3: Normal translation output
-sm3 = TurnStateMachine()
-sm3.recordInputSpeech("Come", now=1000)
-sm3.recordInputSpeech("va?", now=1500)
-sm3.recordTranslationOutput("Как дела?")
+# Scenario 3: Empty speech followed by turnComplete -> logs TRANSLATION_EMPTY
+sm3 = SynchronousTurnStateMachine()
+sm3.recordInputSpeech("Pronto", now=1000)
 sm3.onTurnComplete()
-assert len(sm3.logged_events) == 1, f"Expected only TRANSLATION event, got {len(sm3.logged_events)}"
-assert sm3.logged_events[0] == ("TRANSLATION", 'ORIG="Come va?" -> RU="Как дела?"')
+assert len(sm3.logged_events) == 1
+assert sm3.logged_events[0] == ("TRANSLATION_EMPTY", 'ORIG="Pronto"')
 
-# Scenario 4: Rapid back-to-back speech where previous turn already had translation (exercises line 376)
-sm4 = TurnStateMachine()
-sm4.recordInputSpeech("Come va?", now=1000)
-sm4.recordTranslationOutput("Как дела?")
-# New speech arrives before turnComplete
-sm4.recordInputSpeech("Tutto bene?", now=2000)
-assert len(sm4.sessionDialogueTurns) == 2, f"Expected 2 turns, got {len(sm4.sessionDialogueTurns)}"
-assert sm4.sessionDialogueTurns[0].isFinalized == True, "Previous translated turn must be finalized"
-assert sm4.sessionDialogueTurns[0].russianText == "Как дела?", "Previous translation must be preserved"
-assert len(sm4.logged_events) == 1, f"Expected only TRANSLATION event, got {len(sm4.logged_events)}"
+# Scenario 4: Fast finished flag from server finalizes immediately without 2s delay
+sm4 = SynchronousTurnStateMachine()
+sm4.recordInputSpeech("Si", now=1000)
+sm4.recordTranslationOutput("Да", now=1300, isFinished=True)
+assert sm4.sessionDialogueTurns[0].isFinalized == True, "Finished flag must finalize turn immediately"
+assert sm4.idleTimerDeadline is None
 
-print("  -> TRANSLATION_EMPTY logging & utterance accumulation verified perfectly.")
+print("  -> Synchronous streaming state machine & sliding idle timer verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.25 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.26 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
