@@ -583,11 +583,8 @@ class PocketService : Service() {
     }
 
     private fun recordInputSpeech(cleanedInput: String) {
-        lastRecognizedInput = cleanedInput
         Log.d(tag, "Распознана речь (IT/EN): $cleanedInput")
-        logEvent("INPUT_SPEECH:", "\"$lastRecognizedInput\"")
-        hasPendingTranslation = true
-        currentTurnInputSpeech = cleanedInput
+        logEvent("INPUT_SPEECH:", "\"$cleanedInput\"")
         appendToSessionBuilder(sessionItalianBuilder, cleanedInput)
         onInputTextReceived?.invoke(cleanedInput)
 
@@ -602,13 +599,18 @@ class PocketService : Service() {
                 } else {
                     lastTurn.italianText += cleanedInput
                 }
+                lastRecognizedInput = lastTurn.italianText
+                currentTurnInputSpeech = lastTurn.italianText
+                hasPendingTranslation = true
                 val idx = sessionDialogueTurns.size - 1
                 val turnCopy = lastTurn.copy()
                 onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
             } else {
-                // Если предыдущая реплика осталась без перевода по таймауту (>8 сек), логируем TRANSLATION_EMPTY
+                // Если предыдущая реплика осталась без перевода по таймауту (>8 сек) и еще не была залогирована как пустая
                 if (lastTurn != null && lastTurn.russianText.isBlank() && lastTurn.italianText.isNotBlank() && hasPendingTranslation) {
-                    logEvent("TRANSLATION_EMPTY", "ORIG=\"${lastTurn.italianText}\" (new turn timeout)")
+                    val prevPrompt = currentTurnInputSpeech ?: lastTurn.italianText
+                    logEvent("TRANSLATION_EMPTY", "ORIG=\"$prevPrompt\" (turn timeout)")
+                    Log.d(tag, "Речь зафиксирована ($prevPrompt), но перевод не получен по таймауту (TRANSLATION_EMPTY)")
                 }
                 // Создаем новую пару диалога
                 val newTurn = DialogueTurn(
@@ -616,6 +618,9 @@ class PocketService : Service() {
                     russianText = "",
                     timestamp = now
                 )
+                lastRecognizedInput = cleanedInput
+                currentTurnInputSpeech = cleanedInput
+                hasPendingTranslation = true
                 sessionDialogueTurns.add(newTurn)
                 if (sessionDialogueTurns.size > 200) {
                     sessionDialogueTurns.removeAt(0)
@@ -632,7 +637,9 @@ class PocketService : Service() {
         lastServerText = cleanedText
         hasPendingTranslation = false
         currentTurnInputSpeech = null
-        val origPrompt = if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
+        val origPrompt = synchronized(sessionDialogueTurns) {
+            sessionDialogueTurns.lastOrNull()?.italianText?.ifBlank { null }
+        } ?: if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
         logEvent("TRANSLATION:", "ORIG=\"$origPrompt\" -> RU=\"$lastServerText\"")
 
         recentTranslations.append(cleanedText).append(" ")
@@ -1348,7 +1355,9 @@ class PocketService : Service() {
                                (modelTurn?.optBoolean("turnComplete", false) == true)
             if (turnComplete) {
                 if (hasPendingTranslation) {
-                    val origPrompt = currentTurnInputSpeech ?: lastRecognizedInput
+                    val origPrompt = currentTurnInputSpeech
+                        ?: synchronized(sessionDialogueTurns) { sessionDialogueTurns.lastOrNull()?.italianText?.ifBlank { null } }
+                        ?: if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
                     logEvent("TRANSLATION_EMPTY", "ORIG=\"$origPrompt\"")
                     Log.d(tag, "Речь зафиксирована ($origPrompt), но перевод не сгенерирован (TRANSLATION_EMPTY)")
                     hasPendingTranslation = false
@@ -1665,6 +1674,8 @@ class PocketService : Service() {
 
         inputTagCleaner.reset()
         outputTagCleaner.reset()
+        hasPendingTranslation = false
+        currentTurnInputSpeech = null
         queuedPlaybackBytes.set(0L)
         isPlaybackSpeedBoosted = false
 

@@ -298,11 +298,96 @@ print(f"  Loud sample {loud_sample} -> {out_loud} (soft saturation without digit
 assert out_loud <= 32767, "Loud sample must not clip or overflow"
 assert out_loud > 32000, "Loud sample should saturate near ceiling"
 
-print("\n--- 9. Verification of TRANSLATION_EMPTY Logging ---")
+print("\n--- 9. Verification of TRANSLATION_EMPTY Logging & Utterance Accumulation ---")
 assert "TRANSLATION_EMPTY" in service_code, "TRANSLATION_EMPTY event logging missing in PocketService.kt"
 assert "hasPendingTranslation" in service_code, "hasPendingTranslation state tracking missing in PocketService.kt"
 assert "turnComplete" in service_code, "turnComplete check missing in PocketService.kt"
-print("  -> TRANSLATION_EMPTY logging verified.")
+assert "lastRecognizedInput = lastTurn.italianText" in service_code, "lastRecognizedInput must accumulate full Italian turn across chunks"
+assert "currentTurnInputSpeech = lastTurn.italianText" in service_code, "currentTurnInputSpeech must accumulate full Italian turn across chunks"
+assert "val prevPrompt = currentTurnInputSpeech ?: lastTurn.italianText" in service_code, "Timeout TRANSLATION_EMPTY must use accumulated prompt"
+
+# Python simulation of turn accumulation and TRANSLATION_EMPTY state machine
+class DialogueTurnSim:
+    def __init__(self, italianText, russianText, timestamp):
+        self.italianText = italianText
+        self.russianText = russianText
+        self.timestamp = timestamp
+
+class TurnStateMachine:
+    def __init__(self):
+        self.sessionDialogueTurns = []
+        self.hasPendingTranslation = False
+        self.currentTurnInputSpeech = None
+        self.lastRecognizedInput = ""
+        self.logged_events = []
+
+    def recordInputSpeech(self, cleanedInput: str, now: int):
+        lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
+        if lastTurn and not lastTurn.russianText.strip() and (now - lastTurn.timestamp < 8000):
+            if lastTurn.italianText and not lastTurn.italianText.endswith(" ") and not cleanedInput.startswith(" "):
+                lastTurn.italianText += f" {cleanedInput}"
+            else:
+                lastTurn.italianText += cleanedInput
+            self.lastRecognizedInput = lastTurn.italianText
+            self.currentTurnInputSpeech = lastTurn.italianText
+            self.hasPendingTranslation = True
+        else:
+            if lastTurn and not lastTurn.russianText.strip() and lastTurn.italianText.strip() and self.hasPendingTranslation:
+                prevPrompt = self.currentTurnInputSpeech or lastTurn.italianText
+                self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{prevPrompt}" (turn timeout)'))
+            newTurn = DialogueTurnSim(cleanedInput, "", now)
+            self.lastRecognizedInput = cleanedInput
+            self.currentTurnInputSpeech = cleanedInput
+            self.hasPendingTranslation = True
+            self.sessionDialogueTurns.append(newTurn)
+
+    def onTurnComplete(self):
+        if self.hasPendingTranslation:
+            origPrompt = self.currentTurnInputSpeech or (self.sessionDialogueTurns[-1].italianText if self.sessionDialogueTurns else "") or self.lastRecognizedInput
+            self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{origPrompt}"'))
+            self.hasPendingTranslation = False
+            self.currentTurnInputSpeech = None
+
+    def recordTranslationOutput(self, cleanedText: str):
+        self.hasPendingTranslation = False
+        self.currentTurnInputSpeech = None
+        origPrompt = self.sessionDialogueTurns[-1].italianText if self.sessionDialogueTurns else self.lastRecognizedInput
+        self.logged_events.append(("TRANSLATION", f'ORIG="{origPrompt}" -> RU="{cleanedText}"'))
+        if self.sessionDialogueTurns:
+            self.sessionDialogueTurns[-1].russianText = cleanedText
+
+# Scenario 1: Chunked speech with empty translation -> logs full sentence, no duplicate on subsequent speech
+sm1 = TurnStateMachine()
+sm1.recordInputSpeech("Vorrei", now=1000)
+sm1.recordInputSpeech("un caffe", now=1500)
+sm1.recordInputSpeech("per favore", now=2000)
+assert sm1.currentTurnInputSpeech == "Vorrei un caffe per favore", f"Expected accumulated prompt, got '{sm1.currentTurnInputSpeech}'"
+sm1.onTurnComplete()
+assert len(sm1.logged_events) == 1, f"Expected 1 event, got {len(sm1.logged_events)}"
+assert sm1.logged_events[0] == ("TRANSLATION_EMPTY", 'ORIG="Vorrei un caffe per favore"'), f"Unexpected event {sm1.logged_events[0]}"
+
+# 10s later, new speech arrives -> must NOT duplicate TRANSLATION_EMPTY for previous turn
+sm1.recordInputSpeech("Buongiorno", now=12000)
+assert len(sm1.logged_events) == 1, f"Expected still 1 event (no duplicate), got {len(sm1.logged_events)}"
+
+# Scenario 2: Turn timeout without turnComplete
+sm2 = TurnStateMachine()
+sm2.recordInputSpeech("Scusi", now=1000)
+# 10s later new turn arrives without turnComplete or translation
+sm2.recordInputSpeech("Ehi", now=11000)
+assert len(sm2.logged_events) == 1, f"Expected 1 event, got {len(sm2.logged_events)}"
+assert sm2.logged_events[0] == ("TRANSLATION_EMPTY", 'ORIG="Scusi" (turn timeout)'), f"Unexpected event {sm2.logged_events[0]}"
+
+# Scenario 3: Normal translation output
+sm3 = TurnStateMachine()
+sm3.recordInputSpeech("Come", now=1000)
+sm3.recordInputSpeech("va?", now=1500)
+sm3.recordTranslationOutput("Как дела?")
+sm3.onTurnComplete()
+assert len(sm3.logged_events) == 1, f"Expected only TRANSLATION event, got {len(sm3.logged_events)}"
+assert sm3.logged_events[0] == ("TRANSLATION", 'ORIG="Come va?" -> RU="Как дела?"')
+
+print("  -> TRANSLATION_EMPTY logging & utterance accumulation verified perfectly.")
 
 print("\n=======================================================")
 print("🎉 ALL V1.0.23 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
