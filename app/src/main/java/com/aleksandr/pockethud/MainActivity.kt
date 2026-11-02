@@ -715,10 +715,18 @@ class MainActivity : AppCompatActivity() {
 
         val isRuBlank = turn.russianText.isBlank()
         val ruTv = TextView(this).apply {
-            text = if (isRuBlank) "⏳ Ожидание перевода..." else turn.russianText
+            text = when {
+                !isRuBlank -> turn.russianText
+                turn.isFinalized -> "⚠️ Перевод не получен (шум / пауза)"
+                else -> "⏳ Ожидание перевода..."
+            }
             textSize = 17.5f
             setTypeface(null, Typeface.BOLD)
-            setTextColor(if (isRuBlank) 0xFF4A6B56.toInt() else 0xFF81C995.toInt())
+            setTextColor(when {
+                !isRuBlank -> 0xFF81C995.toInt()
+                turn.isFinalized -> 0xFFE5A93C.toInt()
+                else -> 0xFF4A6B56.toInt()
+            })
             setLineSpacing(dpF(4f), 1.25f)
         }
         ruBubble.addView(ruTv)
@@ -733,8 +741,9 @@ class MainActivity : AppCompatActivity() {
                 dialogueEmptyPlaceholder.visibility = View.GONE
             }
 
-            // Sticky scroll: Autoscroll only if user was already at the bottom
-            val wasAtBottom = !dialogueScrollView.canScrollVertically(1)
+            // Sticky scroll: Autoscroll only if user was already at or near the bottom (40dp tolerance)
+            val diff = dialogueFeedLayout.bottom - (dialogueScrollView.height + dialogueScrollView.scrollY)
+            val wasAtBottom = diff <= dp(40) || !dialogueScrollView.canScrollVertically(1)
 
             if (isNew || turnIndex >= turnViewHolders.size) {
                 val holder = createTurnViewHolder(turn)
@@ -755,6 +764,9 @@ class MainActivity : AppCompatActivity() {
                 if (turn.russianText.isNotBlank()) {
                     holder.russianText.text = turn.russianText
                     holder.russianText.setTextColor(0xFF81C995.toInt())
+                } else if (turn.isFinalized) {
+                    holder.russianText.text = "⚠️ Перевод не получен (шум / пауза)"
+                    holder.russianText.setTextColor(0xFFE5A93C.toInt())
                 } else {
                     holder.russianText.text = "⏳ Ожидание перевода..."
                     holder.russianText.setTextColor(0xFF4A6B56.toInt())
@@ -861,7 +873,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.23"
+            text = "v1.0.24"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
