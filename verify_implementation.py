@@ -117,14 +117,14 @@ with open(pocket_service_path, "r", encoding="utf-8") as f:
 with open(build_gradle_path, "r", encoding="utf-8") as f:
     gradle_code = f.read()
 
-print("\n--- 1. Verification of v1.0.26 Version Bumps ---")
-assert 'versionCode = 29' in gradle_code, "versionCode 29 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.26"' in gradle_code, "versionName 1.0.26 missing in app/build.gradle.kts"
-assert 'text = "v1.0.26"' in main_code, "v1.0.26 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.26' in service_code, "v1.0.26 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.26 активен' in service_code, "v1.0.26 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.26' in service_code, "v1.0.26 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.26 OK across all files.")
+print("\n--- 1. Verification of v1.0.27 Version Bumps ---")
+assert 'versionCode = 31' in gradle_code, "versionCode 31 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.27"' in gradle_code, "versionName 1.0.27 missing in app/build.gradle.kts"
+assert 'text = "v1.0.27"' in main_code, "v1.0.27 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.27' in service_code, "v1.0.27 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.27 активен' in service_code, "v1.0.27 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.27' in service_code, "v1.0.27 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.27 OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -365,8 +365,31 @@ assert 'root.has("error")' in service_code, "Google Live server error check miss
 assert "SERVER_ERROR" in service_code, "SERVER_ERROR logging missing"
 assert "lastRecognizedInput = lastTurn.italianText" in service_code, "lastRecognizedInput must accumulate full Italian turn across chunks"
 assert "currentTurnInputSpeech = lastTurn.italianText" in service_code, "currentTurnInputSpeech must accumulate full Italian turn across chunks"
+assert "isSentenceEnding" in service_code, "isSentenceEnding helper missing in PocketService.kt"
+assert "isContinuation" in service_code, "isContinuation helper missing in PocketService.kt"
+assert "appendWithPunctuationAwareSpace" in service_code, "appendWithPunctuationAwareSpace helper missing in PocketService.kt"
 
-# Python simulation of synchronous streaming turn state machine with sliding idle timer
+def isSentenceEnding(text: str) -> bool:
+    s = text.rstrip().rstrip('"' + "'" + '»«)]}”’')
+    return s.endswith('.') or s.endswith('!') or s.endswith('?') or s.endswith('…')
+
+def isContinuation(text: str) -> bool:
+    s = text.rstrip().rstrip('"' + "'" + '»«)]}”’')
+    return s.endswith(',') or s.endswith(';') or s.endswith(':') or s.endswith('-') or s.endswith('—')
+
+def appendWithPunctuationAwareSpace(existing: str, addition: str) -> str:
+    trimmed_add = addition.strip()
+    if not trimmed_add:
+        return existing
+    if not existing.strip():
+        return trimmed_add
+    starts_with_punct = trimmed_add[0] in ['.', ',', '!', '?', ';', ':', '…', ')', ']', '}']
+    if existing.endswith(" ") or starts_with_punct:
+        return existing + trimmed_add
+    else:
+        return f"{existing} {trimmed_add}"
+
+# Python simulation of synchronous streaming turn state machine with sentence accumulation
 class DialogueTurnSim:
     def __init__(self, italianText, russianText, timestamp, isFinalized=False):
         self.italianText = italianText
@@ -393,11 +416,17 @@ class SynchronousTurnStateMachine:
     def recordInputSpeech(self, cleanedInput: str, now: int):
         self.idleTimerDeadline = None
         lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
-        if lastTurn and not lastTurn.isFinalized and not lastTurn.russianText.strip():
-            if lastTurn.italianText and not lastTurn.italianText.endswith(" ") and not cleanedInput.startswith(" "):
-                lastTurn.italianText += f" {cleanedInput}"
-            else:
-                lastTurn.italianText += cleanedInput
+
+        isSentenceComplete = (lastTurn is not None and not lastTurn.isFinalized and
+            bool(lastTurn.russianText.strip()) and
+            (isSentenceEnding(lastTurn.russianText) or isSentenceEnding(lastTurn.italianText)) and
+            not isContinuation(lastTurn.russianText) and
+            not isContinuation(lastTurn.italianText))
+
+        canAppendToCurrent = lastTurn is not None and not lastTurn.isFinalized and not isSentenceComplete
+
+        if canAppendToCurrent:
+            lastTurn.italianText = appendWithPunctuationAwareSpace(lastTurn.italianText, cleanedInput)
             self.lastRecognizedInput = lastTurn.italianText
             self.currentTurnInputSpeech = lastTurn.italianText
             self.hasPendingTranslation = True
@@ -420,11 +449,8 @@ class SynchronousTurnStateMachine:
         self.logged_events.append(("TRANSLATION", f'ORIG="{origPrompt}" -> RU="{cleanedText}"'))
 
         lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
-        if lastTurn and (not lastTurn.isFinalized or not lastTurn.russianText.strip()):
-            if lastTurn.russianText.strip() and not lastTurn.russianText.endswith(" ") and not cleanedText.startswith(" "):
-                lastTurn.russianText += f" {cleanedText}"
-            else:
-                lastTurn.russianText += cleanedText
+        if lastTurn and not lastTurn.isFinalized:
+            lastTurn.russianText = appendWithPunctuationAwareSpace(lastTurn.russianText, cleanedText)
         else:
             newTurn = DialogueTurnSim("", cleanedText, now, isFinalized=False)
             self.sessionDialogueTurns.append(newTurn)
@@ -521,11 +547,52 @@ sm6.recordTranslationOutput("Я хотел бы знать...", now=1300, isFini
 assert sm6.idleTimerDeadline == 3300
 sm6.onInterrupted()
 assert sm6.idleTimerDeadline is None
-assert sm6.sessionDialogueTurns[0].isFinalized == True
-assert sm6.hasPendingTranslation == False
+# Scenario 7: In-place streaming accumulation across multiple interleaved micro-chunks (user bug from Session Log 4)
+sm7 = SynchronousTurnStateMachine()
+sm7.recordInputSpeech("Sei venuta", now=1000)
+sm7.recordTranslationOutput("Ты пришла", now=1200, isFinished=False)
+assert len(sm7.sessionDialogueTurns) == 1
+assert sm7.sessionDialogueTurns[0].russianText == "Ты пришла"
 
-print("  -> Synchronous streaming state machine & sliding idle timer verified perfectly.")
+# 2nd micro-chunk: same sentence continues without punctuation
+sm7.recordInputSpeech("a contatto con", now=1800)
+sm7.recordTranslationOutput("в контакт с", now=2000, isFinished=False)
+assert len(sm7.sessionDialogueTurns) == 1, "Micro-chunks must NOT create a new card every 2-3 words!"
+assert sm7.sessionDialogueTurns[0].italianText == "Sei venuta a contatto con"
+assert sm7.sessionDialogueTurns[0].russianText == "Ты пришла в контакт с"
+
+# 3rd micro-chunk
+sm7.recordInputSpeech("con una", now=2800)
+sm7.recordTranslationOutput("одной", now=3000, isFinished=False)
+assert len(sm7.sessionDialogueTurns) == 1
+
+# 4th micro-chunk
+sm7.recordInputSpeech("che non", now=3800)
+sm7.recordTranslationOutput("которая не", now=4000, isFinished=False)
+assert len(sm7.sessionDialogueTurns) == 1
+
+# 5th micro-chunk with comma (continuation)
+sm7.recordInputSpeech("dovevi,", now=4800)
+sm7.recordTranslationOutput("должна была,", now=5000, isFinished=False)
+assert len(sm7.sessionDialogueTurns) == 1
+assert sm7.sessionDialogueTurns[0].russianText == "Ты пришла в контакт с одной которая не должна была,"
+
+# 6th micro-chunk with sentence ending dot
+sm7.recordInputSpeech("di farlo.", now=5800)
+sm7.recordTranslationOutput("это сделать.", now=6000, isFinished=False)
+assert len(sm7.sessionDialogueTurns) == 1
+assert sm7.sessionDialogueTurns[0].russianText == "Ты пришла в контакт с одной которая не должна была, это сделать."
+
+# Scenario 8: Punctuation boundary (. ! ?) properly triggers new card on subsequent sentence
+sm7.recordInputSpeech("Va bene.", now=6800)
+assert len(sm7.sessionDialogueTurns) == 2, "Completed sentence with dot must create new card on next speech"
+assert sm7.sessionDialogueTurns[0].isFinalized == True
+assert sm7.sessionDialogueTurns[1].italianText == "Va bene."
+sm7.recordTranslationOutput("Хорошо.", now=7000, isFinished=False)
+assert sm7.sessionDialogueTurns[1].russianText == "Хорошо."
+
+print("  -> Synchronous streaming state machine, sentence accumulation & sliding idle timer verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.26 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.27 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")

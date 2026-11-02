@@ -354,7 +354,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.26\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.27\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -411,7 +411,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.26 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.27 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -541,6 +541,33 @@ class PocketService : Service() {
         return outputTagCleaner.clean(raw)
     }
 
+    private fun isSentenceEnding(text: String): Boolean {
+        val trimmed = text.trimEnd()
+        if (trimmed.isEmpty()) return false
+        val s = trimmed.trimEnd('"', '\'', '»', '«', ')', ']', '}', '”', '’')
+        return s.endsWith('.') || s.endsWith('!') || s.endsWith('?') || s.endsWith('…')
+    }
+
+    private fun isContinuation(text: String): Boolean {
+        val trimmed = text.trimEnd()
+        if (trimmed.isEmpty()) return false
+        val s = trimmed.trimEnd('"', '\'', '»', '«', ')', ']', '}', '”', '’')
+        return s.endsWith(',') || s.endsWith(';') || s.endsWith(':') || s.endsWith('-') || s.endsWith('—')
+    }
+
+    private fun appendWithPunctuationAwareSpace(existing: String, addition: String): String {
+        val trimmedAdd = addition.trim()
+        if (trimmedAdd.isEmpty()) return existing
+        if (existing.isBlank()) return trimmedAdd
+
+        val startsWithPunctuation = trimmedAdd[0] in listOf('.', ',', '!', '?', ';', ':', '…', ')', ']', '}')
+        return if (existing.endsWith(" ") || startsWithPunctuation) {
+            existing + trimmedAdd
+        } else {
+            "$existing $trimmedAdd"
+        }
+    }
+
     private fun scheduleNotificationUpdate(latestText: String, fullHistory: String) {
         pendingNotificationLatest = latestText
         pendingNotificationHistory = fullHistory
@@ -548,12 +575,7 @@ class PocketService : Service() {
         val now = System.currentTimeMillis()
         val elapsed = now - lastNotificationTime
 
-        val trimmed = latestText.trim()
-        val isSentenceBoundary = trimmed.isNotEmpty() && (
-            trimmed.endsWith(".") || trimmed.endsWith("!") ||
-            trimmed.endsWith("?") || trimmed.endsWith(";") ||
-            trimmed.endsWith(":") || trimmed.endsWith("\n")
-        )
+        val isSentenceBoundary = isSentenceEnding(latestText)
 
         // Строгий троттлинг для Xiaomi Watch 2: на границе фразы обновляем не ранее чем через 2.0 сек
         if (isSentenceBoundary && elapsed >= 2000L) {
@@ -613,14 +635,21 @@ class PocketService : Service() {
         synchronized(sessionDialogueTurns) {
             val lastTurn = sessionDialogueTurns.lastOrNull()
             val now = System.currentTimeMillis()
-            // Продолжаем текущую реплику, если она еще не финализирована (не было turnComplete или тишины)
-            // и в ней еще нет перевода. Таймаут отвязан от редких ASR чанков.
-            if (lastTurn != null && !lastTurn.isFinalized && lastTurn.russianText.isBlank()) {
-                if (lastTurn.italianText.isNotBlank() && !lastTurn.italianText.endsWith(" ") && !cleanedInput.startsWith(" ")) {
-                    lastTurn.italianText += " $cleanedInput"
-                } else {
-                    lastTurn.italianText += cleanedInput
-                }
+
+            // Предложение считается законченным только если:
+            // 1) Реплика уже была финализирована (таймером тишины simulIdleRunnable или turnComplete),
+            // 2) ИЛИ в реплике уже есть перевод, и либо перевод, либо исходная речь оканчиваются на знаки конца мысли (. ! ? …),
+            //    при условии, что ни одна из частей не обрывается на запятой или двоеточии.
+            val isSentenceComplete = lastTurn != null && !lastTurn.isFinalized &&
+                lastTurn.russianText.isNotBlank() &&
+                (isSentenceEnding(lastTurn.russianText) || isSentenceEnding(lastTurn.italianText)) &&
+                !isContinuation(lastTurn.russianText) &&
+                !isContinuation(lastTurn.italianText)
+
+            val canAppendToCurrent = lastTurn != null && !lastTurn.isFinalized && !isSentenceComplete
+
+            if (canAppendToCurrent) {
+                lastTurn!!.italianText = appendWithPunctuationAwareSpace(lastTurn.italianText, cleanedInput)
                 lastTurn.lastActivityTime = now
                 lastRecognizedInput = lastTurn.italianText
                 currentTurnInputSpeech = lastTurn.italianText
@@ -629,7 +658,7 @@ class PocketService : Service() {
                 val turnCopy = lastTurn.copy()
                 onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
             } else {
-                // Если предыдущая реплика осталась без финализации и без перевода — финализируем её
+                // Если предыдущая реплика осталась без финализации — финализируем её
                 if (lastTurn != null && !lastTurn.isFinalized) {
                     lastTurn.isFinalized = true
                     if (lastTurn.russianText.isBlank() && lastTurn.italianText.isNotBlank() && hasPendingTranslation) {
@@ -641,7 +670,7 @@ class PocketService : Service() {
                     val prevCopy = lastTurn.copy()
                     onDialogueTurnUpdated?.invoke(prevIdx, prevCopy, false)
                 }
-                // Создаем новую пару диалога
+                // Создаем новую пару диалога для нового предложения
                 val newTurn = DialogueTurn(
                     italianText = cleanedInput,
                     russianText = "",
@@ -687,18 +716,16 @@ class PocketService : Service() {
         onTextReceived?.invoke(cleanedText)
 
         // Обновление диалога в режиме Google Translate Conversation
+        val currentSentence: String
         synchronized(sessionDialogueTurns) {
             val lastTurn = sessionDialogueTurns.lastOrNull()
-            if (lastTurn != null && (!lastTurn.isFinalized || lastTurn.russianText.isBlank())) {
-                if (lastTurn.russianText.isNotBlank() && !lastTurn.russianText.endsWith(" ") && !cleanedText.startsWith(" ")) {
-                    lastTurn.russianText += " $cleanedText"
-                } else {
-                    lastTurn.russianText += cleanedText
-                }
+            if (lastTurn != null && !lastTurn.isFinalized) {
+                lastTurn.russianText = appendWithPunctuationAwareSpace(lastTurn.russianText, cleanedText)
                 lastTurn.lastActivityTime = System.currentTimeMillis()
                 val idx = sessionDialogueTurns.size - 1
                 val turnCopy = lastTurn.copy()
                 onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
+                currentSentence = lastTurn.russianText
             } else {
                 val newTurn = DialogueTurn(
                     italianText = "",
@@ -714,10 +741,11 @@ class PocketService : Service() {
                 val idx = sessionDialogueTurns.size - 1
                 val turnCopy = newTurn.copy()
                 onDialogueTurnUpdated?.invoke(idx, turnCopy, true)
+                currentSentence = cleanedText
             }
         }
 
-        scheduleNotificationUpdate(cleanedText, recentTranslations.toString().trim())
+        scheduleNotificationUpdate(currentSentence, recentTranslations.toString().trim())
     }
 
     private fun setupAudioRouting() {
@@ -839,7 +867,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.26")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.27")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -915,7 +943,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.26")
+            appendLine("Версия: v1.0.27")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
