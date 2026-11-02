@@ -354,7 +354,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.28\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.29\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -411,7 +411,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.28 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.29 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -638,6 +638,15 @@ class PocketService : Service() {
             if (lastTurn != null && !lastTurn.isFinalized) {
                 lastTurn.isFinalized = true
                 lastTurn.lastActivityTime = System.currentTimeMillis()
+                if (hasPendingTranslation && lastTurn.russianText.isBlank()) {
+                    val origPrompt = currentTurnInputSpeech
+                        ?: lastTurn.italianText.ifBlank { null }
+                        ?: if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
+                    logEvent("TRANSLATION_EMPTY", "ORIG=\"$origPrompt\"")
+                    Log.d(tag, "Речь зафиксирована ($origPrompt), но перевод не сгенерирован (TRANSLATION_EMPTY)")
+                    hasPendingTranslation = false
+                    currentTurnInputSpeech = null
+                }
                 val idx = sessionDialogueTurns.size - 1
                 val turnCopy = lastTurn.copy()
                 onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
@@ -652,6 +661,7 @@ class PocketService : Service() {
         onInputTextReceived?.invoke(cleanedInput)
         silenceFramesCount = 0
         mainHandler.removeCallbacks(simulIdleRunnable)
+        mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)
 
         // Обновление диалога в режиме Google Translate Conversation
         synchronized(sessionDialogueTurns) {
@@ -719,35 +729,41 @@ class PocketService : Service() {
         lastServerText = cleanedText
         hasPendingTranslation = false
         currentTurnInputSpeech = null
-        val origPrompt = synchronized(sessionDialogueTurns) {
-            sessionDialogueTurns.lastOrNull()?.italianText?.ifBlank { null }
-        } ?: if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
-        logEvent("TRANSLATION:", "ORIG=\"$origPrompt\" -> RU=\"$lastServerText\"")
-
-        recentTranslations.append(cleanedText).append(" ")
-        if (recentTranslations.length > 800) {
-            val cutIndex = recentTranslations.indexOf(". ", recentTranslations.length - 450)
-            if (cutIndex != -1) {
-                recentTranslations.delete(0, cutIndex + 2)
-            } else {
-                recentTranslations.delete(0, recentTranslations.length - 450)
-            }
-        }
-
-        appendToSessionBuilder(sessionRussianBuilder, cleanedText)
-        onTextReceived?.invoke(cleanedText)
 
         // Обновление диалога в режиме Google Translate Conversation
         val currentSentence: String
         synchronized(sessionDialogueTurns) {
-            val lastTurn = sessionDialogueTurns.lastOrNull()
-            if (lastTurn != null && (!lastTurn.isFinalized || lastTurn.russianText.isBlank())) {
-                lastTurn.russianText = appendWithPunctuationAwareSpace(lastTurn.russianText, cleanedText)
-                lastTurn.lastActivityTime = System.currentTimeMillis()
-                val idx = sessionDialogueTurns.size - 1
-                val turnCopy = lastTurn.copy()
-                onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
-                currentSentence = lastTurn.russianText
+            // Ищем родительскую карточку, в которой есть речь собеседника (italianText).
+            // Приоритет 1: Последняя карточка с italianText, которая либо не финализирована, либо ожидает перевод (russianText пуст)
+            // Приоритет 2: Любая последняя карточка, ожидающая перевод (russianText пуст)
+            // Приоритет 3: Любая последняя нефинализированная карточка
+            var targetIdx = -1
+            for (i in sessionDialogueTurns.size - 1 downTo 0) {
+                val turn = sessionDialogueTurns[i]
+                if (turn.italianText.isNotBlank() && (!turn.isFinalized || turn.russianText.isBlank())) {
+                    targetIdx = i
+                    break
+                }
+            }
+            if (targetIdx == -1) {
+                for (i in sessionDialogueTurns.size - 1 downTo 0) {
+                    val turn = sessionDialogueTurns[i]
+                    if (!turn.isFinalized || turn.russianText.isBlank()) {
+                        targetIdx = i
+                        break
+                    }
+                }
+            }
+
+            if (targetIdx != -1) {
+                val targetTurn = sessionDialogueTurns[targetIdx]
+                // Если карточка была ошибочно финализирована до прихода перевода — реактивируем её
+                targetTurn.isFinalized = false
+                targetTurn.russianText = appendWithPunctuationAwareSpace(targetTurn.russianText, cleanedText)
+                targetTurn.lastActivityTime = System.currentTimeMillis()
+                val turnCopy = targetTurn.copy()
+                onDialogueTurnUpdated?.invoke(targetIdx, turnCopy, false)
+                currentSentence = targetTurn.russianText
             } else {
                 val newTurn = DialogueTurn(
                     italianText = "",
@@ -766,6 +782,24 @@ class PocketService : Service() {
                 currentSentence = cleanedText
             }
         }
+
+        val origPrompt = synchronized(sessionDialogueTurns) {
+            sessionDialogueTurns.findLast { it.italianText.isNotBlank() }?.italianText?.ifBlank { null }
+        } ?: if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
+        logEvent("TRANSLATION:", "ORIG=\"$origPrompt\" -> RU=\"$lastServerText\"")
+
+        recentTranslations.append(cleanedText).append(" ")
+        if (recentTranslations.length > 800) {
+            val cutIndex = recentTranslations.indexOf(". ", recentTranslations.length - 450)
+            if (cutIndex != -1) {
+                recentTranslations.delete(0, cutIndex + 2)
+            } else {
+                recentTranslations.delete(0, recentTranslations.length - 450)
+            }
+        }
+
+        appendToSessionBuilder(sessionRussianBuilder, cleanedText)
+        onTextReceived?.invoke(cleanedText)
 
         scheduleNotificationUpdate(currentSentence, recentTranslations.toString().trim())
     }
@@ -889,7 +923,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.28")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.29")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -965,7 +999,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.28")
+            appendLine("Версия: v1.0.29")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
@@ -1484,8 +1518,10 @@ class PocketService : Service() {
                     if (lastTurn == null || lastTurn.isFinalized) {
                         false
                     } else if (hasPendingTranslation && lastTurn.russianText.isBlank()) {
-                        // Речь зафиксирована, но перевод пуст (шум / кашель)
-                        true
+                        // Речь зафиксирована, но русский перевод ещё в полёте по сети!
+                        // КАТЕГОРИЧЕСКИ НЕЛЬЗЯ финализировать ход по turnComplete!
+                        // Финализировать пустую реплику по таймауту тишины должен ТОЛЬКО таймер бездействия simulIdleRunnable (2.0–2.5с тишины)
+                        false
                     } else if (lastTurn.russianText.isNotBlank() &&
                         isSentenceEnding(lastTurn.russianText) &&
                         !isContinuation(lastTurn.russianText) &&
@@ -1494,7 +1530,7 @@ class PocketService : Service() {
                         // Предложение грамматически завершено (. ! ?)
                         true
                     } else {
-                        // Предложение всё ещё продолжается (нет финальной точки или есть запятая)
+                        // Предложение всё ещё продолжается (нет финальной точки или есть запятая, либо перевод ещё в полёте)
                         // НЕ финализируем преждевременно! Ждём следующего чанка или таймера тишины simulIdleRunnable
                         false
                     }
@@ -1502,16 +1538,6 @@ class PocketService : Service() {
 
                 if (shouldFinalizeNow) {
                     finalizeCurrentTurn()
-                }
-
-                if (hasPendingTranslation && shouldFinalizeNow) {
-                    val origPrompt = currentTurnInputSpeech
-                        ?: synchronized(sessionDialogueTurns) { sessionDialogueTurns.lastOrNull()?.italianText?.ifBlank { null } }
-                        ?: if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
-                    logEvent("TRANSLATION_EMPTY", "ORIG=\"$origPrompt\"")
-                    Log.d(tag, "Речь зафиксирована ($origPrompt), но перевод не сгенерирован (TRANSLATION_EMPTY)")
-                    hasPendingTranslation = false
-                    currentTurnInputSpeech = null
                 }
             }
 

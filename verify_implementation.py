@@ -117,14 +117,14 @@ with open(pocket_service_path, "r", encoding="utf-8") as f:
 with open(build_gradle_path, "r", encoding="utf-8") as f:
     gradle_code = f.read()
 
-print("\n--- 1. Verification of v1.0.28 Version Bumps ---")
-assert 'versionCode = 32' in gradle_code, "versionCode 32 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.28"' in gradle_code, "versionName 1.0.28 missing in app/build.gradle.kts"
-assert 'text = "v1.0.28"' in main_code, "v1.0.28 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.28' in service_code, "v1.0.28 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.28 активен' in service_code, "v1.0.28 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.28' in service_code, "v1.0.28 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.28 OK across all files.")
+print("\n--- 1. Verification of v1.0.29 Version Bumps ---")
+assert 'versionCode = 33' in gradle_code, "versionCode 33 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.29"' in gradle_code, "versionName 1.0.29 missing in app/build.gradle.kts"
+assert 'text = "v1.0.29"' in main_code, "v1.0.29 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.29' in service_code, "v1.0.29 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.29 активен' in service_code, "v1.0.29 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.29' in service_code, "v1.0.29 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.29 OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -435,9 +435,14 @@ class SynchronousTurnStateMachine:
             lastTurn = self.sessionDialogueTurns[-1]
             if not lastTurn.isFinalized:
                 lastTurn.isFinalized = True
+                if self.hasPendingTranslation and not lastTurn.russianText.strip():
+                    origPrompt = self.currentTurnInputSpeech or lastTurn.italianText or self.lastRecognizedInput
+                    self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{origPrompt}"'))
+                    self.hasPendingTranslation = False
+                    self.currentTurnInputSpeech = None
 
     def recordInputSpeech(self, cleanedInput: str, now: int):
-        self.idleTimerDeadline = None
+        self.idleTimerDeadline = now + 2000
         lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
 
         isSentenceComplete = (lastTurn is not None and not lastTurn.isFinalized and
@@ -468,15 +473,28 @@ class SynchronousTurnStateMachine:
     def recordTranslationOutput(self, cleanedText: str, now: int, isFinished: bool = False):
         self.hasPendingTranslation = False
         self.currentTurnInputSpeech = None
-        origPrompt = self.sessionDialogueTurns[-1].italianText if self.sessionDialogueTurns else self.lastRecognizedInput
+
+        targetTurn = None
+        for turn in reversed(self.sessionDialogueTurns):
+            if turn.italianText.strip() and (not turn.isFinalized or not turn.russianText.strip()):
+                targetTurn = turn
+                break
+        if targetTurn is None:
+            for turn in reversed(self.sessionDialogueTurns):
+                if not turn.isFinalized or not turn.russianText.strip():
+                    targetTurn = turn
+                    break
+
+        origPrompt = targetTurn.italianText if targetTurn and targetTurn.italianText.strip() else self.lastRecognizedInput
         self.logged_events.append(("TRANSLATION", f'ORIG="{origPrompt}" -> RU="{cleanedText}"'))
 
-        lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
-        if lastTurn and (not lastTurn.isFinalized or not lastTurn.russianText.strip()):
-            lastTurn.russianText = appendWithPunctuationAwareSpace(lastTurn.russianText, cleanedText)
+        if targetTurn is not None:
+            targetTurn.isFinalized = False
+            targetTurn.russianText = appendWithPunctuationAwareSpace(targetTurn.russianText, cleanedText)
         else:
             newTurn = DialogueTurnSim("", cleanedText, now, isFinalized=False)
             self.sessionDialogueTurns.append(newTurn)
+            targetTurn = newTurn
 
         self.idleTimerDeadline = now + 2000
         if isFinished:
@@ -490,12 +508,9 @@ class SynchronousTurnStateMachine:
         lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
         if not lastTurn or lastTurn.isFinalized:
             return
+        # If translation is pending and Russian text is blank, DO NOT finalize on turnComplete!
+        # The translation is in flight over network. Only idle timer (2.0s silence) should finalize empty turn.
         if self.hasPendingTranslation and not lastTurn.russianText.strip():
-            self.finalizeCurrentTurn()
-            origPrompt = self.currentTurnInputSpeech or (lastTurn.italianText if lastTurn else "") or self.lastRecognizedInput
-            self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{origPrompt}"'))
-            self.hasPendingTranslation = False
-            self.currentTurnInputSpeech = None
             return
         if (lastTurn.russianText.strip() and
             isSentenceEnding(lastTurn.russianText) and
@@ -548,12 +563,17 @@ assert sm2.sessionDialogueTurns[0].isFinalized == True
 assert len(sm2.logged_events) == 1
 assert sm2.logged_events[0] == ("TRANSLATION", 'ORIG="Quanto costa?" -> RU="Сколько это стоит?"')
 
-# Scenario 3: Empty speech followed by turnComplete -> logs TRANSLATION_EMPTY
+# Scenario 3: Empty speech (noise/cough) followed by turnComplete does NOT finalize prematurely; silent idle timer does
 sm3 = SynchronousTurnStateMachine()
 sm3.recordInputSpeech("Pronto", now=1000)
 sm3.onTurnComplete()
+assert len(sm3.logged_events) == 0, "turnComplete must NOT log TRANSLATION_EMPTY prematurely while translation is pending!"
+assert sm3.sessionDialogueTurns[0].isFinalized == False, "Turn must remain unfinalized on premature turnComplete"
+# 2.0s of silence passes without translation -> idle timer triggers
+sm3.checkIdleTimer(now=3050)
 assert len(sm3.logged_events) == 1
 assert sm3.logged_events[0] == ("TRANSLATION_EMPTY", 'ORIG="Pronto"')
+assert sm3.sessionDialogueTurns[0].isFinalized == True
 
 # Scenario 4: Sentence-ending punctuation with finished flag finalizes immediately without waiting for 2s idle timer
 sm4 = SynchronousTurnStateMachine()
@@ -660,8 +680,39 @@ assert len(sm10.sessionDialogueTurns) == 1
 assert sm10.sessionDialogueTurns[0].isFinalized == True, "Final period must finalize card"
 assert sm10.sessionDialogueTurns[0].russianText == "Господин Росси заплатил 10 руб. наличными."
 
+# Scenario 11: turnComplete arrives BEFORE outputTranscription translation chunk (v1.0.29 fix)
+sm11 = SynchronousTurnStateMachine()
+sm11.recordInputSpeech("Come stai?", now=1000)
+assert sm11.hasPendingTranslation == True
+assert sm11.sessionDialogueTurns[0].isFinalized == False
+
+# Server sends interim packet with turnComplete = True (before translation text arrives)
+sm11.onTurnComplete()
+assert sm11.sessionDialogueTurns[0].isFinalized == False, "turnComplete must NOT prematurely finalize turn when translation is pending!"
+assert len(sm11.logged_events) == 0, "TRANSLATION_EMPTY must NOT be logged on premature turnComplete!"
+
+# 300 ms later, delayed translation chunk arrives over network
+sm11.recordTranslationOutput("Как дела?", now=1300, isFinished=True)
+assert len(sm11.sessionDialogueTurns) == 1, "Translation must attach to existing Italian card, not create orphan!"
+assert sm11.sessionDialogueTurns[0].italianText == "Come stai?"
+assert sm11.sessionDialogueTurns[0].russianText == "Как дела?"
+assert sm11.sessionDialogueTurns[0].isFinalized == True, "Turn with question mark must be finalized on isFinished"
+assert ("TRANSLATION_EMPTY", 'ORIG="Come stai?"') not in sm11.logged_events, "TRANSLATION_EMPTY must never be logged when translation succeeds"
+assert len(sm11.logged_events) == 1
+assert sm11.logged_events[0] == ("TRANSLATION", 'ORIG="Come stai?" -> RU="Как дела?"')
+
+# Scenario 12: recordTranslationOutput finds parent card with italianText even across intermediate states
+sm12 = SynchronousTurnStateMachine()
+sm12.recordInputSpeech("Quanto costa?", now=1000)
+# Delayed translation arrives
+sm12.recordTranslationOutput("Сколько это стоит?", now=1400, isFinished=True)
+assert sm12.sessionDialogueTurns[0].italianText == "Quanto costa?"
+assert sm12.sessionDialogueTurns[0].russianText == "Сколько это стоит?"
+assert len(sm12.logged_events) == 1
+assert sm12.logged_events[0] == ("TRANSLATION", 'ORIG="Quanto costa?" -> RU="Сколько это стоит?"')
+
 print("  -> Synchronous streaming state machine, sentence accumulation & sliding idle timer verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.28 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.29 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
