@@ -1293,15 +1293,33 @@ class PocketService : Service() {
                 return
             }
 
-            val serverContent = root.optJSONObject("serverContent") ?: return
+            // 3.1 Обработка серверных ошибок Google Live
+            if (root.has("error")) {
+                val errObj = root.optJSONObject("error")
+                val code = errObj?.optInt("code", 0) ?: 0
+                val msg = errObj?.optString("message", "") ?: errObj?.toString() ?: "Unknown error"
+                val errText = "Ошибка сервера Google Live ($code): $msg"
+                lastError = errText
+                logEvent("SERVER_ERROR", "code=$code, message=$msg")
+                onStatusChanged?.invoke("🔴 $errText")
+                Log.e(tag, errText)
+                return
+            }
+
+            val serverContent = root.optJSONObject("serverContent")
+            if (serverContent == null && !root.has("outputTranscription") && !root.has("outputAudioTranscription") && !root.has("turnComplete") && !root.has("finished")) {
+                return
+            }
 
             // Мгновенный Barge-in: сбрасываем звук при прерывании
-            if (serverContent.optBoolean("interrupted", false)) {
+            if (serverContent?.optBoolean("interrupted", false) == true || root.optBoolean("interrupted", false)) {
                 hasPendingTranslation = false
                 currentTurnInputSpeech = null
                 audioPlaybackQueue.clear()
                 queuedPlaybackBytes.set(0L)
                 isPlaybackSpeedBoosted = false
+                mainHandler.removeCallbacks(simulIdleRunnable)
+                finalizeCurrentTurn()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     try {
                         audioTrack?.playbackParams = audioTrack?.playbackParams?.setSpeed(1.0f) ?: PlaybackParams().setSpeed(1.0f)
@@ -1319,13 +1337,15 @@ class PocketService : Service() {
             }
 
             // 4. Распознанная речь (inputAudioTranscription / inputTranscription / interimInputTranscription / userTurn)
-            val inputObj = serverContent.optJSONObject("inputTranscription")
-                ?: serverContent.optJSONObject("inputAudioTranscription")
-                ?: serverContent.optJSONObject("interimInputTranscription")
+            val inputObj = serverContent?.optJSONObject("inputTranscription")
+                ?: serverContent?.optJSONObject("inputAudioTranscription")
+                ?: serverContent?.optJSONObject("interimInputTranscription")
+                ?: root.optJSONObject("inputTranscription")
+                ?: root.optJSONObject("inputAudioTranscription")
             var inputText = inputObj?.optString("text", "") ?: ""
 
             // Fallback на userTurn при наличии
-            if (inputText.isEmpty()) {
+            if (inputText.isEmpty() && serverContent != null) {
                 val userTurn = serverContent.optJSONObject("userTurn")
                 val userParts = userTurn?.optJSONArray("parts")
                 if (userParts != null) {
@@ -1346,33 +1366,28 @@ class PocketService : Service() {
             }
 
             // 5. Субтитры перевода (outputAudioTranscription / outputTranscription / interimOutputTranscription)
-            val outputObj = serverContent.optJSONObject("outputTranscription")
-                ?: serverContent.optJSONObject("outputAudioTranscription")
-                ?: serverContent.optJSONObject("interimOutputTranscription")
+            val outputObj = serverContent?.optJSONObject("outputTranscription")
+                ?: serverContent?.optJSONObject("outputAudioTranscription")
+                ?: serverContent?.optJSONObject("interimOutputTranscription")
                 ?: root.optJSONObject("outputTranscription")
                 ?: root.optJSONObject("outputAudioTranscription")
             val outputText = outputObj?.optString("text", "") ?: ""
             val isFinished = outputObj?.optBoolean("finished", false) == true ||
-                             serverContent.optBoolean("finished", false) ||
+                             serverContent?.optBoolean("finished", false) == true ||
                              root.optBoolean("finished", false)
+
+            var translationReceived = false
 
             if (outputText.isNotEmpty()) {
                 val cleanedOutput = cleanServerTags(outputText)
                 if (cleanedOutput.isNotEmpty()) {
                     recordTranslationOutput(cleanedOutput)
-                    mainHandler.removeCallbacks(simulIdleRunnable)
-                    if (isFinished) {
-                        finalizeCurrentTurn()
-                    } else {
-                        mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)
-                    }
+                    translationReceived = true
                 }
-            } else if (isFinished) {
-                finalizeCurrentTurn()
             }
 
             // 6. Аудио PCM и возможные текстовые фрагменты из modelTurn.parts
-            val modelTurn = serverContent.optJSONObject("modelTurn")
+            val modelTurn = serverContent?.optJSONObject("modelTurn")
             if (modelTurn != null) {
                 val parts = modelTurn.optJSONArray("parts")
                 if (parts != null) {
@@ -1395,21 +1410,24 @@ class PocketService : Service() {
                             val cleanedText = cleanServerTags(text)
                             if (cleanedText.isNotEmpty()) {
                                 recordTranslationOutput(cleanedText)
-                                mainHandler.removeCallbacks(simulIdleRunnable)
-                                if (isFinished) {
-                                    finalizeCurrentTurn()
-                                } else {
-                                    mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)
-                                }
+                                translationReceived = true
                             }
                         }
                     }
                 }
             }
 
-            // 7. Проверка завершения хода (turnComplete) и логирование пустых переводов
+            // Управление скользящим таймером бездействия при получении чанков перевода
+            if (translationReceived) {
+                mainHandler.removeCallbacks(simulIdleRunnable)
+                if (!isFinished) {
+                    mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)
+                }
+            }
+
+            // 7. Проверка завершения хода (turnComplete / finished) и финализация карточки
             val turnComplete = isFinished ||
-                               serverContent.optBoolean("turnComplete", false) ||
+                               serverContent?.optBoolean("turnComplete", false) == true ||
                                root.optBoolean("turnComplete", false) ||
                                (modelTurn?.optBoolean("turnComplete", false) == true)
             if (turnComplete) {

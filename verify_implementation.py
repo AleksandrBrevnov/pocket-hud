@@ -358,10 +358,11 @@ assert "silenceFramesCount == 25" not in service_code, "False reset silenceFrame
 assert "@Volatile private var silenceFramesCount = 0" in service_code, "silenceFramesCount must be volatile class member"
 assert "silenceFramesCount = 0" in service_code, "silenceFramesCount must be reset on speech detection"
 assert "silenceFramesCount++" in service_code, "silenceFramesCount must increment on silent frames"
-
 assert "TRANSLATION_EMPTY" in service_code, "TRANSLATION_EMPTY event logging missing in PocketService.kt"
 assert "hasPendingTranslation" in service_code, "hasPendingTranslation state tracking missing in PocketService.kt"
 assert "turnComplete" in service_code, "turnComplete check missing in PocketService.kt"
+assert 'root.has("error")' in service_code, "Google Live server error check missing"
+assert "SERVER_ERROR" in service_code, "SERVER_ERROR logging missing"
 assert "lastRecognizedInput = lastTurn.italianText" in service_code, "lastRecognizedInput must accumulate full Italian turn across chunks"
 assert "currentTurnInputSpeech = lastTurn.italianText" in service_code, "currentTurnInputSpeech must accumulate full Italian turn across chunks"
 
@@ -445,6 +446,12 @@ class SynchronousTurnStateMachine:
             self.hasPendingTranslation = False
             self.currentTurnInputSpeech = None
 
+    def onInterrupted(self):
+        self.idleTimerDeadline = None
+        self.hasPendingTranslation = False
+        self.currentTurnInputSpeech = None
+        self.finalizeCurrentTurn()
+
 # Scenario 1: Continuous streaming translation chunks with sliding idle timer
 sm1 = SynchronousTurnStateMachine()
 sm1.recordInputSpeech("Vorrei un caffe", now=1000)
@@ -497,6 +504,25 @@ sm4.recordInputSpeech("Si", now=1000)
 sm4.recordTranslationOutput("Да", now=1300, isFinished=True)
 assert sm4.sessionDialogueTurns[0].isFinalized == True, "Finished flag must finalize turn immediately"
 assert sm4.idleTimerDeadline is None
+
+# Scenario 5: Multiple chunks with finished flag recorded in message do NOT fragment turn
+sm5 = SynchronousTurnStateMachine()
+sm5.recordInputSpeech("Buonasera", now=1000)
+sm5.recordTranslationOutput("Добрый", now=1200, isFinished=False)
+sm5.recordTranslationOutput("вечер", now=1250, isFinished=True)
+assert len(sm5.sessionDialogueTurns) == 1, f"Expected 1 turn, got {len(sm5.sessionDialogueTurns)}"
+assert sm5.sessionDialogueTurns[0].russianText == "Добрый вечер"
+assert sm5.sessionDialogueTurns[0].isFinalized == True
+
+# Scenario 6: User interruption cancels idle timer and immediately finalizes
+sm6 = SynchronousTurnStateMachine()
+sm6.recordInputSpeech("Vorrei sapere...", now=1000)
+sm6.recordTranslationOutput("Я хотел бы знать...", now=1300, isFinished=False)
+assert sm6.idleTimerDeadline == 3300
+sm6.onInterrupted()
+assert sm6.idleTimerDeadline is None
+assert sm6.sessionDialogueTurns[0].isFinalized == True
+assert sm6.hasPendingTranslation == False
 
 print("  -> Synchronous streaming state machine & sliding idle timer verified perfectly.")
 
