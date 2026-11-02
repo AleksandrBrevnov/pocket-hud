@@ -341,6 +341,8 @@ assert "TRANSLATION_EMPTY" in service_code, "TRANSLATION_EMPTY event logging mis
 assert "hasPendingTranslation" in service_code, "hasPendingTranslation state tracking missing in PocketService.kt"
 assert "turnComplete" in service_code, "turnComplete check missing in PocketService.kt"
 assert "silenceFramesCount == 25" in service_code, "Physical microphone silence watchdog (2.5s) missing in PocketService.kt"
+assert "@Volatile private var silenceFramesCount = 0" in service_code, "silenceFramesCount must be volatile class member for cross-thread safety"
+assert "silenceFramesCount = 0" in service_code, "silenceFramesCount must be reset on speech detection and recognition"
 assert "lastRecognizedInput = lastTurn.italianText" in service_code, "lastRecognizedInput must accumulate full Italian turn across chunks"
 assert "currentTurnInputSpeech = lastTurn.italianText" in service_code, "currentTurnInputSpeech must accumulate full Italian turn across chunks"
 assert "val prevPrompt = currentTurnInputSpeech ?: lastTurn.italianText" in service_code, "Timeout TRANSLATION_EMPTY must use accumulated prompt"
@@ -373,7 +375,7 @@ class TurnStateMachine:
             self.hasPendingTranslation = True
         else:
             if lastTurn and not lastTurn.isFinalized:
-                lastTurn.isFinalized = true
+                lastTurn.isFinalized = True
                 if not lastTurn.russianText.strip() and lastTurn.italianText.strip() and self.hasPendingTranslation:
                     prevPrompt = self.currentTurnInputSpeech or lastTurn.italianText
                     self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{prevPrompt}" (turn timeout)'))
@@ -445,6 +447,17 @@ sm3.recordTranslationOutput("Как дела?")
 sm3.onTurnComplete()
 assert len(sm3.logged_events) == 1, f"Expected only TRANSLATION event, got {len(sm3.logged_events)}"
 assert sm3.logged_events[0] == ("TRANSLATION", 'ORIG="Come va?" -> RU="Как дела?"')
+
+# Scenario 4: Rapid back-to-back speech where previous turn already had translation (exercises line 376)
+sm4 = TurnStateMachine()
+sm4.recordInputSpeech("Come va?", now=1000)
+sm4.recordTranslationOutput("Как дела?")
+# New speech arrives before turnComplete
+sm4.recordInputSpeech("Tutto bene?", now=2000)
+assert len(sm4.sessionDialogueTurns) == 2, f"Expected 2 turns, got {len(sm4.sessionDialogueTurns)}"
+assert sm4.sessionDialogueTurns[0].isFinalized == True, "Previous translated turn must be finalized"
+assert sm4.sessionDialogueTurns[0].russianText == "Как дела?", "Previous translation must be preserved"
+assert len(sm4.logged_events) == 1, f"Expected only TRANSLATION event, got {len(sm4.logged_events)}"
 
 print("  -> TRANSLATION_EMPTY logging & utterance accumulation verified perfectly.")
 

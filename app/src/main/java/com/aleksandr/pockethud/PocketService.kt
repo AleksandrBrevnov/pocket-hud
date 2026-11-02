@@ -225,6 +225,7 @@ class PocketService : Service() {
     @Volatile private var connectionState = "DISCONNECTED"
     @Volatile private var activeAudioSource = "NONE"
     @Volatile private var serviceStartTime = 0L
+    @Volatile private var silenceFramesCount = 0
     private val recentTranslations = StringBuilder()
 
     // Состояние переподключения и троттлинга
@@ -589,6 +590,7 @@ class PocketService : Service() {
         logEvent("INPUT_SPEECH:", "\"$cleanedInput\"")
         appendToSessionBuilder(sessionItalianBuilder, cleanedInput)
         onInputTextReceived?.invoke(cleanedInput)
+        silenceFramesCount = 0
 
         // Обновление диалога в режиме Google Translate Conversation
         synchronized(sessionDialogueTurns) {
@@ -1589,7 +1591,6 @@ class PocketService : Service() {
         recordThread = Thread {
             // Чанк 100 мс при 16 кГц Mono 16-бит = 1600 сэмплов (Shorts) = 3200 байт
             val shortBuffer = ShortArray(1600)
-            var silenceFramesCount = 0
 
             while (isRunning) {
                 try {
@@ -1613,7 +1614,13 @@ class PocketService : Service() {
                         }
 
                         val now = System.currentTimeMillis()
-                        if (micPeakAmplitude >= 2) {
+                        val isSpeechDetected = if (selectedMicSource == MicSource.SMARTPHONE) {
+                            micPeakAmplitude >= 2
+                        } else {
+                            micPeakAmplitude >= 1 || maxVal >= 250
+                        }
+
+                        if (isSpeechDetected) {
                             silenceFramesCount = 0
                         } else {
                             silenceFramesCount++
