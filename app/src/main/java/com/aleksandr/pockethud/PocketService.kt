@@ -351,7 +351,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.24\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.25\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -408,7 +408,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.24 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.25 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -594,9 +594,9 @@ class PocketService : Service() {
         synchronized(sessionDialogueTurns) {
             val lastTurn = sessionDialogueTurns.lastOrNull()
             val now = System.currentTimeMillis()
-            // Если в последней реплике еще нет перевода и она не финализирована,
-            // а пауза между речевыми чанками меньше 25 секунд — продолжаем текущую реплику!
-            if (lastTurn != null && !lastTurn.isFinalized && lastTurn.russianText.isBlank() && (now - lastTurn.lastActivityTime < 25000L)) {
+            // Продолжаем текущую реплику, если она еще не финализирована (не было turnComplete или тишины)
+            // и в ней еще нет перевода. Таймаут отвязан от редких ASR чанков.
+            if (lastTurn != null && !lastTurn.isFinalized && lastTurn.russianText.isBlank()) {
                 if (lastTurn.italianText.isNotBlank() && !lastTurn.italianText.endsWith(" ") && !cleanedInput.startsWith(" ")) {
                     lastTurn.italianText += " $cleanedInput"
                 } else {
@@ -610,12 +610,14 @@ class PocketService : Service() {
                 val turnCopy = lastTurn.copy()
                 onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
             } else {
-                // Если предыдущая реплика осталась без перевода по реальному таймауту тишины (>25 сек)
-                if (lastTurn != null && lastTurn.russianText.isBlank() && lastTurn.italianText.isNotBlank() && hasPendingTranslation) {
-                    val prevPrompt = currentTurnInputSpeech ?: lastTurn.italianText
-                    logEvent("TRANSLATION_EMPTY", "ORIG=\"$prevPrompt\" (silence timeout)")
-                    Log.d(tag, "Речь зафиксирована ($prevPrompt), но перевод не получен за 25с тишины (TRANSLATION_EMPTY)")
+                // Если предыдущая реплика осталась без финализации и без перевода — финализируем её
+                if (lastTurn != null && !lastTurn.isFinalized) {
                     lastTurn.isFinalized = true
+                    if (lastTurn.russianText.isBlank() && lastTurn.italianText.isNotBlank() && hasPendingTranslation) {
+                        val prevPrompt = currentTurnInputSpeech ?: lastTurn.italianText
+                        logEvent("TRANSLATION_EMPTY", "ORIG=\"$prevPrompt\" (turn timeout)")
+                        Log.d(tag, "Речь зафиксирована ($prevPrompt), но перевод не получен (TRANSLATION_EMPTY)")
+                    }
                     val prevIdx = sessionDialogueTurns.size - 1
                     val prevCopy = lastTurn.copy()
                     onDialogueTurnUpdated?.invoke(prevIdx, prevCopy, false)
@@ -818,7 +820,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.24")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.25")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -894,7 +896,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.24")
+            appendLine("Версия: v1.0.25")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): ${if (resumptionHandle.isNullOrBlank()) "нет" else "активна (${resumptionHandle?.take(16)}...)"}")
@@ -1179,6 +1181,16 @@ class PocketService : Service() {
                                 "4. Ignore background noise and street/cafe ambiance — focus on human voices. If someone speaks Russian, stay silent. Translate ALL Italian and English speech into Russian.")
                 }))
             })
+            put("realtimeInputConfig", JSONObject().apply {
+                put("activityHandling", "NO_INTERRUPTION")
+                put("automaticActivityDetection", JSONObject().apply {
+                    put("disabled", false)
+                    put("startOfSpeechSensitivity", "START_SENSITIVITY_HIGH")
+                    put("endOfSpeechSensitivity", "END_SENSITIVITY_HIGH")
+                    put("silenceDurationMs", 400)
+                    put("prefixPaddingMs", 150)
+                })
+            })
             put("inputAudioTranscription", JSONObject().apply {
                 put("languageCodes", JSONArray().apply {
                     put("it-IT")
@@ -1198,7 +1210,7 @@ class PocketService : Service() {
             put("setup", setupObj)
         }
         ws.send(setupJson.toString())
-        logEvent("SETUP_SENT", "model=models/gemini-3.8-live, languages=[it-IT, en-US], resumed=${!resumptionHandle.isNullOrBlank()}")
+        logEvent("SETUP_SENT", "model=models/gemini-3.8-live, languages=[it-IT, en-US], vad=[silence=400ms, NO_INTERRUPTION], resumed=${!resumptionHandle.isNullOrBlank()}")
     }
 
     private fun handleServerMessage(jsonText: String) {
@@ -1445,10 +1457,38 @@ class PocketService : Service() {
     }
 
     private fun applyDynamicSoftKneeAgc(buffer: ShortArray, length: Int) {
-        val gain = 4.85f // +13.7 dB boost (~4.5x–5.0x) для тихой речи (<10%)
+        var peak = 0
+        for (i in 0 until length) {
+            val absVal = kotlin.math.abs(buffer[i].toInt())
+            if (absVal > peak) peak = absVal
+        }
+        val peakRatio = peak.toFloat() / 32768.0f
+        val gateLow = 0.010f  // 1.0% (~328)
+        val gateHigh = 0.014f // 1.4% (~458)
+
+        // Мягкий Noise Gate: если пик чанка ниже 1.0%–1.4% (фоновый шум комнаты, музыка, тишина),
+        // плавно ослабляем сигнал вместо усиления на +14 дБ.
+        // Это позволяет серверному VAD Gemini мгновенно распознавать паузы между предложениями.
+        if (peakRatio < gateLow) {
+            val attenuation = 0.25f // -12 дБ подавление фонового шума
+            for (i in 0 until length) {
+                buffer[i] = (buffer[i] * attenuation).toInt().toShort()
+            }
+            return
+        }
+
+        val baseGain = 4.85f // +13.7 dB boost (~4.5x–5.0x) для тихой речи (<10%)
+        val effectiveGain = if (peakRatio < gateHigh) {
+            // Плавный переход от подавления к полному AGC без щелчков на границе гейта
+            val t = (peakRatio - gateLow) / (gateHigh - gateLow)
+            0.25f + t * (baseGain - 0.25f)
+        } else {
+            baseGain
+        }
+
         for (i in 0 until length) {
             val s = buffer[i].toFloat() / 32768.0f
-            val scaled = s * gain
+            val scaled = s * effectiveGain
             val saturated = kotlin.math.tanh(scaled.toDouble()).toFloat()
             val sampleOut = (saturated * 32767.0f).toInt()
             buffer[i] = sampleOut.coerceIn(-32768, 32767).toShort()
@@ -1549,6 +1589,7 @@ class PocketService : Service() {
         recordThread = Thread {
             // Чанк 100 мс при 16 кГц Mono 16-бит = 1600 сэмплов (Shorts) = 3200 байт
             val shortBuffer = ShortArray(1600)
+            var silenceFramesCount = 0
 
             while (isRunning) {
                 try {
@@ -1569,6 +1610,33 @@ class PocketService : Service() {
                         micPeakAmplitude = ((maxVal * 100) / 32767).coerceIn(0, 100)
                         if (micPeakAmplitude > sessionMaxAmplitude) {
                             sessionMaxAmplitude = micPeakAmplitude
+                        }
+
+                        val now = System.currentTimeMillis()
+                        if (micPeakAmplitude >= 2) {
+                            silenceFramesCount = 0
+                        } else {
+                            silenceFramesCount++
+                            // 25 кадров по 100 мс = 2.5 сек физической тишины микрофона
+                            if (silenceFramesCount == 25) {
+                                synchronized(sessionDialogueTurns) {
+                                    val lastTurn = sessionDialogueTurns.lastOrNull()
+                                    if (lastTurn != null && !lastTurn.isFinalized) {
+                                        lastTurn.isFinalized = true
+                                        lastTurn.lastActivityTime = now
+                                        if (lastTurn.russianText.isBlank() && lastTurn.italianText.isNotBlank() && hasPendingTranslation) {
+                                            val prevPrompt = currentTurnInputSpeech ?: lastTurn.italianText
+                                            logEvent("TRANSLATION_EMPTY", "ORIG=\"$prevPrompt\" (silence timeout)")
+                                            Log.d(tag, "Речь зафиксирована ($prevPrompt), но перевод не получен за 2.5с тишины (TRANSLATION_EMPTY)")
+                                            hasPendingTranslation = false
+                                            currentTurnInputSpeech = null
+                                        }
+                                        val prevIdx = sessionDialogueTurns.size - 1
+                                        val prevCopy = lastTurn.copy()
+                                        onDialogueTurnUpdated?.invoke(prevIdx, prevCopy, false)
+                                    }
+                                }
+                            }
                         }
 
                         // Конвертация ShortArray в little-endian ByteArray

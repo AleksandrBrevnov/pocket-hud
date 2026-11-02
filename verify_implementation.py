@@ -117,14 +117,14 @@ with open(pocket_service_path, "r", encoding="utf-8") as f:
 with open(build_gradle_path, "r", encoding="utf-8") as f:
     gradle_code = f.read()
 
-print("\n--- 1. Verification of v1.0.23 Version Bumps ---")
-assert 'versionCode = 23' in gradle_code, "versionCode 23 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.23"' in gradle_code, "versionName 1.0.23 missing in app/build.gradle.kts"
-assert 'text = "v1.0.23"' in main_code, "v1.0.23 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.23' in service_code, "v1.0.23 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.23 активен' in service_code, "v1.0.23 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.23' in service_code, "v1.0.23 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.23 OK across all files.")
+print("\n--- 1. Verification of v1.0.25 Version Bumps ---")
+assert 'versionCode = 25' in gradle_code, "versionCode 25 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.25"' in gradle_code, "versionName 1.0.25 missing in app/build.gradle.kts"
+assert 'text = "v1.0.25"' in main_code, "v1.0.25 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.25' in service_code, "v1.0.25 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.25 активен' in service_code, "v1.0.25 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.25' in service_code, "v1.0.25 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.25 OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -140,16 +140,19 @@ assert "Thread.sleep(40)" in service_code, "sendThread must sleep while !isSetup
 assert "isSetupComplete = true" in service_code, "isSetupComplete activation on setupComplete missing"
 print("  -> Session rotation & reconnect OK.")
 
-print("\n--- 3. Verification of Natural Gemini Server-Side VAD sendSetup() ---")
-assert '"realtimeInputConfig"' not in service_code, "realtimeInputConfig must be removed to allow natural server-side VAD"
-assert '"silenceDurationMs"' not in service_code, "silenceDurationMs must be removed to prevent premature sentence cutting"
-assert '"NO_INTERRUPTION"' not in service_code, "NO_INTERRUPTION must be removed"
+print("\n--- 3. Verification of Gemini Live realtimeInputConfig sendSetup() ---")
+assert '"realtimeInputConfig"' in service_code, "realtimeInputConfig missing in sendSetup"
+assert '"silenceDurationMs", 400' in service_code or '"silenceDurationMs"' in service_code, "silenceDurationMs missing in sendSetup"
+assert '"NO_INTERRUPTION"' in service_code, "NO_INTERRUPTION missing in realtimeInputConfig"
+assert '"START_SENSITIVITY_HIGH"' in service_code, "START_SENSITIVITY_HIGH missing in realtimeInputConfig"
+assert '"END_SENSITIVITY_HIGH"' in service_code, "END_SENSITIVITY_HIGH missing in realtimeInputConfig"
+assert '"prefixPaddingMs", 150' in service_code or '"prefixPaddingMs"' in service_code, "prefixPaddingMs missing in sendSetup"
 assert '"sessionResumption"' in service_code, "sessionResumption object missing in sendSetup"
 assert '"handle", handle' in service_code, "resumptionHandle injection missing in sendSetup"
 assert '"languageCodes"' in service_code, "languageCodes array missing in sendSetup"
 assert '"it-IT"' in service_code, "it-IT missing in languageCodes"
 assert '"en-US"' in service_code, "en-US missing in languageCodes"
-print("  -> Gemini Live natural server-side VAD configuration OK.")
+print("  -> Gemini Live realtimeInputConfig fast VAD configuration OK.")
 
 print("\n--- 4. Verification of Split Audio Routing & Hardware DSP ---")
 assert "var selectedMicSource: MicSource = MicSource.SMARTPHONE" in service_code, "Default mic in PocketService must be SMARTPHONE"
@@ -280,38 +283,75 @@ assert "!italianScrollView.canScrollVertically(1)" in main_code, "Sticky scroll 
 assert "!russianScrollView.canScrollVertically(1)" in main_code, "Sticky scroll check missing in russianScrollView"
 print("  -> UI sticky scroll OK.")
 
-print("\n--- 8. Verification of Dynamic Soft-Knee DSP Gain Curve ---")
-# Verify mathematical properties of applyDynamicSoftKneeAgc
-gain = 4.85
-quiet_sample = 2000 # ~6.1% amplitude
-s_quiet = quiet_sample / 32768.0
-out_quiet = int(math.tanh(s_quiet * gain) * 32767.0)
-gain_quiet = out_quiet / quiet_sample
-db_quiet = 20 * math.log10(gain_quiet)
-print(f"  Quiet sample {quiet_sample} -> {out_quiet} (gain = {gain_quiet:.2f}x, {db_quiet:+.1f} dB)")
-assert 4.5 <= gain_quiet <= 5.0, f"Gain {gain_quiet} not in expected [4.5x, 5.0x] range"
+print("\n--- 8. Verification of Dynamic Soft-Knee DSP Gain Curve & Subtle Noise Gate ---")
+assert "gateLow = 0.010f" in service_code, "gateLow threshold missing in applyDynamicSoftKneeAgc"
+assert "gateHigh = 0.014f" in service_code, "gateHigh threshold missing in applyDynamicSoftKneeAgc"
+assert "val attenuation = 0.25f" in service_code, "attenuation factor missing in applyDynamicSoftKneeAgc"
 
-loud_sample = 32767 # 100% full scale
-s_loud = loud_sample / 32768.0
-out_loud = int(math.tanh(s_loud * gain) * 32767.0)
-print(f"  Loud sample {loud_sample} -> {out_loud} (soft saturation without digital clipping)")
-assert out_loud <= 32767, "Loud sample must not clip or overflow"
-assert out_loud > 32000, "Loud sample should saturate near ceiling"
+# Mathematical simulation of applyDynamicSoftKneeAgc with Noise Gate
+def sim_apply_dynamic_soft_knee_agc(buffer):
+    peak = max(abs(x) for x in buffer) if buffer else 0
+    peak_ratio = peak / 32768.0
+    gate_low = 0.010
+    gate_high = 0.014
+    
+    if peak_ratio < gate_low:
+        attenuation = 0.25
+        return [int(x * attenuation) for x in buffer]
+    
+    base_gain = 4.85
+    if peak_ratio < gate_high:
+        t = (peak_ratio - gate_low) / (gate_high - gate_low)
+        effective_gain = 0.25 + t * (base_gain - 0.25)
+    else:
+        effective_gain = base_gain
+        
+    out = []
+    for x in buffer:
+        s = x / 32768.0
+        scaled = s * effective_gain
+        saturated = math.tanh(scaled)
+        sample_out = int(saturated * 32767.0)
+        out.append(max(-32768, min(32767, sample_out)))
+    return out
+
+# 1. Background noise / music pause (< 1.0% amplitude, peak 250)
+noise_chunk = [250, -200, 150, -100]
+out_noise = sim_apply_dynamic_soft_knee_agc(noise_chunk)
+assert max(out_noise) <= 65, f"Expected noise attenuation, got max={max(out_noise)}"
+print(f"  Noise sample 250 -> {out_noise[0]} (attenuated by 0.25x = -12 dB)")
+
+# 2. Quiet speech (> 1.4% amplitude, e.g. 2000 = 6.1%)
+speech_chunk = [2000, 1500, -1800]
+out_speech = sim_apply_dynamic_soft_knee_agc(speech_chunk)
+gain_speech = out_speech[0] / speech_chunk[0]
+db_speech = 20 * math.log10(gain_speech)
+print(f"  Speech sample 2000 -> {out_speech[0]} (gain = {gain_speech:.2f}x, {db_speech:+.1f} dB)")
+assert 4.5 <= gain_speech <= 5.0, f"Gain {gain_speech} not in expected [4.5x, 5.0x] range"
+
+# 3. Loud speech (32767)
+loud_chunk = [32767]
+out_loud = sim_apply_dynamic_soft_knee_agc(loud_chunk)
+print(f"  Loud sample 32767 -> {out_loud[0]} (soft saturation without digital clipping)")
+assert out_loud[0] <= 32767 and out_loud[0] > 32000, "Loud sample must saturate near ceiling"
+print("  -> Dynamic soft-knee AGC & Noise Gate verified perfectly.")
 
 print("\n--- 9. Verification of TRANSLATION_EMPTY Logging & Utterance Accumulation ---")
 assert "TRANSLATION_EMPTY" in service_code, "TRANSLATION_EMPTY event logging missing in PocketService.kt"
 assert "hasPendingTranslation" in service_code, "hasPendingTranslation state tracking missing in PocketService.kt"
 assert "turnComplete" in service_code, "turnComplete check missing in PocketService.kt"
+assert "silenceFramesCount == 25" in service_code, "Physical microphone silence watchdog (2.5s) missing in PocketService.kt"
 assert "lastRecognizedInput = lastTurn.italianText" in service_code, "lastRecognizedInput must accumulate full Italian turn across chunks"
 assert "currentTurnInputSpeech = lastTurn.italianText" in service_code, "currentTurnInputSpeech must accumulate full Italian turn across chunks"
 assert "val prevPrompt = currentTurnInputSpeech ?: lastTurn.italianText" in service_code, "Timeout TRANSLATION_EMPTY must use accumulated prompt"
 
 # Python simulation of turn accumulation and TRANSLATION_EMPTY state machine
 class DialogueTurnSim:
-    def __init__(self, italianText, russianText, timestamp):
+    def __init__(self, italianText, russianText, timestamp, isFinalized=False):
         self.italianText = italianText
         self.russianText = russianText
         self.timestamp = timestamp
+        self.isFinalized = isFinalized
 
 class TurnStateMachine:
     def __init__(self):
@@ -323,7 +363,7 @@ class TurnStateMachine:
 
     def recordInputSpeech(self, cleanedInput: str, now: int):
         lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
-        if lastTurn and not lastTurn.russianText.strip() and (now - lastTurn.timestamp < 8000):
+        if lastTurn and not lastTurn.isFinalized and not lastTurn.russianText.strip():
             if lastTurn.italianText and not lastTurn.italianText.endswith(" ") and not cleanedInput.startswith(" "):
                 lastTurn.italianText += f" {cleanedInput}"
             else:
@@ -332,21 +372,36 @@ class TurnStateMachine:
             self.currentTurnInputSpeech = lastTurn.italianText
             self.hasPendingTranslation = True
         else:
-            if lastTurn and not lastTurn.russianText.strip() and lastTurn.italianText.strip() and self.hasPendingTranslation:
-                prevPrompt = self.currentTurnInputSpeech or lastTurn.italianText
-                self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{prevPrompt}" (turn timeout)'))
-            newTurn = DialogueTurnSim(cleanedInput, "", now)
+            if lastTurn and not lastTurn.isFinalized:
+                lastTurn.isFinalized = true
+                if not lastTurn.russianText.strip() and lastTurn.italianText.strip() and self.hasPendingTranslation:
+                    prevPrompt = self.currentTurnInputSpeech or lastTurn.italianText
+                    self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{prevPrompt}" (turn timeout)'))
+            newTurn = DialogueTurnSim(cleanedInput, "", now, isFinalized=False)
             self.lastRecognizedInput = cleanedInput
             self.currentTurnInputSpeech = cleanedInput
             self.hasPendingTranslation = True
             self.sessionDialogueTurns.append(newTurn)
 
     def onTurnComplete(self):
+        lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
+        if lastTurn and not lastTurn.isFinalized:
+            lastTurn.isFinalized = True
         if self.hasPendingTranslation:
-            origPrompt = self.currentTurnInputSpeech or (self.sessionDialogueTurns[-1].italianText if self.sessionDialogueTurns else "") or self.lastRecognizedInput
+            origPrompt = self.currentTurnInputSpeech or (lastTurn.italianText if lastTurn else "") or self.lastRecognizedInput
             self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{origPrompt}"'))
             self.hasPendingTranslation = False
             self.currentTurnInputSpeech = None
+
+    def onMicSilenceTimeout(self, now: int):
+        lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
+        if lastTurn and not lastTurn.isFinalized:
+            lastTurn.isFinalized = True
+            if not lastTurn.russianText.strip() and lastTurn.italianText.strip() and self.hasPendingTranslation:
+                prevPrompt = self.currentTurnInputSpeech or lastTurn.italianText
+                self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{prevPrompt}" (silence timeout)'))
+                self.hasPendingTranslation = False
+                self.currentTurnInputSpeech = None
 
     def recordTranslationOutput(self, cleanedText: str):
         self.hasPendingTranslation = False
@@ -366,17 +421,21 @@ sm1.onTurnComplete()
 assert len(sm1.logged_events) == 1, f"Expected 1 event, got {len(sm1.logged_events)}"
 assert sm1.logged_events[0] == ("TRANSLATION_EMPTY", 'ORIG="Vorrei un caffe per favore"'), f"Unexpected event {sm1.logged_events[0]}"
 
-# 10s later, new speech arrives -> must NOT duplicate TRANSLATION_EMPTY for previous turn
+# 10s later, new speech arrives -> must NOT duplicate TRANSLATION_EMPTY for previous turn, starts new turn
 sm1.recordInputSpeech("Buongiorno", now=12000)
 assert len(sm1.logged_events) == 1, f"Expected still 1 event (no duplicate), got {len(sm1.logged_events)}"
+assert len(sm1.sessionDialogueTurns) == 2, f"Expected 2 turns, got {len(sm1.sessionDialogueTurns)}"
 
-# Scenario 2: Turn timeout without turnComplete
+# Scenario 2: Physical mic silence timeout without turnComplete
 sm2 = TurnStateMachine()
 sm2.recordInputSpeech("Scusi", now=1000)
-# 10s later new turn arrives without turnComplete or translation
-sm2.recordInputSpeech("Ehi", now=11000)
+# 2.5s of mic silence triggers watchdog
+sm2.onMicSilenceTimeout(now=3500)
 assert len(sm2.logged_events) == 1, f"Expected 1 event, got {len(sm2.logged_events)}"
-assert sm2.logged_events[0] == ("TRANSLATION_EMPTY", 'ORIG="Scusi" (turn timeout)'), f"Unexpected event {sm2.logged_events[0]}"
+assert sm2.logged_events[0] == ("TRANSLATION_EMPTY", 'ORIG="Scusi" (silence timeout)'), f"Unexpected event {sm2.logged_events[0]}"
+# Subsequent speech creates fresh turn
+sm2.recordInputSpeech("Ehi", now=4000)
+assert len(sm2.sessionDialogueTurns) == 2, f"Expected 2 turns, got {len(sm2.sessionDialogueTurns)}"
 
 # Scenario 3: Normal translation output
 sm3 = TurnStateMachine()
@@ -390,5 +449,5 @@ assert sm3.logged_events[0] == ("TRANSLATION", 'ORIG="Come va?" -> RU="Как д
 print("  -> TRANSLATION_EMPTY logging & utterance accumulation verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.23 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.25 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
