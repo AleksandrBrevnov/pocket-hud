@@ -431,15 +431,14 @@ class SynchronousTurnStateMachine:
 
     def finalizeCurrentTurn(self):
         self.idleTimerDeadline = None
-        if self.sessionDialogueTurns:
-            lastTurn = self.sessionDialogueTurns[-1]
-            if not lastTurn.isFinalized:
-                lastTurn.isFinalized = True
-                if self.hasPendingTranslation and not lastTurn.russianText.strip():
-                    origPrompt = self.currentTurnInputSpeech or lastTurn.italianText or self.lastRecognizedInput
+        for turn in self.sessionDialogueTurns:
+            if not turn.isFinalized:
+                turn.isFinalized = True
+                if self.hasPendingTranslation and not turn.russianText.strip():
+                    origPrompt = turn.italianText or self.currentTurnInputSpeech or self.lastRecognizedInput
                     self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{origPrompt}"'))
-                    self.hasPendingTranslation = False
-                    self.currentTurnInputSpeech = None
+        self.hasPendingTranslation = False
+        self.currentTurnInputSpeech = None
 
     def recordInputSpeech(self, cleanedInput: str, now: int):
         self.idleTimerDeadline = now + 2000
@@ -475,13 +474,21 @@ class SynchronousTurnStateMachine:
         self.currentTurnInputSpeech = None
 
         targetTurn = None
-        for turn in reversed(self.sessionDialogueTurns):
-            if turn.italianText.strip() and (not turn.isFinalized or not turn.russianText.strip()):
+        # Priority 1: Active in-progress streaming turn
+        for turn in self.sessionDialogueTurns:
+            if turn.italianText.strip() and turn.russianText.strip() and not turn.isFinalized:
                 targetTurn = turn
                 break
+        # Priority 2: Earliest (FIFO) turn waiting for translation
+        if targetTurn is None:
+            for turn in self.sessionDialogueTurns:
+                if turn.italianText.strip() and not turn.russianText.strip():
+                    targetTurn = turn
+                    break
+        # Priority 3: Last unfinalized turn
         if targetTurn is None:
             for turn in reversed(self.sessionDialogueTurns):
-                if not turn.isFinalized or not turn.russianText.strip():
+                if not turn.isFinalized:
                     targetTurn = turn
                     break
 
@@ -505,18 +512,14 @@ class SynchronousTurnStateMachine:
             self.finalizeCurrentTurn()
 
     def onTurnComplete(self):
-        lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
-        if not lastTurn or lastTurn.isFinalized:
-            return
-        # If translation is pending and Russian text is blank, DO NOT finalize on turnComplete!
-        # The translation is in flight over network. Only idle timer (2.0s silence) should finalize empty turn.
-        if self.hasPendingTranslation and not lastTurn.russianText.strip():
-            return
-        if (lastTurn.russianText.strip() and
-            isSentenceEnding(lastTurn.russianText) and
-            not isContinuation(lastTurn.russianText) and
-            not isContinuation(lastTurn.italianText)):
-            self.finalizeCurrentTurn()
+        for turn in self.sessionDialogueTurns:
+            # Finalize only if Russian translation is received and grammatically complete
+            # Never prematurely finalize turns whose translation is still in flight
+            if not turn.isFinalized and turn.russianText.strip():
+                if (isSentenceEnding(turn.russianText) and
+                    not isContinuation(turn.russianText) and
+                    not isContinuation(turn.italianText)):
+                    turn.isFinalized = True
 
     def onInterrupted(self):
         self.idleTimerDeadline = None
@@ -710,6 +713,41 @@ assert sm12.sessionDialogueTurns[0].italianText == "Quanto costa?"
 assert sm12.sessionDialogueTurns[0].russianText == "Сколько это стоит?"
 assert len(sm12.logged_events) == 1
 assert sm12.logged_events[0] == ("TRANSLATION", 'ORIG="Quanto costa?" -> RU="Сколько это стоит?"')
+
+# Scenario 13: Multiple sequential turns with delayed translations attach in FIFO order without orphan or inverted cards
+sm13 = SynchronousTurnStateMachine()
+sm13.recordInputSpeech("Uno", now=1000)
+sm13.checkIdleTimer(now=3050)
+assert sm13.sessionDialogueTurns[0].isFinalized == True
+assert sm13.sessionDialogueTurns[0].russianText == ""
+
+sm13.recordInputSpeech("Due", now=3100)
+sm13.checkIdleTimer(now=5150)
+assert sm13.sessionDialogueTurns[1].isFinalized == True
+assert sm13.sessionDialogueTurns[1].russianText == ""
+
+sm13.recordInputSpeech("Tre", now=5200)
+
+# Delayed translations arrive in chronological FIFO order:
+sm13.recordTranslationOutput("Т_Один.", now=5300, isFinished=True)
+sm13.recordTranslationOutput("Т_Два.", now=5400, isFinished=True)
+sm13.recordTranslationOutput("Т_Три.", now=5500, isFinished=True)
+
+assert len(sm13.sessionDialogueTurns) == 3
+assert sm13.sessionDialogueTurns[0].italianText == "Uno"
+assert sm13.sessionDialogueTurns[0].russianText == "Т_Один."
+assert sm13.sessionDialogueTurns[0].isFinalized == True
+
+assert sm13.sessionDialogueTurns[1].italianText == "Due"
+assert sm13.sessionDialogueTurns[1].russianText == "Т_Два."
+assert sm13.sessionDialogueTurns[1].isFinalized == True
+
+assert sm13.sessionDialogueTurns[2].italianText == "Tre"
+assert sm13.sessionDialogueTurns[2].russianText == "Т_Три."
+assert sm13.sessionDialogueTurns[2].isFinalized == True
+
+for turn in sm13.sessionDialogueTurns:
+    assert turn.russianText.strip() != "", f"Turn {turn.italianText} was left without translation!"
 
 print("  -> Synchronous streaming state machine, sentence accumulation & sliding idle timer verified perfectly.")
 

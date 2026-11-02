@@ -634,23 +634,25 @@ class PocketService : Service() {
     private fun finalizeCurrentTurn() {
         mainHandler.removeCallbacks(simulIdleRunnable)
         synchronized(sessionDialogueTurns) {
-            val lastTurn = sessionDialogueTurns.lastOrNull()
-            if (lastTurn != null && !lastTurn.isFinalized) {
-                lastTurn.isFinalized = true
-                lastTurn.lastActivityTime = System.currentTimeMillis()
-                if (hasPendingTranslation && lastTurn.russianText.isBlank()) {
-                    val origPrompt = currentTurnInputSpeech
-                        ?: lastTurn.italianText.ifBlank { null }
-                        ?: if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
-                    logEvent("TRANSLATION_EMPTY", "ORIG=\"$origPrompt\"")
-                    Log.d(tag, "Речь зафиксирована ($origPrompt), но перевод не сгенерирован (TRANSLATION_EMPTY)")
-                    hasPendingTranslation = false
-                    currentTurnInputSpeech = null
+            val now = System.currentTimeMillis()
+            for (i in 0 until sessionDialogueTurns.size) {
+                val turn = sessionDialogueTurns[i]
+                if (!turn.isFinalized) {
+                    turn.isFinalized = true
+                    turn.lastActivityTime = now
+                    if (turn.russianText.isBlank()) {
+                        val origPrompt = turn.italianText.ifBlank { null }
+                            ?: currentTurnInputSpeech
+                            ?: if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
+                        logEvent("TRANSLATION_EMPTY", "ORIG=\"$origPrompt\"")
+                        Log.d(tag, "Речь зафиксирована ($origPrompt), но перевод не сгенерирован (TRANSLATION_EMPTY)")
+                    }
+                    val turnCopy = turn.copy()
+                    onDialogueTurnUpdated?.invoke(i, turnCopy, false)
                 }
-                val idx = sessionDialogueTurns.size - 1
-                val turnCopy = lastTurn.copy()
-                onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
             }
+            hasPendingTranslation = false
+            currentTurnInputSpeech = null
         }
     }
 
@@ -732,28 +734,25 @@ class PocketService : Service() {
 
         // Обновление диалога в режиме Google Translate Conversation
         val currentSentence: String
+        var targetTurnIdx = -1
         synchronized(sessionDialogueTurns) {
             // Ищем родительскую карточку, в которой есть речь собеседника (italianText).
-            // Приоритет 1: Последняя карточка с italianText, которая либо не финализирована, либо ожидает перевод (russianText пуст)
-            // Приоритет 2: Любая последняя карточка, ожидающая перевод (russianText пуст)
-            // Приоритет 3: Любая последняя нефинализированная карточка
-            var targetIdx = -1
-            for (i in sessionDialogueTurns.size - 1 downTo 0) {
-                val turn = sessionDialogueTurns[i]
-                if (turn.italianText.isNotBlank() && (!turn.isFinalized || turn.russianText.isBlank())) {
-                    targetIdx = i
-                    break
-                }
+            // Приоритет 1: Активная карточка речи, которая уже находится в процессе стриминга перевода
+            var targetIdx = sessionDialogueTurns.indexOfFirst {
+                it.italianText.isNotBlank() && it.russianText.isNotBlank() && !it.isFinalized
             }
+            // Приоритет 2: Самая ранняя (FIFO) карточка речи, ожидающая перевод (russianText пуст)
             if (targetIdx == -1) {
-                for (i in sessionDialogueTurns.size - 1 downTo 0) {
-                    val turn = sessionDialogueTurns[i]
-                    if (!turn.isFinalized || turn.russianText.isBlank()) {
-                        targetIdx = i
-                        break
-                    }
+                targetIdx = sessionDialogueTurns.indexOfFirst {
+                    it.italianText.isNotBlank() && it.russianText.isBlank()
                 }
             }
+            // Приоритет 3: Любая последняя нефинализированная карточка
+            if (targetIdx == -1) {
+                targetIdx = sessionDialogueTurns.indexOfLast { !it.isFinalized }
+            }
+
+            targetTurnIdx = targetIdx
 
             if (targetIdx != -1) {
                 val targetTurn = sessionDialogueTurns[targetIdx]
@@ -777,6 +776,7 @@ class PocketService : Service() {
                     sessionDialogueTurns.removeAt(0)
                 }
                 val idx = sessionDialogueTurns.size - 1
+                targetTurnIdx = idx
                 val turnCopy = newTurn.copy()
                 onDialogueTurnUpdated?.invoke(idx, turnCopy, true)
                 currentSentence = cleanedText
@@ -784,7 +784,11 @@ class PocketService : Service() {
         }
 
         val origPrompt = synchronized(sessionDialogueTurns) {
-            sessionDialogueTurns.findLast { it.italianText.isNotBlank() }?.italianText?.ifBlank { null }
+            if (targetTurnIdx in sessionDialogueTurns.indices) {
+                sessionDialogueTurns[targetTurnIdx].italianText.ifBlank { null }
+            } else {
+                sessionDialogueTurns.findLast { it.italianText.isNotBlank() }?.italianText?.ifBlank { null }
+            }
         } ?: if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
         logEvent("TRANSLATION:", "ORIG=\"$origPrompt\" -> RU=\"$lastServerText\"")
 
@@ -1513,31 +1517,23 @@ class PocketService : Service() {
                                root.optBoolean("turnComplete", false) ||
                                (modelTurn?.optBoolean("turnComplete", false) == true)
             if (turnComplete) {
-                val shouldFinalizeNow = synchronized(sessionDialogueTurns) {
-                    val lastTurn = sessionDialogueTurns.lastOrNull()
-                    if (lastTurn == null || lastTurn.isFinalized) {
-                        false
-                    } else if (hasPendingTranslation && lastTurn.russianText.isBlank()) {
-                        // Речь зафиксирована, но русский перевод ещё в полёте по сети!
-                        // КАТЕГОРИЧЕСКИ НЕЛЬЗЯ финализировать ход по turnComplete!
-                        // Финализировать пустую реплику по таймауту тишины должен ТОЛЬКО таймер бездействия simulIdleRunnable (2.0–2.5с тишины)
-                        false
-                    } else if (lastTurn.russianText.isNotBlank() &&
-                        isSentenceEnding(lastTurn.russianText) &&
-                        !isContinuation(lastTurn.russianText) &&
-                        !isContinuation(lastTurn.italianText)
-                    ) {
-                        // Предложение грамматически завершено (. ! ?)
-                        true
-                    } else {
-                        // Предложение всё ещё продолжается (нет финальной точки или есть запятая, либо перевод ещё в полёте)
-                        // НЕ финализируем преждевременно! Ждём следующего чанка или таймера тишины simulIdleRunnable
-                        false
+                synchronized(sessionDialogueTurns) {
+                    for (i in 0 until sessionDialogueTurns.size) {
+                        val turn = sessionDialogueTurns[i]
+                        // Финализируем ход только если перевод уже получен и грамматически завершен (. ! ?)
+                        // Если русский перевод ещё пуст (в полёте по сети), КАТЕГОРИЧЕСКИ НЕЛЬЗЯ финализировать!
+                        if (!turn.isFinalized && turn.russianText.isNotBlank()) {
+                            val isEnding = isSentenceEnding(turn.russianText) &&
+                                !isContinuation(turn.russianText) &&
+                                !isContinuation(turn.italianText)
+                            if (isEnding) {
+                                turn.isFinalized = true
+                                turn.lastActivityTime = System.currentTimeMillis()
+                                val turnCopy = turn.copy()
+                                onDialogueTurnUpdated?.invoke(i, turnCopy, false)
+                            }
+                        }
                     }
-                }
-
-                if (shouldFinalizeNow) {
-                    finalizeCurrentTurn()
                 }
             }
 
