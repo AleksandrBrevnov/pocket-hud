@@ -117,14 +117,14 @@ with open(pocket_service_path, "r", encoding="utf-8") as f:
 with open(build_gradle_path, "r", encoding="utf-8") as f:
     gradle_code = f.read()
 
-print("\n--- 1. Verification of v1.0.22 Version Bumps ---")
-assert 'versionCode = 22' in gradle_code, "versionCode 22 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.22"' in gradle_code, "versionName 1.0.22 missing in app/build.gradle.kts"
-assert 'text = "v1.0.22"' in main_code, "v1.0.22 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.22' in service_code, "v1.0.22 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.22 активен' in service_code, "v1.0.22 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.22' in service_code, "v1.0.22 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.22 OK across all files.")
+print("\n--- 1. Verification of v1.0.23 Version Bumps ---")
+assert 'versionCode = 23' in gradle_code, "versionCode 23 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.23"' in gradle_code, "versionName 1.0.23 missing in app/build.gradle.kts"
+assert 'text = "v1.0.23"' in main_code, "v1.0.23 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.23' in service_code, "v1.0.23 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.23 активен' in service_code, "v1.0.23 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.23' in service_code, "v1.0.23 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.23 OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -140,29 +140,39 @@ assert "Thread.sleep(40)" in service_code, "sendThread must sleep while !isSetup
 assert "isSetupComplete = true" in service_code, "isSetupComplete activation on setupComplete missing"
 print("  -> Session rotation & reconnect OK.")
 
-print("\n--- 3. Verification of Gemini Live sendSetup() ---")
-assert '"realtimeInputConfig"' in service_code, "realtimeInputConfig missing in sendSetup"
-assert '"NO_INTERRUPTION"' in service_code, "NO_INTERRUPTION activityHandling missing in sendSetup"
-assert '"START_SENSITIVITY_HIGH"' in service_code, "START_SENSITIVITY_HIGH sensitivity missing in sendSetup"
-assert '"silenceDurationMs", 600' in service_code, "silenceDurationMs 600 missing in sendSetup"
-assert '"prefixPaddingMs", 200' in service_code, "prefixPaddingMs 200 missing in sendSetup"
+print("\n--- 3. Verification of Natural Gemini Server-Side VAD sendSetup() ---")
+assert '"realtimeInputConfig"' not in service_code, "realtimeInputConfig must be removed to allow natural server-side VAD"
+assert '"silenceDurationMs"' not in service_code, "silenceDurationMs must be removed to prevent premature sentence cutting"
+assert '"NO_INTERRUPTION"' not in service_code, "NO_INTERRUPTION must be removed"
 assert '"sessionResumption"' in service_code, "sessionResumption object missing in sendSetup"
 assert '"handle", handle' in service_code, "resumptionHandle injection missing in sendSetup"
-print("  -> Gemini Live sendSetup() configuration OK.")
+assert '"languageCodes"' in service_code, "languageCodes array missing in sendSetup"
+assert '"it-IT"' in service_code, "it-IT missing in languageCodes"
+assert '"en-US"' in service_code, "en-US missing in languageCodes"
+print("  -> Gemini Live natural server-side VAD configuration OK.")
 
 print("\n--- 4. Verification of Split Audio Routing & Hardware DSP ---")
 assert "var selectedMicSource: MicSource = MicSource.SMARTPHONE" in service_code, "Default mic in PocketService must be SMARTPHONE"
 assert "currentMicSource = MicSource.SMARTPHONE" in main_code, "Default mic in MainActivity must be SMARTPHONE"
+assert "Pair(MediaRecorder.AudioSource.VOICE_RECOGNITION" in service_code, "VOICE_RECOGNITION missing in SMARTPHONE sources"
 assert "AudioSource.MIC" in service_code, "AudioSource.MIC missing in SMARTPHONE sources"
-assert "AudioSource.UNPROCESSED" in service_code, "AudioSource.UNPROCESSED missing in SMARTPHONE sources"
 assert "record.setPreferredDevice(builtinMic)" in service_code, "setPreferredDevice for built-in mic missing"
 assert "AutomaticGainControl" in service_code, "Hardware AutomaticGainControl missing"
 assert "NoiseSuppressor" in service_code, "Hardware NoiseSuppressor missing"
 assert "attachHardwareEffects" in service_code, "attachHardwareEffects method missing"
+assert "skipNoiseSuppressor" in service_code, "skipNoiseSuppressor parameter missing in attachHardwareEffects"
+assert "HW_NS_SKIPPED" in service_code, "HW_NS_SKIPPED logging missing when VOICE_RECOGNITION is active"
 assert "releaseHardwareEffects" in service_code, "releaseHardwareEffects method missing"
 assert "applyDynamicSoftKneeAgc" in service_code, "Dynamic soft-knee AGC missing"
 assert "USAGE_MEDIA" in service_code, "USAGE_MEDIA missing in audio routing"
-print("  -> Split audio routing & hardware DSP OK.")
+
+# Verify VOICE_RECOGNITION priority in SMARTPHONE sources
+smartphone_sources_match = re.search(r'selectedMicSource\s*==\s*MicSource\.SMARTPHONE\)\s*\{\s*listOf\((.*?)\)\s*\}\s*else', service_code, re.DOTALL)
+assert smartphone_sources_match, "Could not find SMARTPHONE sources list in PocketService.kt"
+smartphone_sources = smartphone_sources_match.group(1)
+first_source = re.search(r'Pair\(MediaRecorder\.AudioSource\.(\w+)', smartphone_sources)
+assert first_source and first_source.group(1) == "VOICE_RECOGNITION", f"Expected VOICE_RECOGNITION as first source, got {first_source.group(1) if first_source else None}"
+print("  -> Split audio routing & hardware DSP OK (VOICE_RECOGNITION priority verified).")
 
 print("\n--- 5. Verification of Streaming Tag Cleaner ---")
 assert "class StreamingTagCleaner" in service_code, "StreamingTagCleaner class missing"
@@ -288,6 +298,12 @@ print(f"  Loud sample {loud_sample} -> {out_loud} (soft saturation without digit
 assert out_loud <= 32767, "Loud sample must not clip or overflow"
 assert out_loud > 32000, "Loud sample should saturate near ceiling"
 
+print("\n--- 9. Verification of TRANSLATION_EMPTY Logging ---")
+assert "TRANSLATION_EMPTY" in service_code, "TRANSLATION_EMPTY event logging missing in PocketService.kt"
+assert "hasPendingTranslation" in service_code, "hasPendingTranslation state tracking missing in PocketService.kt"
+assert "turnComplete" in service_code, "turnComplete check missing in PocketService.kt"
+print("  -> TRANSLATION_EMPTY logging verified.")
+
 print("\n=======================================================")
-print("🎉 ALL V1.0.22 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.23 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")

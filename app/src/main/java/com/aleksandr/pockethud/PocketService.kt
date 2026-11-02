@@ -47,7 +47,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 enum class MicSource {
-    SMARTPHONE, // 📱 Встроенный микрофон смартфона (AudioSource.MIC, Hardware AGC/NS, Soft-knee DSP)
+    SMARTPHONE, // 📱 Встроенный микрофон смартфона (AudioSource.VOICE_RECOGNITION, Hardware AGC, Soft-knee DSP)
     BLUETOOTH   // 🎧 Микрофон гарнитуры (VOICE_COMMUNICATION, Bluetooth SCO)
 }
 
@@ -193,6 +193,10 @@ class PocketService : Service() {
     // Потоковые очистители неполных тегов
     private val inputTagCleaner = StreamingTagCleaner()
     private val outputTagCleaner = StreamingTagCleaner()
+
+    // Флаг ожидания перевода для зафиксированной входной речи (для детекции TRANSLATION_EMPTY)
+    @Volatile private var hasPendingTranslation = false
+    @Volatile private var currentTurnInputSpeech: String? = null
 
     // Потоки
     private var recordThread: Thread? = null
@@ -345,7 +349,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.22\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.23\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -402,7 +406,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.22 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.23 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -582,6 +586,8 @@ class PocketService : Service() {
         lastRecognizedInput = cleanedInput
         Log.d(tag, "Распознана речь (IT/EN): $cleanedInput")
         logEvent("INPUT_SPEECH:", "\"$lastRecognizedInput\"")
+        hasPendingTranslation = true
+        currentTurnInputSpeech = cleanedInput
         appendToSessionBuilder(sessionItalianBuilder, cleanedInput)
         onInputTextReceived?.invoke(cleanedInput)
 
@@ -600,6 +606,10 @@ class PocketService : Service() {
                 val turnCopy = lastTurn.copy()
                 onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
             } else {
+                // Если предыдущая реплика осталась без перевода по таймауту (>8 сек), логируем TRANSLATION_EMPTY
+                if (lastTurn != null && lastTurn.russianText.isBlank() && lastTurn.italianText.isNotBlank() && hasPendingTranslation) {
+                    logEvent("TRANSLATION_EMPTY", "ORIG=\"${lastTurn.italianText}\" (new turn timeout)")
+                }
                 // Создаем новую пару диалога
                 val newTurn = DialogueTurn(
                     italianText = cleanedInput,
@@ -620,6 +630,8 @@ class PocketService : Service() {
     private fun recordTranslationOutput(cleanedText: String) {
         serverTextChunksReceived++
         lastServerText = cleanedText
+        hasPendingTranslation = false
+        currentTurnInputSpeech = null
         val origPrompt = if (lastRecognizedInput.isBlank()) "..." else lastRecognizedInput
         logEvent("TRANSLATION:", "ORIG=\"$origPrompt\" -> RU=\"$lastServerText\"")
 
@@ -786,7 +798,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.22")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.23")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -862,7 +874,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.22")
+            appendLine("Версия: v1.0.23")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): ${if (resumptionHandle.isNullOrBlank()) "нет" else "активна (${resumptionHandle?.take(16)}...)"}")
@@ -1039,6 +1051,8 @@ class PocketService : Service() {
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 isSetupComplete = false
+                hasPendingTranslation = false
+                currentTurnInputSpeech = null
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
                 val httpCode = response?.code
@@ -1057,6 +1071,8 @@ class PocketService : Service() {
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.d(tag, "WebSocket закрыт ($code: $reason)")
                 isSetupComplete = false
+                hasPendingTranslation = false
+                currentTurnInputSpeech = null
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
                 if (isRunning) {
@@ -1142,15 +1158,6 @@ class PocketService : Service() {
                                 "3. NEVER converse, NEVER explain, NEVER reply in the original language, NEVER answer questions. Your ONLY job is faithful, instantaneous speech translation into Russian. " +
                                 "4. Ignore background noise and street/cafe ambiance — focus on human voices. If someone speaks Russian, stay silent. Translate ALL Italian and English speech into Russian.")
                 }))
-            })
-            put("realtimeInputConfig", JSONObject().apply {
-                put("activityHandling", "NO_INTERRUPTION")
-                put("automaticActivityDetection", JSONObject().apply {
-                    put("disabled", false)
-                    put("startOfSpeechSensitivity", "START_SENSITIVITY_HIGH")
-                    put("silenceDurationMs", 600)
-                    put("prefixPaddingMs", 200)
-                })
             })
             put("inputAudioTranscription", JSONObject().apply {
                 put("languageCodes", JSONArray().apply {
@@ -1245,6 +1252,8 @@ class PocketService : Service() {
 
             // Мгновенный Barge-in: сбрасываем звук при прерывании
             if (serverContent.optBoolean("interrupted", false)) {
+                hasPendingTranslation = false
+                currentTurnInputSpeech = null
                 audioPlaybackQueue.clear()
                 queuedPlaybackBytes.set(0L)
                 isPlaybackSpeedBoosted = false
@@ -1333,6 +1342,20 @@ class PocketService : Service() {
                 }
             }
 
+            // 7. Проверка завершения хода (turnComplete) и логирование пустых переводов
+            val turnComplete = serverContent.optBoolean("turnComplete", false) ||
+                               root.optBoolean("turnComplete", false) ||
+                               (modelTurn?.optBoolean("turnComplete", false) == true)
+            if (turnComplete) {
+                if (hasPendingTranslation) {
+                    val origPrompt = currentTurnInputSpeech ?: lastRecognizedInput
+                    logEvent("TRANSLATION_EMPTY", "ORIG=\"$origPrompt\"")
+                    Log.d(tag, "Речь зафиксирована ($origPrompt), но перевод не сгенерирован (TRANSLATION_EMPTY)")
+                    hasPendingTranslation = false
+                    currentTurnInputSpeech = null
+                }
+            }
+
             onTelemetryUpdated?.invoke(micPeakAmplitude, chunksSent, serverTextChunksReceived + serverAudioChunksReceived)
         } catch (e: Exception) {
             Log.e(tag, "Ошибка парсинга: ${e.message}")
@@ -1341,7 +1364,7 @@ class PocketService : Service() {
         }
     }
 
-    private fun attachHardwareEffects(sessionId: Int) {
+    private fun attachHardwareEffects(sessionId: Int, skipNoiseSuppressor: Boolean = false) {
         releaseHardwareEffects()
         try {
             if (AutomaticGainControl.isAvailable()) {
@@ -1355,6 +1378,12 @@ class PocketService : Service() {
             }
         } catch (e: Exception) {
             Log.w(tag, "Ошибка активации HW AGC: ${e.message}")
+        }
+
+        if (skipNoiseSuppressor) {
+            logEvent("HW_NS_SKIPPED", "VOICE_RECOGNITION active (room mic speech preserved)")
+            Log.d(tag, "NoiseSuppressor пропущен для VOICE_RECOGNITION (сохранение дальней речи)")
+            return
         }
 
         try {
@@ -1397,9 +1426,8 @@ class PocketService : Service() {
     private fun createAudioRecord(sampleRate: Int, bufferSize: Int): Pair<AudioRecord?, String> {
         val sources = if (selectedMicSource == MicSource.SMARTPHONE) {
             listOf(
-                Pair(MediaRecorder.AudioSource.MIC, "MIC (Встроенный микрофон смартфона)"),
-                Pair(MediaRecorder.AudioSource.UNPROCESSED, "UNPROCESSED (Прямой микрофон без системной компрессии)"),
                 Pair(MediaRecorder.AudioSource.VOICE_RECOGNITION, "VOICE_RECOGNITION (Распознавание речи)"),
+                Pair(MediaRecorder.AudioSource.MIC, "MIC (Встроенный микрофон смартфона)"),
                 Pair(MediaRecorder.AudioSource.DEFAULT, "DEFAULT")
             )
         } else {
@@ -1436,7 +1464,8 @@ class PocketService : Service() {
                             Log.w(tag, "Ошибка setPreferredDevice: ${e.message}")
                         }
                     }
-                    attachHardwareEffects(record.audioSessionId)
+                    val skipNs = (source == MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                    attachHardwareEffects(record.audioSessionId, skipNoiseSuppressor = skipNs)
                     return Pair(record, name)
                 } else {
                     record.release()
