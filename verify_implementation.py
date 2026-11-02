@@ -132,8 +132,11 @@ assert "SESSION_ROTATION_RECONNECT" in service_code, "Session rotation reconnect
 assert "sessionResumptionUpdate" in service_code, "Root-level sessionResumptionUpdate extraction missing"
 assert "resumptionHandle = handle" in service_code, "resumptionHandle persistence missing"
 assert "root.has(\"goAway\")" in service_code, "Root-level goAway extraction missing"
+assert "goAwayRunnable" in service_code, "goAwayRunnable missing in PocketService.kt"
+assert "webSocket === currentWs" in service_code, "goAway race condition guard missing"
 assert "@Volatile private var isSetupComplete = false" in service_code, "isSetupComplete volatile flag missing"
 assert "if (!isSetupComplete)" in service_code, "isSetupComplete guard missing in sendThread"
+assert "Thread.sleep(40)" in service_code, "sendThread must sleep while !isSetupComplete to hold queue"
 assert "isSetupComplete = true" in service_code, "isSetupComplete activation on setupComplete missing"
 print("  -> Session rotation & reconnect OK.")
 
@@ -165,8 +168,9 @@ print("\n--- 5. Verification of Streaming Tag Cleaner ---")
 assert "class StreamingTagCleaner" in service_code, "StreamingTagCleaner class missing"
 assert "inputTagCleaner = StreamingTagCleaner()" in service_code, "inputTagCleaner instance missing"
 assert "outputTagCleaner = StreamingTagCleaner()" in service_code, "outputTagCleaner instance missing"
-assert "inputTagCleaner.clean" in service_code, "inputTagCleaner.clean usage missing"
-assert "outputTagCleaner.clean" in service_code, "outputTagCleaner.clean usage missing"
+assert "cleanServerTags" in service_code, "cleanServerTags method missing"
+assert "cleanServerTags(outputText)" in service_code, "cleanServerTags must clean outputText"
+assert "cleanServerTags(text)" in service_code, "cleanServerTags must clean part text"
 
 # Python simulation of StreamingTagCleaner
 class PythonStreamingTagCleaner:
@@ -185,7 +189,8 @@ class PythonStreamingTagCleaner:
                     self.in_thought = False
                     i = close_idx + 10
                 else:
-                    self.buffer = self.buffer[-12:]
+                    keep_len = min(len(self.buffer) - i, 12)
+                    self.buffer = self.buffer[-keep_len:]
                     return "".join(output).strip()
             else:
                 ch = self.buffer[i]
@@ -203,6 +208,10 @@ class PythonStreamingTagCleaner:
                         i = close_bracket + 1
                         continue
                     else:
+                        if len(self.buffer) - i > 60:
+                            output.append(ch)
+                            i += 1
+                            continue
                         break
                 elif ch == '{':
                     close_brace = self.buffer.find('}', i)
@@ -210,6 +219,10 @@ class PythonStreamingTagCleaner:
                         i = close_brace + 1
                         continue
                     else:
+                        if len(self.buffer) - i > 30:
+                            output.append(ch)
+                            i += 1
+                            continue
                         break
                 else:
                     output.append(ch)
@@ -234,10 +247,17 @@ assert c4 == "amico", f"Expected 'amico', got '{c4}'"
 
 c5 = cleaner.clean("<thought>private translation</thought>Привет!")
 assert c5 == "Привет!", f"Expected 'Привет!', got '{c5}'"
-print("  -> Streaming tag cleaner OK (100% split token stripping verified).")
+
+# Literal '<' followed by regular text does not drop
+cleaner_lit = PythonStreamingTagCleaner()
+c_lit = cleaner_lit.clean("Score is A < B and this is longer than 60 characters to ensure it emits properly without dropping")
+assert "Score is A < B" in c_lit, f"Expected 'Score is A < B' to be preserved, got '{c_lit}'"
+
+print("  -> Streaming tag cleaner OK (100% split token stripping & robustness verified).")
 
 print("\n--- 6. Verification of Audio Latency Drift Catch-Up ---")
 assert "queuedPlaybackBytes" in service_code, "queuedPlaybackBytes atomic counter missing"
+assert "isPlaybackSpeedBoosted" in service_code, "isPlaybackSpeedBoosted class property missing"
 assert "120_000L" in service_code, "2.5s (120,000 bytes) latency threshold missing"
 assert "38_400L" in service_code, "0.8s (38,400 bytes) normalization threshold missing"
 assert "setSpeed(1.15f)" in service_code, "1.15x speed catch-up setting missing"

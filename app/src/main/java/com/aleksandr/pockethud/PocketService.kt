@@ -108,6 +108,12 @@ class StreamingTagCleaner {
                         i = closeBracket + 1
                         continue
                     } else {
+                        // Если тег не закрыт в пределах 60 символов, это не тег, а обычный символ '<'
+                        if (buffer.length - i > 60) {
+                            output.append(ch)
+                            i++
+                            continue
+                        }
                         break
                     }
                 } else if (ch == '{') {
@@ -116,6 +122,12 @@ class StreamingTagCleaner {
                         i = closeBrace + 1
                         continue
                     } else {
+                        // Если фигурная скобка не закрыта в пределах 30 символов, это не тег
+                        if (buffer.length - i > 30) {
+                            output.append(ch)
+                            i++
+                            continue
+                        }
                         break
                     }
                 } else {
@@ -173,6 +185,10 @@ class PocketService : Service() {
 
     // Очереди и байты для Audio Latency Drift Catch-Up (24 кГц 16-бит mono = 48000 байт/сек)
     private val queuedPlaybackBytes = AtomicLong(0L)
+    @Volatile private var isPlaybackSpeedBoosted = false
+
+    // Задача отложенного закрытия при сигнале goAway
+    private var goAwayRunnable: Runnable? = null
 
     // Потоковые очистители неполных тегов
     private val inputTagCleaner = StreamingTagCleaner()
@@ -430,6 +446,7 @@ class PocketService : Service() {
         if (muted) {
             audioPlaybackQueue.clear()
             queuedPlaybackBytes.set(0L)
+            isPlaybackSpeedBoosted = false
             try {
                 audioTrack?.pause()
                 audioTrack?.flush()
@@ -942,7 +959,7 @@ class PocketService : Service() {
         }
 
         playbackThread = Thread {
-            var isSpeedBoosted = false
+            isPlaybackSpeedBoosted = false
             while (isRunning) {
                 try {
                     val chunk = audioPlaybackQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
@@ -954,20 +971,20 @@ class PocketService : Service() {
                             val track = audioTrack
                             if (track != null && track.state == AudioTrack.STATE_INITIALIZED) {
                                 // Если очередь > 2.5 сек (> 120,000 байт) — ускоряем воспроизведение на 15% (1.15x) для ликвидации лага
-                                if (!isSpeedBoosted && remainingBytes > 120_000L) {
+                                if (!isPlaybackSpeedBoosted && remainingBytes > 120_000L) {
                                     try {
                                         val params = track.playbackParams ?: PlaybackParams()
                                         track.playbackParams = params.setSpeed(1.15f)
-                                        isSpeedBoosted = true
+                                        isPlaybackSpeedBoosted = true
                                         logEvent("LATENCY_CATCHUP_ENGAGED", "queuedBytes=$remainingBytes (~${"%.2f".format(Locale.US, remainingBytes / 48000.0)}s), speed=1.15x")
                                     } catch (e: Exception) {
                                         Log.w(tag, "Ошибка установки 1.15x: ${e.message}")
                                     }
-                                } else if (isSpeedBoosted && remainingBytes < 38_400L) { // Когда очередь сократилась до < 0.8 сек (< 38,400 байт) — возвращаем 1.0x
+                                } else if (isPlaybackSpeedBoosted && remainingBytes < 38_400L) { // Когда очередь сократилась до < 0.8 сек (< 38,400 байт) — возвращаем 1.0x
                                     try {
                                         val params = track.playbackParams ?: PlaybackParams()
                                         track.playbackParams = params.setSpeed(1.0f)
-                                        isSpeedBoosted = false
+                                        isPlaybackSpeedBoosted = false
                                         logEvent("LATENCY_CATCHUP_NORMALIZED", "queuedBytes=$remainingBytes (~${"%.2f".format(Locale.US, remainingBytes / 48000.0)}s), speed=1.0x")
                                     } catch (e: Exception) {
                                         Log.w(tag, "Ошибка возврата 1.0x: ${e.message}")
@@ -1022,6 +1039,8 @@ class PocketService : Service() {
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 isSetupComplete = false
+                goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+                goAwayRunnable = null
                 val httpCode = response?.code
                 if (httpCode == 401 || httpCode == 403) {
                     connectionState = "AUTH_ERROR ($httpCode)"
@@ -1038,6 +1057,8 @@ class PocketService : Service() {
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.d(tag, "WebSocket закрыт ($code: $reason)")
                 isSetupComplete = false
+                goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+                goAwayRunnable = null
                 if (isRunning) {
                     if (code == 1000) {
                         // Google 10-15 min Session Rotation: DO NOT call stopSelf()!
@@ -1047,9 +1068,11 @@ class PocketService : Service() {
                         mainHandler.post {
                             if (isRunning && activeApiKey.isNotBlank()) {
                                 try {
-                                    webSocket?.cancel()
+                                    if (webSocket === ws) {
+                                        webSocket?.cancel()
+                                        webSocket = null
+                                    }
                                 } catch (e: Exception) {}
-                                webSocket = null
                                 connectWebSocket(activeApiKey)
                             }
                         }
@@ -1158,11 +1181,21 @@ class PocketService : Service() {
 
             // 1. Извлечение хэндла возобновления сессии (Session Resumption Update)
             val resumptionObj = root.optJSONObject("sessionResumptionUpdate")
+                ?: root.optJSONObject("sessionResumption")
             if (resumptionObj != null) {
-                val handle = resumptionObj.optString("newHandle", "").ifEmpty { resumptionObj.optString("handle", "") }
+                val handle = resumptionObj.optString("newHandle", "")
+                    .ifEmpty { resumptionObj.optString("resumptionHandle", "") }
+                    .ifEmpty { resumptionObj.optString("handle", "") }
                 if (handle.isNotEmpty()) {
                     resumptionHandle = handle
                     logEvent("SESSION_RESUMPTION_UPDATE", "handle=$handle")
+                }
+            } else {
+                val directHandle = root.optString("resumptionHandle", "")
+                    .ifEmpty { root.optString("sessionResumptionHandle", "") }
+                if (directHandle.isNotEmpty()) {
+                    resumptionHandle = directHandle
+                    logEvent("SESSION_RESUMPTION_UPDATE", "handle=$directHandle")
                 }
             }
 
@@ -1172,15 +1205,19 @@ class PocketService : Service() {
                 val timeLeft = goAwayObj?.optString("timeLeft", "") ?: ""
                 logEvent("SERVER_GO_AWAY", "timeLeft=$timeLeft")
                 Log.w(tag, "Получен сигнал goAway от Google Live (timeLeft=$timeLeft). Планирование чистой ротации...")
-                mainHandler.postDelayed({
-                    if (isRunning) {
+                val currentWs = webSocket
+                goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+                val runnable = Runnable {
+                    if (isRunning && webSocket === currentWs) {
                         try {
-                            webSocket?.close(1000, "Clean session rotation")
+                            currentWs?.close(1000, "Clean session rotation")
                         } catch (e: Exception) {
-                            webSocket?.cancel()
+                            currentWs?.cancel()
                         }
                     }
-                }, 1500L)
+                }
+                goAwayRunnable = runnable
+                mainHandler.postDelayed(runnable, 1500L)
             }
 
             // 3. Подтверждение готовности setupComplete
@@ -1210,6 +1247,7 @@ class PocketService : Service() {
             if (serverContent.optBoolean("interrupted", false)) {
                 audioPlaybackQueue.clear()
                 queuedPlaybackBytes.set(0L)
+                isPlaybackSpeedBoosted = false
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                     try {
                         audioTrack?.playbackParams = audioTrack?.playbackParams?.setSpeed(1.0f) ?: PlaybackParams().setSpeed(1.0f)
@@ -1259,7 +1297,7 @@ class PocketService : Service() {
                 ?: serverContent.optJSONObject("interimOutputTranscription")
             val outputText = outputObj?.optString("text", "") ?: ""
             if (outputText.isNotEmpty()) {
-                val cleanedOutput = outputTagCleaner.clean(outputText)
+                val cleanedOutput = cleanServerTags(outputText)
                 if (cleanedOutput.isNotEmpty()) {
                     recordTranslationOutput(cleanedOutput)
                 }
@@ -1286,7 +1324,7 @@ class PocketService : Service() {
                         }
                         val text = part.optString("text", "")
                         if (text.isNotEmpty()) {
-                            val cleanedText = outputTagCleaner.clean(text)
+                            val cleanedText = cleanServerTags(text)
                             if (cleanedText.isNotEmpty()) {
                                 recordTranslationOutput(cleanedText)
                             }
@@ -1517,12 +1555,18 @@ class PocketService : Service() {
 
             while (isRunning) {
                 try {
-                    val chunk = audioSendQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
-
-                    // Защита: не отправляем аудио в сокет, пока сервер не прислал setupComplete
+                    // Защита: не отправляем аудио в сокет, пока сервер не прислал setupComplete.
+                    // Удерживаем чанки в audioSendQueue до подтверждения готовности сессии.
                     if (!isSetupComplete) {
+                        try {
+                            Thread.sleep(40)
+                        } catch (e: InterruptedException) {
+                            break
+                        }
                         continue
                     }
+
+                    val chunk = audioSendQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
 
                     val ws = webSocket
                     if (ws != null) {
@@ -1593,6 +1637,10 @@ class PocketService : Service() {
         inputTagCleaner.reset()
         outputTagCleaner.reset()
         queuedPlaybackBytes.set(0L)
+        isPlaybackSpeedBoosted = false
+
+        goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+        goAwayRunnable = null
 
         audioPlaybackQueue.clear()
         playbackThread?.interrupt()
