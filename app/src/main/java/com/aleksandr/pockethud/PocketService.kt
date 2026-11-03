@@ -184,7 +184,8 @@ class PocketService : Service() {
     // Флаг готовности WebSocket сессии к приему аудио (защита от отправки до setupComplete)
     @Volatile private var isSetupComplete = false
 
-    // Активная карточка диалога, находящаяся в процессе стриминга перевода
+    // Активная карточка диалога (Single Active Card) и стриминг перевода
+    @Volatile private var activeDialogueTurn: DialogueTurn? = null
     @Volatile private var activeTranslationTurnId: Long? = null
 
     // Очереди и байты для Audio Latency Drift Catch-Up (24 кГц 16-бит mono = 48000 байт/сек)
@@ -252,7 +253,7 @@ class PocketService : Service() {
         const val CHANNEL_SUBTITLES_ID = "pocket_hud_subtitles_v2"
         const val NOTIFICATION_ID = 1001
         const val SUBTITLE_NOTIFICATION_ID = 1002
-        const val SIMUL_IDLE_DELAY_MS = 2000L
+        const val SIMUL_IDLE_DELAY_MS = 3500L
 
         const val EXTRA_API_KEY = "extra_api_key"
         const val EXTRA_IS_MUTED = "extra_is_muted"
@@ -295,6 +296,7 @@ class PocketService : Service() {
             synchronized(sessionDialogueTurns) {
                 sessionDialogueTurns.clear()
             }
+            currentInstance?.activeDialogueTurn = null
         }
 
         // Буферы текущей активной сессии для восстановления в UI при разблокировке экрана
@@ -354,7 +356,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.32\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.33\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -411,7 +413,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.32 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.33 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -683,6 +685,7 @@ class PocketService : Service() {
     private fun finalizeCurrentTurn() {
         mainHandler.removeCallbacks(simulIdleRunnable)
         activeTranslationTurnId = null
+        activeDialogueTurn = null
         synchronized(sessionDialogueTurns) {
             val now = System.currentTimeMillis()
             for (i in 0 until sessionDialogueTurns.size) {
@@ -714,72 +717,68 @@ class PocketService : Service() {
         mainHandler.removeCallbacks(simulIdleRunnable)
         mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)
 
-        val segments = splitSentences(cleanedInput)
-
-        // Обновление диалога в режиме Google Translate Conversation
+        // Обновление диалога в режиме Google Translate Conversation (Single Active Card / Speaker Turn):
+        // Речь накапливается в активной карточке, авторская пунктуация сохраняется.
         synchronized(sessionDialogueTurns) {
-            for (segment in segments) {
-                val lastTurn = sessionDialogueTurns.lastOrNull()
-                val now = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
 
-                // Предложение считается законченным если:
-                // 1) В реплике уже есть перевод на русском, и русский перевод оканчивается на точку/восклицательный/вопросительный знак,
-                //    при условии, что ни русская, ни итальянская фраза не обрываются на запятой, тире или двоеточии.
-                // 2) ИЛИ итальянская фраза уже оканчивается на точку/восклицательный/вопросительный знак (завершена мысль на языке оригинала),
-                //    при условии, что фраза не обрывается на запятой/тире (независимо от того, получен ли уже перевод по сети).
-                val isSentenceComplete = lastTurn != null && !lastTurn.isFinalized &&
-                    (((lastTurn.russianText.isNotBlank() &&
-                      isSentenceEnding(lastTurn.russianText) &&
-                      !isContinuation(lastTurn.russianText)) ||
-                     (lastTurn.italianText.isNotBlank() &&
-                      isSentenceEnding(lastTurn.italianText) &&
-                      !isContinuation(lastTurn.italianText))) &&
-                    !isContinuation(lastTurn.italianText))
+            // Мягкий перенос карточки (Soft Wrap) происходит только при комфортном объеме текста:
+            // turn.italianText.length >= 200 && isSentenceEnding(turn.italianText) && !isContinuation(turn.italianText)
+            val currentActive = activeDialogueTurn
+            if (currentActive != null && currentActive.italianText.length >= 200 &&
+                isSentenceEnding(currentActive.italianText) && !isContinuation(currentActive.italianText)) {
+                currentActive.isFinalized = true
+                currentActive.lastActivityTime = now
+                val idx = sessionDialogueTurns.indexOf(currentActive)
+                if (idx != -1) {
+                    onDialogueTurnUpdated?.invoke(idx, currentActive.copy(), false)
+                }
+                activeDialogueTurn = null
+            }
 
-                val canAppendToCurrent = lastTurn != null && !lastTurn.isFinalized && !isSentenceComplete
-
-                if (canAppendToCurrent) {
-                    lastTurn!!.italianText = appendWithPunctuationAwareSpace(lastTurn.italianText, segment)
-                    lastTurn.lastActivityTime = now
-                    lastRecognizedInput = lastTurn.italianText
-                    currentTurnInputSpeech = lastTurn.italianText
-                    hasPendingTranslation = true
-                    val idx = sessionDialogueTurns.size - 1
+            val lastTurn = activeDialogueTurn
+            if (lastTurn != null) {
+                lastTurn.italianText = appendWithPunctuationAwareSpace(lastTurn.italianText, cleanedInput)
+                lastTurn.lastActivityTime = now
+                lastRecognizedInput = lastTurn.italianText
+                currentTurnInputSpeech = lastTurn.italianText
+                hasPendingTranslation = true
+                val idx = sessionDialogueTurns.indexOf(lastTurn)
+                if (idx != -1) {
                     val turnCopy = lastTurn.copy()
                     onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
-                } else {
-                    // Если предыдущие реплики уже имеют завершенный перевод — финализируем их
-                    for (i in 0 until sessionDialogueTurns.size) {
-                        val turn = sessionDialogueTurns[i]
-                        if (!turn.isFinalized && turn.russianText.isNotBlank()) {
-                            if (isSentenceEnding(turn.russianText) &&
-                                !isContinuation(turn.russianText) &&
-                                !isContinuation(turn.italianText)) {
-                                turn.isFinalized = true
-                                val prevCopy = turn.copy()
-                                onDialogueTurnUpdated?.invoke(i, prevCopy, false)
-                            }
+                }
+            } else {
+                for (i in 0 until sessionDialogueTurns.size) {
+                    val turn = sessionDialogueTurns[i]
+                    if (!turn.isFinalized && turn.russianText.isNotBlank()) {
+                        if (isSentenceEnding(turn.russianText) &&
+                            !isContinuation(turn.russianText) &&
+                            !isContinuation(turn.italianText)) {
+                            turn.isFinalized = true
+                            val prevCopy = turn.copy()
+                            onDialogueTurnUpdated?.invoke(i, prevCopy, false)
                         }
                     }
-                    // Создаем новую пару диалога для нового предложения
-                    val newTurn = DialogueTurn(
-                        italianText = segment,
-                        russianText = "",
-                        timestamp = now,
-                        lastActivityTime = now,
-                        isFinalized = false
-                    )
-                    lastRecognizedInput = segment
-                    currentTurnInputSpeech = segment
-                    hasPendingTranslation = true
-                    sessionDialogueTurns.add(newTurn)
-                    if (sessionDialogueTurns.size > 200) {
-                        sessionDialogueTurns.removeAt(0)
-                    }
-                    val idx = sessionDialogueTurns.size - 1
-                    val turnCopy = newTurn.copy()
-                    onDialogueTurnUpdated?.invoke(idx, turnCopy, true)
                 }
+                val newTurn = DialogueTurn(
+                    italianText = cleanedInput,
+                    russianText = "",
+                    timestamp = now,
+                    lastActivityTime = now,
+                    isFinalized = false
+                )
+                lastRecognizedInput = cleanedInput
+                currentTurnInputSpeech = cleanedInput
+                hasPendingTranslation = true
+                sessionDialogueTurns.add(newTurn)
+                if (sessionDialogueTurns.size > 200) {
+                    sessionDialogueTurns.removeAt(0)
+                }
+                activeDialogueTurn = newTurn
+                val idx = sessionDialogueTurns.size - 1
+                val turnCopy = newTurn.copy()
+                onDialogueTurnUpdated?.invoke(idx, turnCopy, true)
             }
         }
     }
@@ -803,18 +802,25 @@ class PocketService : Service() {
 
             // 2. Если активной карточки нет, ищем подходящую по приоритетам:
             if (targetTurn == null) {
+                val nowTime = System.currentTimeMillis()
                 // Приоритет 1: Активная карточка речи, которая уже находится в процессе стриминга перевода (перевод ещё не завершен)
                 var targetIdx = sessionDialogueTurns.indexOfFirst {
                     it.italianText.isNotBlank() && it.russianText.isNotBlank() && !it.isFinalized &&
                     (!isSentenceEnding(it.russianText) || isContinuation(it.russianText))
                 }
-                // Приоритет 2: Самая ранняя (FIFO) карточка речи, ожидающая перевод (russianText пуст)
+                // Приоритет 2: Самая ранняя (FIFO) карточка речи, ожидающая перевод:
+                // нефинализированная ИЛИ только что закрытая (< 4 сек) с пустым русским текстом
                 if (targetIdx == -1) {
                     targetIdx = sessionDialogueTurns.indexOfFirst {
-                        it.italianText.isNotBlank() && it.russianText.isBlank()
+                        it.italianText.isNotBlank() && it.russianText.isBlank() &&
+                        (!it.isFinalized || (nowTime - it.lastActivityTime < 4000L))
                     }
                 }
-                // Приоритет 3: Любая последняя нефинализированная карточка
+                // Приоритет 3: Активная диалоговая карточка (Single Active Card)
+                if (targetIdx == -1 && activeDialogueTurn != null) {
+                    targetIdx = sessionDialogueTurns.indexOf(activeDialogueTurn)
+                }
+                // Приоритет 4: Любая последняя нефинализированная карточка
                 if (targetIdx == -1) {
                     targetIdx = sessionDialogueTurns.indexOfLast { !it.isFinalized }
                 }
@@ -1024,7 +1030,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.32")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.33")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1100,7 +1106,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.32")
+            appendLine("Версия: v1.0.33")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
@@ -1420,8 +1426,8 @@ class PocketService : Service() {
                 put("automaticActivityDetection", JSONObject().apply {
                     put("disabled", false)
                     put("startOfSpeechSensitivity", "START_SENSITIVITY_HIGH")
-                    put("endOfSpeechSensitivity", "END_SENSITIVITY_HIGH")
-                    put("silenceDurationMs", 400)
+                    put("endOfSpeechSensitivity", "END_SENSITIVITY_DEFAULT")
+                    put("silenceDurationMs", 800)
                     put("prefixPaddingMs", 150)
                 })
             })
@@ -1431,7 +1437,7 @@ class PocketService : Service() {
             put("setup", setupObj)
         }
         ws.send(setupJson.toString())
-        logEvent("SETUP_SENT", "model=models/gemini-3.5-live-translate-preview, target=ru, vad=[silence=400ms, NO_INTERRUPTION]")
+        logEvent("SETUP_SENT", "model=models/gemini-3.5-live-translate-preview, target=ru, vad=[silence=800ms, NO_INTERRUPTION]")
     }
 
     private fun handleServerMessage(jsonText: String) {
@@ -1524,6 +1530,7 @@ class PocketService : Service() {
                 hasPendingTranslation = false
                 currentTurnInputSpeech = null
                 activeTranslationTurnId = null
+                activeDialogueTurn = null
                 audioPlaybackQueue.clear()
                 queuedPlaybackBytes.set(0L)
                 isPlaybackSpeedBoosted = false
@@ -2004,6 +2011,7 @@ class PocketService : Service() {
         hasPendingTranslation = false
         currentTurnInputSpeech = null
         activeTranslationTurnId = null
+        activeDialogueTurn = null
         queuedPlaybackBytes.set(0L)
         isPlaybackSpeedBoosted = false
 

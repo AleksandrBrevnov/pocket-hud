@@ -121,16 +121,16 @@ with open(build_gradle_path, "r", encoding="utf-8") as f:
 with open(setup_and_push_path, "r", encoding="utf-8") as f:
     setup_code = f.read()
 
-print("\n--- 1. Verification of v1.0.32 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 36' in gradle_code, "versionCode 36 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.32"' in gradle_code, "versionName 1.0.32 missing in app/build.gradle.kts"
+print("\n--- 1. Verification of v1.0.33 Version Bumps & Fixed Keystore ---")
+assert 'versionCode = 37' in gradle_code, "versionCode 37 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.33"' in gradle_code, "versionName 1.0.33 missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
 assert os.path.exists(r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\debug.keystore"), "app/debug.keystore missing on disk"
-assert 'text = "v1.0.32"' in main_code, "v1.0.32 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.32' in service_code, "v1.0.32 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.32 активен' in service_code, "v1.0.32 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.32' in service_code, "v1.0.32 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.32 and fixed debug.keystore OK across all files.")
+assert 'text = "v1.0.33"' in main_code, "v1.0.33 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.33' in service_code, "v1.0.33 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.33 активен' in service_code, "v1.0.33 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.33' in service_code, "v1.0.33 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.33 and fixed debug.keystore OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -163,10 +163,10 @@ assert "resumptionObj" not in setup_body, "resumptionObj must be completely remo
 assert "systemInstruction" not in setup_body, "systemInstruction must be completely removed from sendSetup"
 
 assert '"realtimeInputConfig"' in service_code, "realtimeInputConfig missing in sendSetup"
-assert '"silenceDurationMs", 400' in service_code or '"silenceDurationMs"' in service_code, "silenceDurationMs missing in sendSetup"
+assert '"silenceDurationMs", 800' in service_code or '"silenceDurationMs"' in service_code, "silenceDurationMs 800 missing in sendSetup"
 assert '"NO_INTERRUPTION"' in service_code, "NO_INTERRUPTION missing in realtimeInputConfig"
 assert '"START_SENSITIVITY_HIGH"' in service_code, "START_SENSITIVITY_HIGH missing in realtimeInputConfig"
-assert '"END_SENSITIVITY_HIGH"' in service_code, "END_SENSITIVITY_HIGH missing in realtimeInputConfig"
+assert '"END_SENSITIVITY_DEFAULT"' in service_code, "END_SENSITIVITY_DEFAULT missing in realtimeInputConfig"
 assert '"prefixPaddingMs", 150' in service_code or '"prefixPaddingMs"' in service_code, "prefixPaddingMs missing in sendSetup"
 print("  -> Native Gemini Live Translate sendSetup() configuration verified perfectly.")
 
@@ -353,7 +353,7 @@ assert out_loud[0] <= 32767 and out_loud[0] > 32000, "Loud sample must saturate 
 print("  -> Dynamic soft-knee AGC & Noise Gate verified perfectly.")
 
 print("\n--- 9. Verification of Synchronous Live Translate Streaming, Idle Timer & Mic Silence Guard ---")
-assert "SIMUL_IDLE_DELAY_MS = 2000L" in service_code, "SIMUL_IDLE_DELAY_MS = 2000L missing in PocketService companion object"
+assert "SIMUL_IDLE_DELAY_MS = 3500L" in service_code, "SIMUL_IDLE_DELAY_MS = 3500L missing in PocketService companion object"
 assert "simulIdleRunnable" in service_code, "simulIdleRunnable missing in PocketService.kt"
 assert "finalizeCurrentTurn()" in service_code, "finalizeCurrentTurn() method missing in PocketService.kt"
 assert "isFinished" in service_code, "isFinished flag handling missing in handleServerMessage"
@@ -368,7 +368,9 @@ assert "resumptionHandle" not in service_code, "resumptionHandle dead code must 
 # Verify volatile threading guarantees and lifecycle cleanup
 assert "@Volatile" in service_code and "var isServiceActive" in service_code, "isServiceActive must be volatile"
 assert "@Volatile private var isRunning = false" in service_code, "isRunning must be volatile"
+assert "@Volatile private var activeDialogueTurn: DialogueTurn? = null" in service_code, "activeDialogueTurn must be volatile in PocketService"
 assert "@Volatile private var activeTranslationTurnId" in service_code, "activeTranslationTurnId must be volatile in PocketService"
+assert "currentActive.italianText.length >= 200" in service_code, "Soft wrap 200 char threshold missing in PocketService.kt"
 assert "@Volatile var onStatusChanged" in service_code, "onStatusChanged callback must be volatile"
 assert "override fun onDestroy()" in main_code, "onDestroy missing in MainActivity.kt"
 assert "PocketService.onStatusChanged = null" in main_code, "onStatusChanged cleanup missing in MainActivity.onDestroy"
@@ -467,7 +469,7 @@ class DialogueTurnSim:
         self.isFinalized = isFinalized
 
 class SynchronousTurnStateMachine:
-    def __init__(self):
+    def __init__(self, idle_delay_ms=2000):
         self.sessionDialogueTurns = []
         self.hasPendingTranslation = False
         self.currentTurnInputSpeech = None
@@ -475,13 +477,16 @@ class SynchronousTurnStateMachine:
         self.idleTimerDeadline = None
         self.logged_events = []
         self.activeTranslationTurnId = None
+        self.idle_delay_ms = idle_delay_ms
 
-    def finalizeCurrentTurn(self):
+    def finalizeCurrentTurn(self, now=None):
         self.idleTimerDeadline = None
         self.activeTranslationTurnId = None
         for turn in self.sessionDialogueTurns:
             if not turn.isFinalized:
                 turn.isFinalized = True
+                if now is not None:
+                    turn.lastActivityTime = now
                 if self.hasPendingTranslation and not turn.russianText.strip():
                     origPrompt = turn.italianText or self.currentTurnInputSpeech or self.lastRecognizedInput
                     self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{origPrompt}"'))
@@ -489,7 +494,7 @@ class SynchronousTurnStateMachine:
         self.currentTurnInputSpeech = None
 
     def recordInputSpeech(self, cleanedInput: str, now: int):
-        self.idleTimerDeadline = now + 2000
+        self.idleTimerDeadline = now + self.idle_delay_ms
         segments = splitSentences(cleanedInput)
         for segment in segments:
             lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
@@ -507,6 +512,7 @@ class SynchronousTurnStateMachine:
 
             if canAppendToCurrent:
                 lastTurn.italianText = appendWithPunctuationAwareSpace(lastTurn.italianText, segment)
+                lastTurn.lastActivityTime = now
                 self.lastRecognizedInput = lastTurn.italianText
                 self.currentTurnInputSpeech = lastTurn.italianText
                 self.hasPendingTranslation = True
@@ -547,10 +553,11 @@ class SynchronousTurnStateMachine:
                 ):
                     targetTurn = turn
                     break
-            # Priority 2: Earliest (FIFO) turn waiting for translation
+            # Priority 2: Earliest (FIFO) turn waiting for translation (unfinalized OR closed < 4000ms ago)
             if targetTurn is None:
                 for turn in self.sessionDialogueTurns:
-                    if turn.italianText.strip() and not turn.russianText.strip():
+                    if (turn.italianText.strip() and not turn.russianText.strip() and
+                        (not turn.isFinalized or (now - turn.lastActivityTime < 4000))):
                         targetTurn = turn
                         break
             # Priority 3: Last unfinalized turn
@@ -568,6 +575,7 @@ class SynchronousTurnStateMachine:
             if not wasFinalized:
                 targetTurn.isFinalized = False
             targetTurn.russianText = appendWithPunctuationAwareSpace(targetTurn.russianText, cleanedText)
+            targetTurn.lastActivityTime = now
             isEnding = isSentenceEnding(targetTurn.russianText) and not isContinuation(targetTurn.russianText)
             if isEnding:
                 self.activeTranslationTurnId = None
@@ -589,13 +597,13 @@ class SynchronousTurnStateMachine:
             else:
                 self.activeTranslationTurnId = newTurn.id
 
-        self.idleTimerDeadline = now + 2000
+        self.idleTimerDeadline = now + self.idle_delay_ms
         if isFinished:
             self.onTurnComplete()
 
     def checkIdleTimer(self, now: int):
         if self.idleTimerDeadline is not None and now >= self.idleTimerDeadline:
-            self.finalizeCurrentTurn()
+            self.finalizeCurrentTurn(now)
 
     def onTurnComplete(self):
         self.activeTranslationTurnId = None
@@ -928,9 +936,47 @@ assert sm17.sessionDialogueTurns[0].russianText == "А, и потом... кус�
 assert sm17.sessionDialogueTurns[1].russianText == "Всегда было два."
 assert sm17.sessionDialogueTurns[2].russianText == "Он лжец."
 
+# Scenario 18: Session Log (7) reproduction: Monologue of 4 fragments, 3 translations, pause, new question -> Prevents cascading desync
+sm18 = SynchronousTurnStateMachine(idle_delay_ms=3500)
+sm18.recordInputSpeech("No, basta cosi,", now=1000)
+sm18.recordInputSpeech("questo e basta.", now=1500)
+sm18.recordTranslationOutput("Нет, хватит,", now=1600, isFinished=False)
+sm18.recordTranslationOutput("это все.", now=1700, isFinished=True)
+
+# Speaker pauses for 4 seconds -> idle timer finalizes Turn 0
+sm18.checkIdleTimer(now=5300)
+assert sm18.sessionDialogueTurns[0].isFinalized == True
+assert sm18.sessionDialogueTurns[0].russianText == "Нет, хватит, это все."
+
+# Brief phrase that gets empty translation
+sm18.recordInputSpeech("Sì, Alex.", now=6000)
+# Silence passes (3.5s) -> Sì, Alex. gets TRANSLATION_EMPTY:
+sm18.checkIdleTimer(now=9600)
+assert sm18.sessionDialogueTurns[1].isFinalized == True
+assert sm18.sessionDialogueTurns[1].russianText == ""
+assert ("TRANSLATION_EMPTY", 'ORIG="Sì, Alex."') in sm18.logged_events
+
+# 19 seconds of silence pass. New monologue / question arrived at 29000:
+sm18.recordInputSpeech("Ma, come", now=29000)
+sm18.recordInputSpeech("mai io", now=29500)
+sm18.recordInputSpeech("Aspetta, non vorrei che", now=30000)
+sm18.recordInputSpeech("questo turno.", now=30500)
+
+# Translation for the new question arrives:
+sm18.recordTranslationOutput("Но, как", now=30600, isFinished=False)
+sm18.recordTranslationOutput("так я", now=30700, isFinished=False)
+sm18.recordTranslationOutput("Подожди, я не хочу этот ход.", now=30800, isFinished=True)
+
+# 1. Turn 1 (Sì, Alex.) MUST NOT have stolen translation from the new question!
+assert sm18.sessionDialogueTurns[1].russianText == "", f"Turn 1 stole translation! Got: {sm18.sessionDialogueTurns[1].russianText}"
+
+# 2. Turn 2 (Ma, come...) must receive all monologue translations without desync
+assert sm18.sessionDialogueTurns[2].italianText == "Ma, come mai io Aspetta, non vorrei che questo turno."
+assert sm18.sessionDialogueTurns[2].russianText == "Но, как так я Подожди, я не хочу этот ход."
+
 print("  -> Synchronous streaming state machine, sentence accumulation & sliding idle timer verified perfectly.")
 
-print("\n--- 10. Verification of v1.0.32 P1/P2 Architectural Enhancements & Guardrails ---")
+print("\n--- 10. Verification of v1.0.33 P1/P2 Architectural Enhancements & Guardrails ---")
 # 1. DialogueTurn.id with AtomicLong
 assert "dialogueTurnIdCounter = AtomicLong(0L)" in service_code, "dialogueTurnIdCounter = AtomicLong(0L) missing in PocketService.kt"
 assert "val id: Long = dialogueTurnIdCounter.incrementAndGet()" in service_code, "DialogueTurn must use dialogueTurnIdCounter.incrementAndGet() for default id"
@@ -992,9 +1038,9 @@ with open(setup_and_push_path, "rb") as f:
     raw_setup_bytes = f.read()
 assert not raw_setup_bytes.startswith(b'\xef\xbb\xbf'), "setup_and_push.ps1 MUST NOT have UTF-8 BOM"
 
-print("  -> v1.0.32 P1/P2 Architectural Enhancements & Guardrails verified perfectly.")
+print("  -> v1.0.33 P1/P2 Architectural Enhancements & Guardrails verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.32 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.33 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
 
