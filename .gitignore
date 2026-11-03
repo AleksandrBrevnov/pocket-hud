@@ -56,6 +56,14 @@ ehthumbs.db
 Thumbs.db
 desktop.ini
 
+# Python cache
+__pycache__/
+*.pyc
+
+# Screenshots
+Screenshot*
+
 # Secrets / Keystores
 *.keystore
 *.jks
+!app/debug.keystore

@@ -179,9 +179,6 @@ class PocketService : Service() {
     private var hwAgc: AutomaticGainControl? = null
     private var hwNs: NoiseSuppressor? = null
 
-    // Сессионный хэндл Google Live (Session Resumption across 10-15 min rotations)
-    @Volatile private var resumptionHandle: String? = null
-
     // Флаг готовности WebSocket сессии к приему аудио (защита от отправки до setupComplete)
     @Volatile private var isSetupComplete = false
 
@@ -225,7 +222,6 @@ class PocketService : Service() {
     @Volatile private var connectionState = "DISCONNECTED"
     @Volatile private var activeAudioSource = "NONE"
     @Volatile private var serviceStartTime = 0L
-    @Volatile private var silenceFramesCount = 0
     private val recentTranslations = StringBuilder()
 
     // Состояние переподключения и троттлинга
@@ -244,8 +240,6 @@ class PocketService : Service() {
     private val notificationFlushRunnable = Runnable { flushPendingNotification() }
     private val simulIdleRunnable = Runnable { finalizeCurrentTurn() }
 
-    private val tagRegex = Regex("""<thought>.*?</thought>|<[^>]+>|\{[^}]+\}""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
-
     private val logDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
     companion object {
@@ -259,6 +253,7 @@ class PocketService : Service() {
         const val EXTRA_IS_MUTED = "extra_is_muted"
         const val EXTRA_MIC_SOURCE = "extra_mic_source"
 
+        @Volatile
         var isServiceActive = false
 
         @Volatile
@@ -275,12 +270,12 @@ class PocketService : Service() {
                 currentInstance?.applyMicSourceChange(value)
             }
 
-        // Коллбэки в UI
-        var onStatusChanged: ((String) -> Unit)? = null
-        var onTextReceived: ((String) -> Unit)? = null
-        var onInputTextReceived: ((String) -> Unit)? = null
-        var onDialogueTurnUpdated: ((turnIndex: Int, turn: DialogueTurn, isNew: Boolean) -> Unit)? = null
-        var onTelemetryUpdated: ((micAmp: Int, chunks: Long, responses: Long) -> Unit)? = null
+        // Коллбэки в UI (Volatile для потокобезопасности: устанавливаются в UI-потоке, вызываются из OkHttp)
+        @Volatile var onStatusChanged: ((String) -> Unit)? = null
+        @Volatile var onTextReceived: ((String) -> Unit)? = null
+        @Volatile var onInputTextReceived: ((String) -> Unit)? = null
+        @Volatile var onDialogueTurnUpdated: ((turnIndex: Int, turn: DialogueTurn, isNew: Boolean) -> Unit)? = null
+        @Volatile var onTelemetryUpdated: ((micAmp: Int, chunks: Long, responses: Long) -> Unit)? = null
 
         // Диалог текущей сессии (Google Translate Conversation Mode)
         private val sessionDialogueTurns = ArrayList<DialogueTurn>()
@@ -354,7 +349,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.29\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.30\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -411,7 +406,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.29 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.30 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -661,7 +656,6 @@ class PocketService : Service() {
         logEvent("INPUT_SPEECH:", "\"$cleanedInput\"")
         appendToSessionBuilder(sessionItalianBuilder, cleanedInput)
         onInputTextReceived?.invoke(cleanedInput)
-        silenceFramesCount = 0
         mainHandler.removeCallbacks(simulIdleRunnable)
         mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)
 
@@ -756,8 +750,13 @@ class PocketService : Service() {
 
             if (targetIdx != -1) {
                 val targetTurn = sessionDialogueTurns[targetIdx]
-                // Если карточка была ошибочно финализирована до прихода перевода — реактивируем её
-                targetTurn.isFinalized = false
+                // Реактивируем карточку ТОЛЬКО если она ещё в процессе стриминга (russianText не пуст).
+                // Если карточка была финализирована с пустым переводом и запоздавший перевод пришёл через Priority 2,
+                // записываем перевод, но оставляем isFinalized = true, чтобы Priority 1 не захватил её повторно.
+                val wasFinalized = targetTurn.isFinalized
+                if (!wasFinalized) {
+                    targetTurn.isFinalized = false
+                }
                 targetTurn.russianText = appendWithPunctuationAwareSpace(targetTurn.russianText, cleanedText)
                 targetTurn.lastActivityTime = System.currentTimeMillis()
                 val turnCopy = targetTurn.copy()
@@ -927,7 +926,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.29")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.30")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1003,7 +1002,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.29")
+            appendLine("Версия: v1.0.30")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
@@ -1182,6 +1181,7 @@ class PocketService : Service() {
                 isSetupComplete = false
                 hasPendingTranslation = false
                 currentTurnInputSpeech = null
+                mainHandler.removeCallbacks(simulIdleRunnable)
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
                 val httpCode = response?.code
@@ -1209,7 +1209,7 @@ class PocketService : Service() {
                     if (code == 1000) {
                         // Google 10-15 min Session Rotation: DO NOT call stopSelf()!
                         connectionState = "RECONNECTING (Rotation)"
-                        logEvent("SESSION_ROTATION_RECONNECT", "code=$code, reason=$reason, handle=$resumptionHandle")
+                        logEvent("SESSION_ROTATION_RECONNECT", "code=$code, reason=$reason")
                         onStatusChanged?.invoke("🔄 Ротация сессии Google (15 мин). Мгновенное возобновление...")
                         mainHandler.post {
                             if (isRunning && activeApiKey.isNotBlank()) {
@@ -1284,17 +1284,6 @@ class PocketService : Service() {
             })
             put("inputAudioTranscription", JSONObject())
             put("outputAudioTranscription", JSONObject())
-            put("systemInstruction", JSONObject().apply {
-                put("parts", JSONArray().put(JSONObject().apply {
-                    put("text", "You are an invisible real-time speech interpreter into Russian for Alexander living in Rome. " +
-                                "CRITICAL TRANSLATION RULES: " +
-                                "1. Translate IMMEDIATELY and CONTINUOUSLY sentence-by-sentence whenever you hear Italian OR English speech. " +
-                                "Provide a COMPLETE sentence-by-sentence translation into Russian without omitting details, numbers, nuances, or technical context. Do not summarize or abbreviate. " +
-                                "2. Output ONLY the Russian translation. " +
-                                "3. NEVER converse, NEVER explain, NEVER reply in the original language, NEVER answer questions. Your ONLY job is faithful, instantaneous speech translation into Russian. " +
-                                "4. Ignore background noise and street/cafe ambiance — focus on human voices. If someone speaks Russian, stay silent. Translate ALL Italian and English speech into Russian.")
-                }))
-            })
             put("realtimeInputConfig", JSONObject().apply {
                 put("activityHandling", "NO_INTERRUPTION")
                 put("automaticActivityDetection", JSONObject().apply {
@@ -1319,27 +1308,7 @@ class PocketService : Service() {
             serverMessagesReceived++
             val root = JSONObject(jsonText)
 
-            // 1. Извлечение хэндла возобновления сессии (Session Resumption Update)
-            val resumptionObj = root.optJSONObject("sessionResumptionUpdate")
-                ?: root.optJSONObject("sessionResumption")
-            if (resumptionObj != null) {
-                val handle = resumptionObj.optString("newHandle", "")
-                    .ifEmpty { resumptionObj.optString("resumptionHandle", "") }
-                    .ifEmpty { resumptionObj.optString("handle", "") }
-                if (handle.isNotEmpty()) {
-                    resumptionHandle = handle
-                    logEvent("SESSION_RESUMPTION_UPDATE", "handle=$handle")
-                }
-            } else {
-                val directHandle = root.optString("resumptionHandle", "")
-                    .ifEmpty { root.optString("sessionResumptionHandle", "") }
-                if (directHandle.isNotEmpty()) {
-                    resumptionHandle = directHandle
-                    logEvent("SESSION_RESUMPTION_UPDATE", "handle=$directHandle")
-                }
-            }
-
-            // 2. Сигнал ротации goAway от сервера Google Live
+            // 1. Сигнал ротации goAway от сервера Google Live
             if (root.has("goAway")) {
                 val goAwayObj = root.optJSONObject("goAway")
                 val timeLeft = goAwayObj?.optString("timeLeft", "") ?: ""
@@ -1388,9 +1357,29 @@ class PocketService : Service() {
                 val msg = errObj?.optString("message", "") ?: errObj?.toString() ?: "Unknown error"
                 val errText = "Ошибка сервера Google Live ($code): $msg"
                 lastError = errText
+                isSetupComplete = false
+                mainHandler.removeCallbacks(simulIdleRunnable)
                 logEvent("SERVER_ERROR", "code=$code, message=$msg")
                 onStatusChanged?.invoke("🔴 $errText")
                 Log.e(tag, errText)
+                triggerFailureHaptic()
+                try {
+                    webSocket?.cancel()
+                } catch (e: Exception) {}
+                webSocket = null
+                if (code == 400 || code == 403) {
+                    // Неисправимая ошибка (неверный запрос или доступ запрещён) — полная остановка
+                    isRunning = false
+                    isServiceActive = false
+                    try {
+                        audioRecord?.stop()
+                    } catch (e: Exception) {}
+                    updateOngoingNotification("🔴 Ошибка $code", errText)
+                    stopSelf()
+                } else {
+                    // Восстановимая ошибка (429 rate limit, 5xx) — переподключение
+                    handleConnectionDrop(errText)
+                }
                 return
             }
 
@@ -1746,19 +1735,6 @@ class PocketService : Service() {
                         micPeakAmplitude = ((maxVal * 100) / 32767).coerceIn(0, 100)
                         if (micPeakAmplitude > sessionMaxAmplitude) {
                             sessionMaxAmplitude = micPeakAmplitude
-                        }
-
-                        val now = System.currentTimeMillis()
-                        val isSpeechDetected = if (selectedMicSource == MicSource.SMARTPHONE) {
-                            micPeakAmplitude >= 2
-                        } else {
-                            micPeakAmplitude >= 1 || maxVal >= 250
-                        }
-
-                        if (isSpeechDetected) {
-                            silenceFramesCount = 0
-                        } else {
-                            silenceFramesCount++
                         }
 
                         // Конвертация ShortArray в little-endian ByteArray

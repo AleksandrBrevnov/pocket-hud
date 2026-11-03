@@ -873,7 +873,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.29"
+            text = "v1.0.30"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
@@ -1631,5 +1631,14 @@ class MainActivity : AppCompatActivity() {
         root.addView(dockLayout)
 
         return root
+    }
+
+    override fun onDestroy() {
+        PocketService.onStatusChanged = null
+        PocketService.onTelemetryUpdated = null
+        PocketService.onInputTextReceived = null
+        PocketService.onTextReceived = null
+        PocketService.onDialogueTurnUpdated = null
+        super.onDestroy()
     }
 }

@@ -11,11 +11,23 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 33
-        versionName = "1.0.29"
+        versionCode = 34
+        versionName = "1.0.30"
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(

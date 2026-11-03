@@ -117,14 +117,16 @@ with open(pocket_service_path, "r", encoding="utf-8") as f:
 with open(build_gradle_path, "r", encoding="utf-8") as f:
     gradle_code = f.read()
 
-print("\n--- 1. Verification of v1.0.29 Version Bumps ---")
-assert 'versionCode = 33' in gradle_code, "versionCode 33 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.29"' in gradle_code, "versionName 1.0.29 missing in app/build.gradle.kts"
-assert 'text = "v1.0.29"' in main_code, "v1.0.29 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.29' in service_code, "v1.0.29 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.29 активен' in service_code, "v1.0.29 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.29' in service_code, "v1.0.29 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.29 OK across all files.")
+print("\n--- 1. Verification of v1.0.30 Version Bumps & Fixed Keystore ---")
+assert 'versionCode = 34' in gradle_code, "versionCode 34 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.30"' in gradle_code, "versionName 1.0.30 missing in app/build.gradle.kts"
+assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
+assert os.path.exists(r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\debug.keystore"), "app/debug.keystore missing on disk"
+assert 'text = "v1.0.30"' in main_code, "v1.0.30 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.30' in service_code, "v1.0.30 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.30 активен' in service_code, "v1.0.30 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.30' in service_code, "v1.0.30 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.30 and fixed debug.keystore OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -154,6 +156,7 @@ assert setup_body_match, "Could not extract sendSetup body from PocketService.kt
 setup_body = setup_body_match.group(1)
 assert "sessionResumption" not in setup_body, "sessionResumption must be completely removed from sendSetup"
 assert "resumptionObj" not in setup_body, "resumptionObj must be completely removed from sendSetup"
+assert "systemInstruction" not in setup_body, "systemInstruction must be completely removed from sendSetup"
 
 assert '"realtimeInputConfig"' in service_code, "realtimeInputConfig missing in sendSetup"
 assert '"silenceDurationMs", 400' in service_code or '"silenceDurationMs"' in service_code, "silenceDurationMs missing in sendSetup"
@@ -353,11 +356,16 @@ assert "isFinished" in service_code, "isFinished flag handling missing in handle
 assert "mainHandler.postDelayed(simulIdleRunnable, SIMUL_IDLE_DELAY_MS)" in service_code, "Sliding idle timer postDelayed missing in handleServerMessage"
 assert "mainHandler.removeCallbacks(simulIdleRunnable)" in service_code, "Sliding idle timer removeCallbacks missing"
 
-# Verify elimination of false reset in recordThread
-assert "silenceFramesCount == 25" not in service_code, "False reset silenceFramesCount == 25 must be completely removed from recordThread"
-assert "@Volatile private var silenceFramesCount = 0" in service_code, "silenceFramesCount must be volatile class member"
-assert "silenceFramesCount = 0" in service_code, "silenceFramesCount must be reset on speech detection"
-assert "silenceFramesCount++" in service_code, "silenceFramesCount must increment on silent frames"
+# Verify complete purging of dead code
+assert "silenceFramesCount" not in service_code, "silenceFramesCount dead code must be removed from PocketService"
+assert "tagRegex" not in service_code, "tagRegex dead code must be removed from PocketService"
+assert "resumptionHandle" not in service_code, "resumptionHandle dead code must be removed from PocketService"
+
+# Verify volatile threading guarantees and lifecycle cleanup
+assert "@Volatile" in service_code and "var isServiceActive" in service_code, "isServiceActive must be volatile"
+assert "@Volatile var onStatusChanged" in service_code, "onStatusChanged callback must be volatile"
+assert "override fun onDestroy()" in main_code, "onDestroy missing in MainActivity.kt"
+assert "PocketService.onStatusChanged = null" in main_code, "onStatusChanged cleanup missing in MainActivity.onDestroy"
 assert "TRANSLATION_EMPTY" in service_code, "TRANSLATION_EMPTY event logging missing in PocketService.kt"
 assert "hasPendingTranslation" in service_code, "hasPendingTranslation state tracking missing in PocketService.kt"
 assert "turnComplete" in service_code, "turnComplete check missing in PocketService.kt"
@@ -496,7 +504,9 @@ class SynchronousTurnStateMachine:
         self.logged_events.append(("TRANSLATION", f'ORIG="{origPrompt}" -> RU="{cleanedText}"'))
 
         if targetTurn is not None:
-            targetTurn.isFinalized = False
+            wasFinalized = targetTurn.isFinalized
+            if not wasFinalized:
+                targetTurn.isFinalized = False
             targetTurn.russianText = appendWithPunctuationAwareSpace(targetTurn.russianText, cleanedText)
         else:
             newTurn = DialogueTurnSim("", cleanedText, now, isFinalized=False)
@@ -728,9 +738,9 @@ assert sm13.sessionDialogueTurns[1].russianText == ""
 
 sm13.recordInputSpeech("Tre", now=5200)
 
-# Delayed translations arrive in chronological FIFO order:
-sm13.recordTranslationOutput("Т_Один.", now=5300, isFinished=True)
-sm13.recordTranslationOutput("Т_Два.", now=5400, isFinished=True)
+# Delayed translations arrive in chronological FIFO order (testing that wasFinalized preservation works without isFinished=True):
+sm13.recordTranslationOutput("Т_Один.", now=5300, isFinished=False)
+sm13.recordTranslationOutput("Т_Два.", now=5400, isFinished=False)
 sm13.recordTranslationOutput("Т_Три.", now=5500, isFinished=True)
 
 assert len(sm13.sessionDialogueTurns) == 3
@@ -752,5 +762,5 @@ for turn in sm13.sessionDialogueTurns:
 print("  -> Synchronous streaming state machine, sentence accumulation & sliding idle timer verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.29 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.30 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
