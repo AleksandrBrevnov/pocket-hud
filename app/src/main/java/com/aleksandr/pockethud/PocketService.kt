@@ -169,7 +169,7 @@ class StreamingTagCleaner {
 class PocketService : Service() {
 
     private val tag = "PocketHUD"
-    private var isRunning = false
+    @Volatile private var isRunning = false
     private var wakeLock: PowerManager.WakeLock? = null
     private var webSocket: WebSocket? = null
     private var audioRecord: AudioRecord? = null
@@ -181,6 +181,9 @@ class PocketService : Service() {
 
     // Флаг готовности WebSocket сессии к приему аудио (защита от отправки до setupComplete)
     @Volatile private var isSetupComplete = false
+
+    // Активная карточка диалога, находящаяся в процессе стриминга перевода
+    @Volatile private var activeTranslationTurnId: Long? = null
 
     // Очереди и байты для Audio Latency Drift Catch-Up (24 кГц 16-бит mono = 48000 байт/сек)
     private val queuedPlaybackBytes = AtomicLong(0L)
@@ -628,6 +631,7 @@ class PocketService : Service() {
 
     private fun finalizeCurrentTurn() {
         mainHandler.removeCallbacks(simulIdleRunnable)
+        activeTranslationTurnId = null
         synchronized(sessionDialogueTurns) {
             val now = System.currentTimeMillis()
             for (i in 0 until sessionDialogueTurns.size) {
@@ -652,6 +656,7 @@ class PocketService : Service() {
     }
 
     private fun recordInputSpeech(cleanedInput: String) {
+        activeTranslationTurnId = null
         Log.d(tag, "Распознана речь (IT/EN): $cleanedInput")
         logEvent("INPUT_SPEECH:", "\"$cleanedInput\"")
         appendToSessionBuilder(sessionItalianBuilder, cleanedInput)
@@ -730,44 +735,66 @@ class PocketService : Service() {
         val currentSentence: String
         var targetTurnIdx = -1
         synchronized(sessionDialogueTurns) {
-            // Ищем родительскую карточку, в которой есть речь собеседника (italianText).
-            // Приоритет 1: Активная карточка речи, которая уже находится в процессе стриминга перевода
-            var targetIdx = sessionDialogueTurns.indexOfFirst {
-                it.italianText.isNotBlank() && it.russianText.isNotBlank() && !it.isFinalized
+            var targetTurn: DialogueTurn? = null
+
+            // 1. Если есть активная карточка в процессе стриминга — продолжаем направлять чанки в неё
+            if (activeTranslationTurnId != null) {
+                targetTurn = sessionDialogueTurns.find { it.id == activeTranslationTurnId }
             }
-            // Приоритет 2: Самая ранняя (FIFO) карточка речи, ожидающая перевод (russianText пуст)
-            if (targetIdx == -1) {
-                targetIdx = sessionDialogueTurns.indexOfFirst {
-                    it.italianText.isNotBlank() && it.russianText.isBlank()
+
+            // 2. Если активной карточки нет, ищем подходящую по приоритетам:
+            if (targetTurn == null) {
+                // Приоритет 1: Активная карточка речи, которая уже находится в процессе стриминга перевода
+                var targetIdx = sessionDialogueTurns.indexOfFirst {
+                    it.italianText.isNotBlank() && it.russianText.isNotBlank() && !it.isFinalized
+                }
+                // Приоритет 2: Самая ранняя (FIFO) карточка речи, ожидающая перевод (russianText пуст)
+                if (targetIdx == -1) {
+                    targetIdx = sessionDialogueTurns.indexOfFirst {
+                        it.italianText.isNotBlank() && it.russianText.isBlank()
+                    }
+                }
+                // Приоритет 3: Любая последняя нефинализированная карточка
+                if (targetIdx == -1) {
+                    targetIdx = sessionDialogueTurns.indexOfLast { !it.isFinalized }
+                }
+
+                if (targetIdx != -1) {
+                    targetTurn = sessionDialogueTurns[targetIdx]
                 }
             }
-            // Приоритет 3: Любая последняя нефинализированная карточка
-            if (targetIdx == -1) {
-                targetIdx = sessionDialogueTurns.indexOfLast { !it.isFinalized }
-            }
 
-            targetTurnIdx = targetIdx
+            if (targetTurn != null) {
+                val targetIdx = sessionDialogueTurns.indexOf(targetTurn)
+                targetTurnIdx = targetIdx
 
-            if (targetIdx != -1) {
-                val targetTurn = sessionDialogueTurns[targetIdx]
-                // Реактивируем карточку ТОЛЬКО если она ещё в процессе стриминга (russianText не пуст).
-                // Если карточка была финализирована с пустым переводом и запоздавший перевод пришёл через Priority 2,
-                // записываем перевод, но оставляем isFinalized = true, чтобы Priority 1 не захватил её повторно.
+                // Защита Priority 1: если карточка была финализирована таймером тишины (задержанный перевод),
+                // сохраняем isFinalized = true, предотвращая её захват последующими переводами чужих реплик
                 val wasFinalized = targetTurn.isFinalized
                 if (!wasFinalized) {
                     targetTurn.isFinalized = false
                 }
                 targetTurn.russianText = appendWithPunctuationAwareSpace(targetTurn.russianText, cleanedText)
                 targetTurn.lastActivityTime = System.currentTimeMillis()
+
+                val isEnding = isSentenceEnding(targetTurn.russianText) && !isContinuation(targetTurn.russianText)
+                if (isEnding) {
+                    activeTranslationTurnId = null
+                } else {
+                    activeTranslationTurnId = targetTurn.id
+                }
+
                 val turnCopy = targetTurn.copy()
                 onDialogueTurnUpdated?.invoke(targetIdx, turnCopy, false)
                 currentSentence = targetTurn.russianText
             } else {
+                val now = System.currentTimeMillis()
+                val isEnding = isSentenceEnding(cleanedText) && !isContinuation(cleanedText)
                 val newTurn = DialogueTurn(
                     italianText = "",
                     russianText = cleanedText,
-                    timestamp = System.currentTimeMillis(),
-                    lastActivityTime = System.currentTimeMillis(),
+                    timestamp = now,
+                    lastActivityTime = now,
                     isFinalized = false
                 )
                 sessionDialogueTurns.add(newTurn)
@@ -776,6 +803,11 @@ class PocketService : Service() {
                 }
                 val idx = sessionDialogueTurns.size - 1
                 targetTurnIdx = idx
+                if (isEnding) {
+                    activeTranslationTurnId = null
+                } else {
+                    activeTranslationTurnId = newTurn.id
+                }
                 val turnCopy = newTurn.copy()
                 onDialogueTurnUpdated?.invoke(idx, turnCopy, true)
                 currentSentence = cleanedText
@@ -1237,6 +1269,13 @@ class PocketService : Service() {
 
     private fun handleConnectionDrop(reason: String) {
         if (!isRunning) return
+        isSetupComplete = false
+        hasPendingTranslation = false
+        currentTurnInputSpeech = null
+        activeTranslationTurnId = null
+        mainHandler.removeCallbacks(simulIdleRunnable)
+        goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+        goAwayRunnable = null
         Log.e(tag, "Потеря соединения: $reason")
         logEvent("CONNECTION_DROP", reason)
         triggerFailureHaptic()
@@ -1367,7 +1406,7 @@ class PocketService : Service() {
                     webSocket?.cancel()
                 } catch (e: Exception) {}
                 webSocket = null
-                if (code == 400 || code == 403) {
+                if (code == 400 || code == 401 || code == 403) {
                     // Неисправимая ошибка (неверный запрос или доступ запрещён) — полная остановка
                     isRunning = false
                     isServiceActive = false
@@ -1392,6 +1431,7 @@ class PocketService : Service() {
             if (serverContent?.optBoolean("interrupted", false) == true || root.optBoolean("interrupted", false)) {
                 hasPendingTranslation = false
                 currentTurnInputSpeech = null
+                activeTranslationTurnId = null
                 audioPlaybackQueue.clear()
                 queuedPlaybackBytes.set(0L)
                 isPlaybackSpeedBoosted = false
@@ -1506,6 +1546,7 @@ class PocketService : Service() {
                                root.optBoolean("turnComplete", false) ||
                                (modelTurn?.optBoolean("turnComplete", false) == true)
             if (turnComplete) {
+                activeTranslationTurnId = null
                 synchronized(sessionDialogueTurns) {
                     for (i in 0 until sessionDialogueTurns.size) {
                         val turn = sessionDialogueTurns[i]
@@ -1865,6 +1906,7 @@ class PocketService : Service() {
         outputTagCleaner.reset()
         hasPendingTranslation = false
         currentTurnInputSpeech = null
+        activeTranslationTurnId = null
         queuedPlaybackBytes.set(0L)
         isPlaybackSpeedBoosted = false
 

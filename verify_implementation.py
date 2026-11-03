@@ -363,9 +363,12 @@ assert "resumptionHandle" not in service_code, "resumptionHandle dead code must 
 
 # Verify volatile threading guarantees and lifecycle cleanup
 assert "@Volatile" in service_code and "var isServiceActive" in service_code, "isServiceActive must be volatile"
+assert "@Volatile private var isRunning = false" in service_code, "isRunning must be volatile"
+assert "@Volatile private var activeTranslationTurnId" in service_code, "activeTranslationTurnId must be volatile in PocketService"
 assert "@Volatile var onStatusChanged" in service_code, "onStatusChanged callback must be volatile"
 assert "override fun onDestroy()" in main_code, "onDestroy missing in MainActivity.kt"
 assert "PocketService.onStatusChanged = null" in main_code, "onStatusChanged cleanup missing in MainActivity.onDestroy"
+assert "code == 400 || code == 401 || code == 403" in service_code, "fatal error codes 400/401/403 missing in PocketService.kt"
 assert "TRANSLATION_EMPTY" in service_code, "TRANSLATION_EMPTY event logging missing in PocketService.kt"
 assert "hasPendingTranslation" in service_code, "hasPendingTranslation state tracking missing in PocketService.kt"
 assert "turnComplete" in service_code, "turnComplete check missing in PocketService.kt"
@@ -422,7 +425,10 @@ def appendWithPunctuationAwareSpace(existing: str, addition: str) -> str:
 
 # Python simulation of synchronous streaming turn state machine with sentence accumulation
 class DialogueTurnSim:
+    _id_counter = 0
     def __init__(self, italianText, russianText, timestamp, isFinalized=False):
+        DialogueTurnSim._id_counter += 1
+        self.id = DialogueTurnSim._id_counter
         self.italianText = italianText
         self.russianText = russianText
         self.timestamp = timestamp
@@ -436,9 +442,11 @@ class SynchronousTurnStateMachine:
         self.lastRecognizedInput = ""
         self.idleTimerDeadline = None
         self.logged_events = []
+        self.activeTranslationTurnId = None
 
     def finalizeCurrentTurn(self):
         self.idleTimerDeadline = None
+        self.activeTranslationTurnId = None
         for turn in self.sessionDialogueTurns:
             if not turn.isFinalized:
                 turn.isFinalized = True
@@ -450,6 +458,7 @@ class SynchronousTurnStateMachine:
 
     def recordInputSpeech(self, cleanedInput: str, now: int):
         self.idleTimerDeadline = now + 2000
+        self.activeTranslationTurnId = None
         lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
 
         isSentenceComplete = (lastTurn is not None and not lastTurn.isFinalized and
@@ -482,23 +491,32 @@ class SynchronousTurnStateMachine:
         self.currentTurnInputSpeech = None
 
         targetTurn = None
-        # Priority 1: Active in-progress streaming turn
-        for turn in self.sessionDialogueTurns:
-            if turn.italianText.strip() and turn.russianText.strip() and not turn.isFinalized:
-                targetTurn = turn
-                break
-        # Priority 2: Earliest (FIFO) turn waiting for translation
-        if targetTurn is None:
+        # 1. If active streaming turn is bound, continue streaming into it
+        if self.activeTranslationTurnId is not None:
             for turn in self.sessionDialogueTurns:
-                if turn.italianText.strip() and not turn.russianText.strip():
+                if turn.id == self.activeTranslationTurnId:
                     targetTurn = turn
                     break
-        # Priority 3: Last unfinalized turn
+
+        # 2. Otherwise search by priority
         if targetTurn is None:
-            for turn in reversed(self.sessionDialogueTurns):
-                if not turn.isFinalized:
+            # Priority 1: Active in-progress streaming turn
+            for turn in self.sessionDialogueTurns:
+                if turn.italianText.strip() and turn.russianText.strip() and not turn.isFinalized:
                     targetTurn = turn
                     break
+            # Priority 2: Earliest (FIFO) turn waiting for translation
+            if targetTurn is None:
+                for turn in self.sessionDialogueTurns:
+                    if turn.italianText.strip() and not turn.russianText.strip():
+                        targetTurn = turn
+                        break
+            # Priority 3: Last unfinalized turn
+            if targetTurn is None:
+                for turn in reversed(self.sessionDialogueTurns):
+                    if not turn.isFinalized:
+                        targetTurn = turn
+                        break
 
         origPrompt = targetTurn.italianText if targetTurn and targetTurn.italianText.strip() else self.lastRecognizedInput
         self.logged_events.append(("TRANSLATION", f'ORIG="{origPrompt}" -> RU="{cleanedText}"'))
@@ -508,10 +526,20 @@ class SynchronousTurnStateMachine:
             if not wasFinalized:
                 targetTurn.isFinalized = False
             targetTurn.russianText = appendWithPunctuationAwareSpace(targetTurn.russianText, cleanedText)
+            isEnding = isSentenceEnding(targetTurn.russianText) and not isContinuation(targetTurn.russianText)
+            if isEnding:
+                self.activeTranslationTurnId = None
+            else:
+                self.activeTranslationTurnId = targetTurn.id
         else:
             newTurn = DialogueTurnSim("", cleanedText, now, isFinalized=False)
             self.sessionDialogueTurns.append(newTurn)
             targetTurn = newTurn
+            isEnding = isSentenceEnding(cleanedText) and not isContinuation(cleanedText)
+            if isEnding:
+                self.activeTranslationTurnId = None
+            else:
+                self.activeTranslationTurnId = newTurn.id
 
         self.idleTimerDeadline = now + 2000
         if isFinished:
@@ -522,6 +550,7 @@ class SynchronousTurnStateMachine:
             self.finalizeCurrentTurn()
 
     def onTurnComplete(self):
+        self.activeTranslationTurnId = None
         for turn in self.sessionDialogueTurns:
             # Finalize only if Russian translation is received and grammatically complete
             # Never prematurely finalize turns whose translation is still in flight
@@ -533,6 +562,7 @@ class SynchronousTurnStateMachine:
 
     def onInterrupted(self):
         self.idleTimerDeadline = None
+        self.activeTranslationTurnId = None
         self.hasPendingTranslation = False
         self.currentTurnInputSpeech = None
         self.finalizeCurrentTurn()
@@ -758,6 +788,35 @@ assert sm13.sessionDialogueTurns[2].isFinalized == True
 
 for turn in sm13.sessionDialogueTurns:
     assert turn.russianText.strip() != "", f"Turn {turn.italianText} was left without translation!"
+
+# Scenario 14: Multi-chunk streaming into delayed/finalized turns preserves continuity and prevents orphan cards
+sm14 = SynchronousTurnStateMachine()
+sm14.recordInputSpeech("Uno", now=1000)
+sm14.checkIdleTimer(now=3050)
+assert sm14.sessionDialogueTurns[0].isFinalized == True
+assert sm14.sessionDialogueTurns[0].russianText == ""
+
+sm14.recordInputSpeech("Due", now=3100)
+sm14.checkIdleTimer(now=5150)
+assert sm14.sessionDialogueTurns[1].isFinalized == True
+assert sm14.sessionDialogueTurns[1].russianText == ""
+
+# Delayed translation for Uno arrives in 2 streaming micro-chunks without isFinished:
+sm14.recordTranslationOutput("Т_Один", now=5300, isFinished=False)
+sm14.recordTranslationOutput(" продолжение.", now=5350, isFinished=False)
+
+# Delayed translation for Due arrives in 2 streaming micro-chunks with turnComplete:
+sm14.recordTranslationOutput("Т_Два", now=5400, isFinished=False)
+sm14.recordTranslationOutput(" продолжение.", now=5450, isFinished=True)
+
+assert len(sm14.sessionDialogueTurns) == 2, f"Expected exactly 2 turns, got {len(sm14.sessionDialogueTurns)}"
+assert sm14.sessionDialogueTurns[0].italianText == "Uno"
+assert sm14.sessionDialogueTurns[0].russianText == "Т_Один продолжение."
+assert sm14.sessionDialogueTurns[0].isFinalized == True
+
+assert sm14.sessionDialogueTurns[1].italianText == "Due"
+assert sm14.sessionDialogueTurns[1].russianText == "Т_Два продолжение."
+assert sm14.sessionDialogueTurns[1].isFinalized == True
 
 print("  -> Synchronous streaming state machine, sentence accumulation & sliding idle timer verified perfectly.")
 
