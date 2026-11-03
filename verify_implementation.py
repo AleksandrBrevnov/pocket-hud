@@ -117,16 +117,16 @@ with open(pocket_service_path, "r", encoding="utf-8") as f:
 with open(build_gradle_path, "r", encoding="utf-8") as f:
     gradle_code = f.read()
 
-print("\n--- 1. Verification of v1.0.30 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 34' in gradle_code, "versionCode 34 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.30"' in gradle_code, "versionName 1.0.30 missing in app/build.gradle.kts"
+print("\n--- 1. Verification of v1.0.31 Version Bumps & Fixed Keystore ---")
+assert 'versionCode = 35' in gradle_code, "versionCode 35 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.31"' in gradle_code, "versionName 1.0.31 missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
 assert os.path.exists(r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\debug.keystore"), "app/debug.keystore missing on disk"
-assert 'text = "v1.0.30"' in main_code, "v1.0.30 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.30' in service_code, "v1.0.30 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.30 активен' in service_code, "v1.0.30 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.30' in service_code, "v1.0.30 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.30 and fixed debug.keystore OK across all files.")
+assert 'text = "v1.0.31"' in main_code, "v1.0.31 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.31' in service_code, "v1.0.31 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.31 активен' in service_code, "v1.0.31 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.31' in service_code, "v1.0.31 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.31 and fixed debug.keystore OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -379,6 +379,8 @@ assert "currentTurnInputSpeech = lastTurn.italianText" in service_code, "current
 assert "isSentenceEnding" in service_code, "isSentenceEnding helper missing in PocketService.kt"
 assert "isContinuation" in service_code, "isContinuation helper missing in PocketService.kt"
 assert "appendWithPunctuationAwareSpace" in service_code, "appendWithPunctuationAwareSpace helper missing in PocketService.kt"
+assert "splitSentences" in service_code, "splitSentences helper missing in PocketService.kt"
+assert 'Regex("(?<=[.?!])\\\\s+")' in service_code, "Sentence splitting regex missing in PocketService.kt"
 
 ABBREVIATIONS = {
     "sig.", "dott.", "prof.", "ing.", "avv.", "ecc.", "etc.", "e.g.", "i.e.",
@@ -423,6 +425,27 @@ def appendWithPunctuationAwareSpace(existing: str, addition: str) -> str:
     else:
         return f"{existing} {trimmed_add}"
 
+def splitSentences(text: str) -> list:
+    trimmed = text.strip()
+    if not trimmed:
+        return []
+    raw_parts = re.split(r'(?<=[.?!])\s+', trimmed)
+    if len(raw_parts) <= 1:
+        return [trimmed]
+    sentences = []
+    current = ""
+    for part in raw_parts:
+        if not current:
+            current = part
+        else:
+            current = f"{current} {part}"
+        if isSentenceEnding(current):
+            sentences.append(current)
+            current = ""
+    if current:
+        sentences.append(current)
+    return sentences
+
 # Python simulation of synchronous streaming turn state machine with sentence accumulation
 class DialogueTurnSim:
     _id_counter = 0
@@ -458,33 +481,35 @@ class SynchronousTurnStateMachine:
 
     def recordInputSpeech(self, cleanedInput: str, now: int):
         self.idleTimerDeadline = now + 2000
-        self.activeTranslationTurnId = None
-        lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
+        segments = splitSentences(cleanedInput)
+        for segment in segments:
+            lastTurn = self.sessionDialogueTurns[-1] if self.sessionDialogueTurns else None
 
-        isSentenceComplete = (lastTurn is not None and not lastTurn.isFinalized and
-            bool(lastTurn.russianText.strip()) and
-            isSentenceEnding(lastTurn.russianText) and
-            not isContinuation(lastTurn.russianText) and
-            not isContinuation(lastTurn.italianText))
+            isSentenceComplete = (lastTurn is not None and not lastTurn.isFinalized and
+                (((bool(lastTurn.russianText.strip()) and
+                   isSentenceEnding(lastTurn.russianText) and
+                   not isContinuation(lastTurn.russianText)) or
+                  (bool(lastTurn.italianText.strip()) and
+                   isSentenceEnding(lastTurn.italianText) and
+                   not isContinuation(lastTurn.italianText))) and
+                 not isContinuation(lastTurn.italianText)))
 
-        canAppendToCurrent = lastTurn is not None and not lastTurn.isFinalized and not isSentenceComplete
+            canAppendToCurrent = lastTurn is not None and not lastTurn.isFinalized and not isSentenceComplete
 
-        if canAppendToCurrent:
-            lastTurn.italianText = appendWithPunctuationAwareSpace(lastTurn.italianText, cleanedInput)
-            self.lastRecognizedInput = lastTurn.italianText
-            self.currentTurnInputSpeech = lastTurn.italianText
-            self.hasPendingTranslation = True
-        else:
-            if lastTurn and not lastTurn.isFinalized:
-                lastTurn.isFinalized = True
-                if not lastTurn.russianText.strip() and lastTurn.italianText.strip() and self.hasPendingTranslation:
-                    prevPrompt = self.currentTurnInputSpeech or lastTurn.italianText
-                    self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{prevPrompt}" (turn timeout)'))
-            newTurn = DialogueTurnSim(cleanedInput, "", now, isFinalized=False)
-            self.lastRecognizedInput = cleanedInput
-            self.currentTurnInputSpeech = cleanedInput
-            self.hasPendingTranslation = True
-            self.sessionDialogueTurns.append(newTurn)
+            if canAppendToCurrent:
+                lastTurn.italianText = appendWithPunctuationAwareSpace(lastTurn.italianText, segment)
+                self.lastRecognizedInput = lastTurn.italianText
+                self.currentTurnInputSpeech = lastTurn.italianText
+                self.hasPendingTranslation = True
+            else:
+                if lastTurn and not lastTurn.isFinalized:
+                    if bool(lastTurn.russianText.strip()) and isSentenceEnding(lastTurn.russianText):
+                        lastTurn.isFinalized = True
+                newTurn = DialogueTurnSim(segment, "", now, isFinalized=False)
+                self.lastRecognizedInput = segment
+                self.currentTurnInputSpeech = segment
+                self.hasPendingTranslation = True
+                self.sessionDialogueTurns.append(newTurn)
 
     def recordTranslationOutput(self, cleanedText: str, now: int, isFinished: bool = False):
         self.hasPendingTranslation = False
@@ -818,8 +843,35 @@ assert sm14.sessionDialogueTurns[1].italianText == "Due"
 assert sm14.sessionDialogueTurns[1].russianText == "Т_Два продолжение."
 assert sm14.sessionDialogueTurns[1].isFinalized == True
 
+# Scenario 15: In-chunk sentence boundary splits sentences into distinct cards and prevents off-by-one desync cascade (Session Log 6)
+sm15 = SynchronousTurnStateMachine()
+# Replica 1: "Ah, e poi la bevi... pezzi di costa. Sono" (dot inside chunk!)
+sm15.recordInputSpeech("Ah, e poi la bevi... pezzi di costa. Sono", now=1000)
+# Replica 2: "sempre stati due."
+sm15.recordInputSpeech("sempre stati due.", now=2000)
+# Translation 1 completes: "А, и потом... куска ребрышек."
+sm15.recordTranslationOutput("А, и потом... куска ребрышек.", now=2500, isFinished=True)
+# Replica 3: "Lui bugiardo."
+sm15.recordInputSpeech("Lui bugiardo.", now=3000)
+# Delayed translation 2 arrives: "Всегда было два."
+sm15.recordTranslationOutput("Всегда было два.", now=3500, isFinished=True)
+# Translation 3 arrives: "Он лжец."
+sm15.recordTranslationOutput("Он лжец.", now=4000, isFinished=True)
+
+assert "Sono sempre stati due." not in sm15.sessionDialogueTurns[0].italianText, (
+    f"Card 0 should not contain 'Sono sempre stati due.', got '{sm15.sessionDialogueTurns[0].italianText}'"
+)
+assert len(sm15.sessionDialogueTurns) == 3, f"Expected exactly 3 turns, got {len(sm15.sessionDialogueTurns)}"
+assert sm15.sessionDialogueTurns[0].italianText == "Ah, e poi la bevi... pezzi di costa."
+assert sm15.sessionDialogueTurns[0].russianText == "А, и потом... куска ребрышек."
+assert sm15.sessionDialogueTurns[1].italianText == "Sono sempre stati due."
+assert sm15.sessionDialogueTurns[1].russianText == "Всегда было два."
+assert sm15.sessionDialogueTurns[2].italianText == "Lui bugiardo."
+assert sm15.sessionDialogueTurns[2].russianText == "Он лжец."
+
 print("  -> Synchronous streaming state machine, sentence accumulation & sliding idle timer verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.30 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.31 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
+
