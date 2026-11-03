@@ -723,13 +723,17 @@ class PocketService : Service() {
                     val turnCopy = lastTurn.copy()
                     onDialogueTurnUpdated?.invoke(idx, turnCopy, false)
                 } else {
-                    // Если предыдущая реплика уже имеет завершенный перевод — финализируем её
-                    if (lastTurn != null && !lastTurn.isFinalized) {
-                        if (lastTurn.russianText.isNotBlank() && isSentenceEnding(lastTurn.russianText)) {
-                            lastTurn.isFinalized = true
-                            val prevIdx = sessionDialogueTurns.size - 1
-                            val prevCopy = lastTurn.copy()
-                            onDialogueTurnUpdated?.invoke(prevIdx, prevCopy, false)
+                    // Если предыдущие реплики уже имеют завершенный перевод — финализируем их
+                    for (i in 0 until sessionDialogueTurns.size) {
+                        val turn = sessionDialogueTurns[i]
+                        if (!turn.isFinalized && turn.russianText.isNotBlank()) {
+                            if (isSentenceEnding(turn.russianText) &&
+                                !isContinuation(turn.russianText) &&
+                                !isContinuation(turn.italianText)) {
+                                turn.isFinalized = true
+                                val prevCopy = turn.copy()
+                                onDialogueTurnUpdated?.invoke(i, prevCopy, false)
+                            }
                         }
                     }
                     // Создаем новую пару диалога для нового предложения
@@ -774,9 +778,10 @@ class PocketService : Service() {
 
             // 2. Если активной карточки нет, ищем подходящую по приоритетам:
             if (targetTurn == null) {
-                // Приоритет 1: Активная карточка речи, которая уже находится в процессе стриминга перевода
+                // Приоритет 1: Активная карточка речи, которая уже находится в процессе стриминга перевода (перевод ещё не завершен)
                 var targetIdx = sessionDialogueTurns.indexOfFirst {
-                    it.italianText.isNotBlank() && it.russianText.isNotBlank() && !it.isFinalized
+                    it.italianText.isNotBlank() && it.russianText.isNotBlank() && !it.isFinalized &&
+                    (!isSentenceEnding(it.russianText) || isContinuation(it.russianText))
                 }
                 // Приоритет 2: Самая ранняя (FIFO) карточка речи, ожидающая перевод (russianText пуст)
                 if (targetIdx == -1) {
@@ -810,6 +815,12 @@ class PocketService : Service() {
                 val isEnding = isSentenceEnding(targetTurn.russianText) && !isContinuation(targetTurn.russianText)
                 if (isEnding) {
                     activeTranslationTurnId = null
+                    val nextWaitingTurnExists = sessionDialogueTurns.any {
+                        it !== targetTurn && it.italianText.isNotBlank() && it.russianText.isBlank()
+                    }
+                    if (nextWaitingTurnExists && !isContinuation(targetTurn.italianText)) {
+                        targetTurn.isFinalized = true
+                    }
                 } else {
                     activeTranslationTurnId = targetTurn.id
                 }

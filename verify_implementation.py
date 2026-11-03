@@ -381,6 +381,7 @@ assert "isContinuation" in service_code, "isContinuation helper missing in Pocke
 assert "appendWithPunctuationAwareSpace" in service_code, "appendWithPunctuationAwareSpace helper missing in PocketService.kt"
 assert "splitSentences" in service_code, "splitSentences helper missing in PocketService.kt"
 assert 'Regex("(?<=[.?!])\\\\s+")' in service_code, "Sentence splitting regex missing in PocketService.kt"
+assert "!isSentenceEnding(it.russianText) || isContinuation(it.russianText)" in service_code, "Priority 1 must only match incomplete translations"
 
 ABBREVIATIONS = {
     "sig.", "dott.", "prof.", "ing.", "avv.", "ecc.", "etc.", "e.g.", "i.e.",
@@ -502,9 +503,12 @@ class SynchronousTurnStateMachine:
                 self.currentTurnInputSpeech = lastTurn.italianText
                 self.hasPendingTranslation = True
             else:
-                if lastTurn and not lastTurn.isFinalized:
-                    if bool(lastTurn.russianText.strip()) and isSentenceEnding(lastTurn.russianText):
-                        lastTurn.isFinalized = True
+                for turn in self.sessionDialogueTurns:
+                    if not turn.isFinalized and turn.russianText.strip():
+                        if (isSentenceEnding(turn.russianText) and
+                            not isContinuation(turn.russianText) and
+                            not isContinuation(turn.italianText)):
+                            turn.isFinalized = True
                 newTurn = DialogueTurnSim(segment, "", now, isFinalized=False)
                 self.lastRecognizedInput = segment
                 self.currentTurnInputSpeech = segment
@@ -525,9 +529,14 @@ class SynchronousTurnStateMachine:
 
         # 2. Otherwise search by priority
         if targetTurn is None:
-            # Priority 1: Active in-progress streaming turn
+            # Priority 1: Active in-progress streaming turn (translation is still incomplete)
             for turn in self.sessionDialogueTurns:
-                if turn.italianText.strip() and turn.russianText.strip() and not turn.isFinalized:
+                if (
+                    turn.italianText.strip()
+                    and turn.russianText.strip()
+                    and not turn.isFinalized
+                    and (not isSentenceEnding(turn.russianText) or isContinuation(turn.russianText))
+                ):
                     targetTurn = turn
                     break
             # Priority 2: Earliest (FIFO) turn waiting for translation
@@ -554,6 +563,12 @@ class SynchronousTurnStateMachine:
             isEnding = isSentenceEnding(targetTurn.russianText) and not isContinuation(targetTurn.russianText)
             if isEnding:
                 self.activeTranslationTurnId = None
+                nextWaitingTurnExists = any(
+                    t is not targetTurn and t.italianText.strip() and not t.russianText.strip()
+                    for t in self.sessionDialogueTurns
+                )
+                if nextWaitingTurnExists and not isContinuation(targetTurn.italianText):
+                    targetTurn.isFinalized = True
             else:
                 self.activeTranslationTurnId = targetTurn.id
         else:
@@ -868,6 +883,42 @@ assert sm15.sessionDialogueTurns[1].italianText == "Sono sempre stati due."
 assert sm15.sessionDialogueTurns[1].russianText == "Всегда было два."
 assert sm15.sessionDialogueTurns[2].italianText == "Lui bugiardo."
 assert sm15.sessionDialogueTurns[2].russianText == "Он лжец."
+
+# Scenario 16: Multi-chunk streaming translation without isFinished preserves FIFO turn routing across in-chunk sentence splits (Session Log 6 edge case)
+sm16 = SynchronousTurnStateMachine()
+# Replica 1: dot inside chunk
+sm16.recordInputSpeech("Ah, e poi la bevi... pezzi di costa. Sono", now=1000)
+# Interim streaming translation chunk 1a arrives without isFinished:
+sm16.recordTranslationOutput("евро всего за два", now=1100, isFinished=False)
+# Replica 2 continues second sentence:
+sm16.recordInputSpeech("sempre stati due.", now=1200)
+# Sentence 1 translation finishes without isFinished:
+sm16.recordTranslationOutput("куска ребрышек.", now=1250, isFinished=False)
+# Replica 3:
+sm16.recordInputSpeech("Lui bugiardo.", now=1300)
+# Delayed translation 2 arrives without isFinished:
+sm16.recordTranslationOutput("Всегда было два.", now=1350, isFinished=False)
+# Delayed translation 3 arrives without isFinished:
+sm16.recordTranslationOutput("Он лжец.", now=1400, isFinished=False)
+
+assert len(sm16.sessionDialogueTurns) == 3, f"Expected exactly 3 turns, got {len(sm16.sessionDialogueTurns)}"
+assert sm16.sessionDialogueTurns[0].italianText == "Ah, e poi la bevi... pezzi di costa."
+assert sm16.sessionDialogueTurns[0].russianText == "евро всего за два куска ребрышек."
+assert sm16.sessionDialogueTurns[1].italianText == "Sono sempre stati due."
+assert sm16.sessionDialogueTurns[1].russianText == "Всегда было два."
+assert sm16.sessionDialogueTurns[2].italianText == "Lui bugiardo."
+assert sm16.sessionDialogueTurns[2].russianText == "Он лжец."
+
+# Scenario 17: Multiple sentences in a single input speech chunk without isFinished
+sm17 = SynchronousTurnStateMachine()
+sm17.recordInputSpeech("Ah, e poi la bevi... pezzi di costa. Sono sempre stati due. Lui bugiardo.", now=1000)
+assert len(sm17.sessionDialogueTurns) == 3
+sm17.recordTranslationOutput("А, и потом... куска ребрышек.", now=2000, isFinished=False)
+sm17.recordTranslationOutput("Всегда было два.", now=3000, isFinished=False)
+sm17.recordTranslationOutput("Он лжец.", now=4000, isFinished=False)
+assert sm17.sessionDialogueTurns[0].russianText == "А, и потом... куска ребрышек."
+assert sm17.sessionDialogueTurns[1].russianText == "Всегда было два."
+assert sm17.sessionDialogueTurns[2].russianText == "Он лжец."
 
 print("  -> Synchronous streaming state machine, sentence accumulation & sliding idle timer verified perfectly.")
 
