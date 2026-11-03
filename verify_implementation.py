@@ -6,6 +6,7 @@ import math
 main_activity_path = r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\src\main\java\com\aleksandr\pockethud\MainActivity.kt"
 pocket_service_path = r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\src\main\java\com\aleksandr\pockethud\PocketService.kt"
 build_gradle_path = r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\build.gradle.kts"
+setup_and_push_path = r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\setup_and_push.ps1"
 
 def check_brackets_kotlin(file_path):
     print(f"Checking syntax balancing for {os.path.basename(file_path)}...")
@@ -117,16 +118,19 @@ with open(pocket_service_path, "r", encoding="utf-8") as f:
 with open(build_gradle_path, "r", encoding="utf-8") as f:
     gradle_code = f.read()
 
-print("\n--- 1. Verification of v1.0.31 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 35' in gradle_code, "versionCode 35 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.31"' in gradle_code, "versionName 1.0.31 missing in app/build.gradle.kts"
+with open(setup_and_push_path, "r", encoding="utf-8") as f:
+    setup_code = f.read()
+
+print("\n--- 1. Verification of v1.0.32 Version Bumps & Fixed Keystore ---")
+assert 'versionCode = 36' in gradle_code, "versionCode 36 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.32"' in gradle_code, "versionName 1.0.32 missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
 assert os.path.exists(r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\debug.keystore"), "app/debug.keystore missing on disk"
-assert 'text = "v1.0.31"' in main_code, "v1.0.31 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.31' in service_code, "v1.0.31 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.31 активен' in service_code, "v1.0.31 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.31' in service_code, "v1.0.31 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.31 and fixed debug.keystore OK across all files.")
+assert 'text = "v1.0.32"' in main_code, "v1.0.32 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.32' in service_code, "v1.0.32 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.32 активен' in service_code, "v1.0.32 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.32' in service_code, "v1.0.32 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.32 and fixed debug.keystore OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -922,7 +926,40 @@ assert sm17.sessionDialogueTurns[2].russianText == "Он лжец."
 
 print("  -> Synchronous streaming state machine, sentence accumulation & sliding idle timer verified perfectly.")
 
+print("\n--- 10. Verification of v1.0.32 P1/P2 Architectural Enhancements & Guardrails ---")
+# 1. DialogueTurn.id with AtomicLong
+assert "dialogueTurnIdCounter = AtomicLong(0L)" in service_code, "dialogueTurnIdCounter = AtomicLong(0L) missing in PocketService.kt"
+assert "val id: Long = dialogueTurnIdCounter.incrementAndGet()" in service_code, "DialogueTurn must use dialogueTurnIdCounter.incrementAndGet() for default id"
+
+# 2. applyMicSourceChange safe thread restart
+assert "recordThread?.interrupt()" in service_code and "recordThread?.join(500)" in service_code, "recordThread interrupt and join(500) missing in applyMicSourceChange"
+assert "private fun startRecordThread()" in service_code, "startRecordThread() method missing in PocketService.kt"
+assert "startRecordThread()" in service_code, "startRecordThread() call missing in applyMicSourceChange/startRecording"
+
+# 3. onFailure fatal error unification (400, 401, 403)
+assert "httpCode == 400 || httpCode == 401 || httpCode == 403" in service_code, "Fatal HTTP 400/401/403 unification missing in onFailure"
+
+# 4. activeTranslationTurnId reset
+assert "activeTranslationTurnId = null" in service_code, "activeTranslationTurnId reset missing"
+
+# 5. Gemini Live Translate model log status
+assert '"🔵 WebSocket соединён. Инициализация Gemini Live Translate..."' in service_code, "Gemini Live Translate log status missing in onOpen"
+
+# 6. audioReadErrors incremented only when read < 0
+assert "read < 0" in service_code and "audioReadErrors++" in service_code, "audioReadErrors++ must only increment on read < 0"
+
+# 7. setup_and_push.ps1 dynamic repoOwner/repoName
+assert "AleksandrBrevnov" not in setup_code, "Hardcoded AleksandrBrevnov must be purged from setup_and_push.ps1"
+assert "$repoOwner" in setup_code and "$repoName" in setup_code, "Dynamic repoOwner and repoName variables missing in setup_and_push.ps1"
+
+# Check UTF-8 without BOM on setup_and_push.ps1
+with open(setup_and_push_path, "rb") as f:
+    raw_setup_bytes = f.read()
+assert not raw_setup_bytes.startswith(b'\xef\xbb\xbf'), "setup_and_push.ps1 MUST NOT have UTF-8 BOM"
+
+print("  -> v1.0.32 P1/P2 Architectural Enhancements & Guardrails verified perfectly.")
+
 print("\n=======================================================")
-print("🎉 ALL V1.0.31 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.32 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
 

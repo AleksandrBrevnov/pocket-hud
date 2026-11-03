@@ -51,8 +51,10 @@ enum class MicSource {
     BLUETOOTH   // 🎧 Микрофон гарнитуры (VOICE_COMMUNICATION, Bluetooth SCO)
 }
 
+private val dialogueTurnIdCounter = AtomicLong(0L)
+
 data class DialogueTurn(
-    val id: Long = System.currentTimeMillis(),
+    val id: Long = dialogueTurnIdCounter.incrementAndGet(),
     var italianText: String = "",
     var russianText: String = "",
     val timestamp: Long = System.currentTimeMillis(),
@@ -352,7 +354,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.31\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.32\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -409,7 +411,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.31 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.32 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -484,6 +486,14 @@ class PocketService : Service() {
         if (!isRunning) return
 
         Thread {
+            try {
+                recordThread?.interrupt()
+                recordThread?.join(500)
+            } catch (e: Exception) {
+                Log.w(tag, "Ошибка ожидания завершения recordThread: ${e.message}")
+            }
+            recordThread = null
+
             releaseHardwareEffects()
             try {
                 audioRecord?.stop()
@@ -509,6 +519,9 @@ class PocketService : Service() {
                 try {
                     record.startRecording()
                     logEvent("MIC_SOURCE_RESTARTED", "source=$activeAudioSource")
+                    if (isRunning) {
+                        startRecordThread()
+                    }
                 } catch (e: Exception) {
                     logEvent("MIC_SOURCE_START_FAILED", "${e.message}")
                 }
@@ -999,7 +1012,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.31")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.32")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1075,7 +1088,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.31")
+            appendLine("Версия: v1.0.32")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
@@ -1238,7 +1251,7 @@ class PocketService : Service() {
                 isSetupComplete = false
                 connectionState = "OPEN (Sending Setup)"
                 logEvent("WEBSOCKET_OPEN")
-                onStatusChanged?.invoke("🔵 WebSocket соединён. Инициализация Gemini-3.8-Live...")
+                onStatusChanged?.invoke("🔵 WebSocket соединён. Инициализация Gemini Live Translate...")
                 sendSetup(ws)
             }
 
@@ -1254,16 +1267,36 @@ class PocketService : Service() {
                 isSetupComplete = false
                 hasPendingTranslation = false
                 currentTurnInputSpeech = null
+                activeTranslationTurnId = null
                 mainHandler.removeCallbacks(simulIdleRunnable)
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
                 val httpCode = response?.code
-                if (httpCode == 401 || httpCode == 403) {
-                    connectionState = "AUTH_ERROR ($httpCode)"
-                    lastError = "Ошибка авторизации: HTTP $httpCode"
-                    logEvent("AUTH_ERROR_FATAL", "code=$httpCode, msg=${t.message}")
-                    onStatusChanged?.invoke("🔴 Ошибка авторизации (HTTP $httpCode): проверьте API ключ")
+                if (httpCode == 400 || httpCode == 401 || httpCode == 403) {
+                    val errorLabel = if (httpCode == 400) {
+                        "Некорректный запрос (HTTP 400)"
+                    } else {
+                        "Ошибка авторизации (HTTP $httpCode): проверьте API ключ"
+                    }
+                    connectionState = "FATAL_ERROR ($httpCode)"
+                    lastError = "Фатальная ошибка HTTP $httpCode: ${t.message}"
+                    logEvent("HTTP_ERROR_FATAL", "code=$httpCode, msg=${t.message}")
+                    onStatusChanged?.invoke("🔴 $errorLabel")
+                    isRunning = false
+                    isServiceActive = false
+                    try {
+                        audioRecord?.stop()
+                    } catch (e: Exception) {
+                        Log.w(tag, "Ошибка остановки audioRecord: ${e.message}")
+                    }
                     triggerFailureHaptic()
+                    try {
+                        val nm = getSystemService(NotificationManager::class.java)
+                        val fatalFg = buildNotification("🔴 $errorLabel")
+                        nm?.notify(NOTIFICATION_ID, fatalFg)
+                    } catch (e: Exception) {
+                        Log.w(tag, "Ошибка обновления уведомления: ${e.message}")
+                    }
                     stopSelf()
                     return
                 }
@@ -1275,6 +1308,7 @@ class PocketService : Service() {
                 isSetupComplete = false
                 hasPendingTranslation = false
                 currentTurnInputSpeech = null
+                activeTranslationTurnId = null
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
                 mainHandler.removeCallbacks(simulIdleRunnable)
@@ -1282,6 +1316,7 @@ class PocketService : Service() {
                     if (code == 1000) {
                         // Google 10-15 min Session Rotation: DO NOT call stopSelf()!
                         connectionState = "RECONNECTING (Rotation)"
+                        activeTranslationTurnId = null
                         logEvent("SESSION_ROTATION_RECONNECT", "code=$code, reason=$reason")
                         onStatusChanged?.invoke("🔄 Ротация сессии Google (15 мин). Мгновенное возобновление...")
                         mainHandler.post {
@@ -1757,43 +1792,7 @@ class PocketService : Service() {
         return Pair(null, "FAILED")
     }
 
-    private fun startRecording() {
-        val sampleRate = 16000
-        val minBufferSize = AudioRecord.getMinBufferSize(
-            sampleRate,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-
-        // Буфер не менее 2 секунд (64 КБ), чтобы гарантировать отсутствие переполнения
-        val bufferSize = maxOf(minBufferSize * 4, sampleRate * 2 * 2)
-
-        val (record, sourceName) = createAudioRecord(sampleRate, bufferSize)
-        if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
-            val err = "🔴 Ошибка: микрофон недоступен ни в одном режиме"
-            lastError = err
-            logEvent("MIC_INIT_FAILED")
-            onStatusChanged?.invoke(err)
-            stopSelf()
-            return
-        }
-
-        audioRecord = record
-        activeAudioSource = sourceName
-        logEvent("RECORDING_START", "source=$activeAudioSource, bufferSize=$bufferSize")
-
-        try {
-            audioRecord?.startRecording()
-        } catch (e: Exception) {
-            val err = "🔴 Ошибка старта микрофона: ${e.message}"
-            lastError = err
-            logEvent("MIC_START_ERROR", "${e.message}")
-            onStatusChanged?.invoke(err)
-            stopSelf()
-            return
-        }
-
-        // Поток 1: Неблокирующий захват PCM звука с микрофона в audioSendQueue
+    private fun startRecordThread() {
         recordThread = Thread {
             // Чанк 100 мс при 16 кГц Mono 16-бит = 1600 сэмплов (Shorts) = 3200 байт
             val shortBuffer = ShortArray(1600)
@@ -1834,8 +1833,8 @@ class PocketService : Service() {
                             audioSendQueue.offer(byteBuffer)
                         }
                     } else {
-                        audioReadErrors++
                         if (read < 0) {
+                            audioReadErrors++
                             lastError = "AudioRecord.read ошибка: $read"
                             logEvent("MIC_READ_ERROR", "readResult=$read")
                         }
@@ -1856,6 +1855,46 @@ class PocketService : Service() {
             }
         }
         recordThread?.start()
+    }
+
+    private fun startRecording() {
+        val sampleRate = 16000
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+
+        // Буфер не менее 2 секунд (64 КБ), чтобы гарантировать отсутствие переполнения
+        val bufferSize = maxOf(minBufferSize * 4, sampleRate * 2 * 2)
+
+        val (record, sourceName) = createAudioRecord(sampleRate, bufferSize)
+        if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
+            val err = "🔴 Ошибка: микрофон недоступен ни в одном режиме"
+            lastError = err
+            logEvent("MIC_INIT_FAILED")
+            onStatusChanged?.invoke(err)
+            stopSelf()
+            return
+        }
+
+        audioRecord = record
+        activeAudioSource = sourceName
+        logEvent("RECORDING_START", "source=$activeAudioSource, bufferSize=$bufferSize")
+
+        try {
+            audioRecord?.startRecording()
+        } catch (e: Exception) {
+            val err = "🔴 Ошибка старта микрофона: ${e.message}"
+            lastError = err
+            logEvent("MIC_START_ERROR", "${e.message}")
+            onStatusChanged?.invoke(err)
+            stopSelf()
+            return
+        }
+
+        // Поток 1: Неблокирующий захват PCM звука с микрофона в audioSendQueue
+        startRecordThread()
 
         // Поток 2: Отдельный независимый поток отправки аудиочанков в WebSocket
         sendThread = Thread {

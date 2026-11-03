@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # PocketHUD: Автоматическая инициализация и отправка в GitHub
 # ==============================================================================
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -175,15 +175,26 @@ while (-not $pushSuccess -and $attempt -lt $maxAttempts) {
 
     if ($combined -match "denied to\s+([^\.\s]+)") {
         $deniedUser = $matches[1]
+        $repoOwner = "owner"
+        $repoName = "pocket-hud"
+        if ($targetRemote -match "(?:https?:\/\/|git@)?github\.com[:\/]([^\/]+)\/([^\/\s]+)") {
+            $repoOwner = $matches[1]
+            $repoName = $matches[2] -replace "\.git$", ""
+        } elseif (-not [string]::IsNullOrWhiteSpace($cleanUser)) {
+            $repoOwner = $cleanUser
+        } elseif (-not [string]::IsNullOrWhiteSpace($user)) {
+            $repoOwner = $user
+        }
+
         Write-Host "`n==========================================================" -ForegroundColor Red
         Write-Host " [ВНИМАНИЕ] Обнаружен конфликт учётных записей в Windows!" -ForegroundColor Yellow
         Write-Host "==========================================================" -ForegroundColor Red
         Write-Host " В Windows сохранён старый вход: $deniedUser" -ForegroundColor White
-        Write-Host " А репозиторий создан под аккаунтом: AleksandrBrevnov" -ForegroundColor White
+        Write-Host " А репозиторий создан под аккаунтом: $repoOwner" -ForegroundColor White
         Write-Host " GitHub отклонил отправку (HTTP 403 Forbidden)." -ForegroundColor DarkGray
         Write-Host "`nВыберите удобное решение:" -ForegroundColor Cyan
-        Write-Host " 1. Сбросить вход '$deniedUser' (откроется окно входа AleksandrBrevnov) [Рекомендуется]" -ForegroundColor Yellow
-        Write-Host " 2. Добавить '$deniedUser' в соавторы AleksandrBrevnov/pocket-hud на GitHub" -ForegroundColor White
+        Write-Host " 1. Сбросить вход '$deniedUser' (откроется окно входа $repoOwner) [Рекомендуется]" -ForegroundColor Yellow
+        Write-Host " 2. Добавить '$deniedUser' в соавторы $repoOwner/$repoName на GitHub" -ForegroundColor White
         Write-Host " 3. Ввести GitHub Personal Access Token (PAT)" -ForegroundColor White
 
         $sol = Read-Host "`nВаш выбор (1/2/3) [по умолчанию 1]"
@@ -199,7 +210,7 @@ while (-not $pushSuccess -and $attempt -lt $maxAttempts) {
                 break
             }
         } elseif ($sol -eq '2') {
-            $collabUrl = "https://github.com/AleksandrBrevnov/pocket-hud/settings/access"
+            $collabUrl = "https://github.com/$repoOwner/$repoName/settings/access"
             Write-Host "`nОткрываю страницу доступа: $collabUrl" -ForegroundColor Cyan
             Start-Process $collabUrl
             Write-Host "В открывшемся окне нажмите 'Add people', найдите '$deniedUser' и подтвердите." -ForegroundColor Yellow
@@ -212,7 +223,7 @@ while (-not $pushSuccess -and $attempt -lt $maxAttempts) {
         } elseif ($sol -eq '3') {
             $token = (Read-Host "Вставьте Personal Access Token").Trim()
             if (-not [string]::IsNullOrWhiteSpace($token)) {
-                $tokenUrl = "https://${token}@github.com/AleksandrBrevnov/pocket-hud.git"
+                $tokenUrl = "https://${token}@github.com/$repoOwner/$repoName.git"
                 & git.exe push -u $tokenUrl main
                 if ($LASTEXITCODE -eq 0) {
                     $pushSuccess = $true
