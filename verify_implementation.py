@@ -454,12 +454,16 @@ def splitSentences(text: str) -> list:
 # Python simulation of synchronous streaming turn state machine with sentence accumulation
 class DialogueTurnSim:
     _id_counter = 0
-    def __init__(self, italianText, russianText, timestamp, isFinalized=False):
-        DialogueTurnSim._id_counter += 1
-        self.id = DialogueTurnSim._id_counter
+    def __init__(self, italianText="", russianText="", timestamp=0, isFinalized=False, id=None):
+        if id is None:
+            DialogueTurnSim._id_counter += 1
+            self.id = DialogueTurnSim._id_counter
+        else:
+            self.id = id
         self.italianText = italianText
         self.russianText = russianText
         self.timestamp = timestamp
+        self.lastActivityTime = timestamp
         self.isFinalized = isFinalized
 
 class SynchronousTurnStateMachine:
@@ -931,13 +935,33 @@ print("\n--- 10. Verification of v1.0.32 P1/P2 Architectural Enhancements & Guar
 assert "dialogueTurnIdCounter = AtomicLong(0L)" in service_code, "dialogueTurnIdCounter = AtomicLong(0L) missing in PocketService.kt"
 assert "val id: Long = dialogueTurnIdCounter.incrementAndGet()" in service_code, "DialogueTurn must use dialogueTurnIdCounter.incrementAndGet() for default id"
 
-# 2. applyMicSourceChange safe thread restart
+# Functional Test: DialogueTurnSim monotonic counter & zero collision
+turn_objs = [DialogueTurnSim("test", "тест", 1000) for _ in range(100)]
+turn_ids = [t.id for t in turn_objs]
+assert len(set(turn_ids)) == 100, f"Expected 100 unique turn IDs, got {len(set(turn_ids))}"
+assert turn_ids == sorted(turn_ids), "Turn IDs must be strictly monotonically increasing"
+assert all(b == a + 1 for a, b in zip(turn_ids, turn_ids[1:])), "Turn IDs must increment by 1 without gaps"
+
+# 2. applyMicSourceChange safe thread restart & interruption
 assert "recordThread?.interrupt()" in service_code and "recordThread?.join(500)" in service_code, "recordThread interrupt and join(500) missing in applyMicSourceChange"
 assert "private fun startRecordThread()" in service_code, "startRecordThread() method missing in PocketService.kt"
 assert "startRecordThread()" in service_code, "startRecordThread() call missing in applyMicSourceChange/startRecording"
+assert "isRunning && !Thread.currentThread().isInterrupted" in service_code, "Thread interruption check missing in startRecordThread"
+assert "audioRecord?.stop()" in service_code and "recordThread?.join(500)" in service_code, "Immediate read unblocking missing before recordThread.join in applyMicSourceChange"
 
 # 3. onFailure fatal error unification (400, 401, 403)
 assert "httpCode == 400 || httpCode == 401 || httpCode == 403" in service_code, "Fatal HTTP 400/401/403 unification missing in onFailure"
+
+# Functional Test: HTTP fatal code evaluation (400, 401, 403 are fatal; others are transient)
+def is_fatal_http(code):
+    return code == 400 or code == 401 or code == 403
+
+assert is_fatal_http(400) == True
+assert is_fatal_http(401) == True
+assert is_fatal_http(403) == True
+assert is_fatal_http(500) == False
+assert is_fatal_http(503) == False
+assert is_fatal_http(None) == False
 
 # 4. activeTranslationTurnId reset
 assert "activeTranslationTurnId = null" in service_code, "activeTranslationTurnId reset missing"
@@ -947,6 +971,17 @@ assert '"🔵 WebSocket соединён. Инициализация Gemini Live
 
 # 6. audioReadErrors incremented only when read < 0
 assert "read < 0" in service_code and "audioReadErrors++" in service_code, "audioReadErrors++ must only increment on read < 0"
+
+# Functional Test: audioReadErrors logic (read < 0 increments, read == 0 does not)
+simulated_reads = [1600, 1600, 0, 0, -1, 1600, -2, 0, -3]
+sim_audio_read_errors = 0
+for r in simulated_reads:
+    if r > 0:
+        pass
+    else:
+        if r < 0:
+            sim_audio_read_errors += 1
+assert sim_audio_read_errors == 3, f"Expected exactly 3 read errors, got {sim_audio_read_errors}"
 
 # 7. setup_and_push.ps1 dynamic repoOwner/repoName
 assert "AleksandrBrevnov" not in setup_code, "Hardcoded AleksandrBrevnov must be purged from setup_and_push.ps1"

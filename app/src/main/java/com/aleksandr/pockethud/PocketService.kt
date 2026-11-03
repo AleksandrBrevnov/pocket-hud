@@ -481,52 +481,64 @@ class PocketService : Service() {
         }
     }
 
+    private val micSwitchLock = Any()
+
     fun applyMicSourceChange(newSource: MicSource) {
         logEvent("MIC_SOURCE_CHANGE_REQUESTED", "newSource=$newSource")
+        if (selectedMicSource != newSource) {
+            selectedMicSource = newSource
+            return
+        }
         if (!isRunning) return
 
         Thread {
-            try {
-                recordThread?.interrupt()
-                recordThread?.join(500)
-            } catch (e: Exception) {
-                Log.w(tag, "Ошибка ожидания завершения recordThread: ${e.message}")
-            }
-            recordThread = null
-
-            releaseHardwareEffects()
-            try {
-                audioRecord?.stop()
-                audioRecord?.release()
-            } catch (e: Exception) {
-                Log.w(tag, "Ошибка остановки AudioRecord: ${e.message}")
-            }
-            audioRecord = null
-
-            setupAudioRouting()
-
-            val sampleRate = 16000
-            val minBufferSize = AudioRecord.getMinBufferSize(
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            )
-            val bufferSize = maxOf(minBufferSize * 4, sampleRate * 2 * 2)
-            val (record, sourceName) = createAudioRecord(sampleRate, bufferSize)
-            if (record != null && record.state == AudioRecord.STATE_INITIALIZED) {
-                audioRecord = record
-                activeAudioSource = sourceName
+            synchronized(micSwitchLock) {
                 try {
-                    record.startRecording()
-                    logEvent("MIC_SOURCE_RESTARTED", "source=$activeAudioSource")
-                    if (isRunning) {
-                        startRecordThread()
-                    }
+                    recordThread?.interrupt()
+                    audioRecord?.stop()
+                    recordThread?.join(500)
                 } catch (e: Exception) {
-                    logEvent("MIC_SOURCE_START_FAILED", "${e.message}")
+                    Log.w(tag, "Ошибка ожидания завершения recordThread: ${e.message}")
                 }
-            } else {
-                logEvent("MIC_SOURCE_INIT_FAILED")
+                recordThread = null
+
+                releaseHardwareEffects()
+                try {
+                    audioRecord?.release()
+                } catch (e: Exception) {
+                    Log.w(tag, "Ошибка освобождения AudioRecord: ${e.message}")
+                }
+                audioRecord = null
+                audioSendQueue.clear()
+
+                setupAudioRouting()
+
+                val sampleRate = 16000
+                val minBufferSize = AudioRecord.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                val bufferSize = maxOf(minBufferSize * 4, sampleRate * 2 * 2)
+                val (record, sourceName) = createAudioRecord(sampleRate, bufferSize)
+                if (record != null && record.state == AudioRecord.STATE_INITIALIZED) {
+                    audioRecord = record
+                    activeAudioSource = sourceName
+                    try {
+                        record.startRecording()
+                        logEvent("MIC_SOURCE_RESTARTED", "source=$activeAudioSource")
+                        if (isRunning) {
+                            startRecordThread()
+                        }
+                    } catch (e: Exception) {
+                        logEvent("MIC_SOURCE_START_FAILED", "${e.message}")
+                    }
+                } else {
+                    val err = "🔴 Ошибка переключения микрофона ($newSource)"
+                    lastError = err
+                    onStatusChanged?.invoke(err)
+                    logEvent("MIC_SOURCE_INIT_FAILED")
+                }
             }
         }.start()
     }
@@ -1271,7 +1283,11 @@ class PocketService : Service() {
                 mainHandler.removeCallbacks(simulIdleRunnable)
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
-                val httpCode = response?.code
+                val httpCode = response?.code ?: run {
+                    val msg = t.message ?: ""
+                    val m = Regex("""\b(400|401|403)\b""").find(msg)
+                    m?.value?.toIntOrNull()
+                }
                 if (httpCode == 400 || httpCode == 401 || httpCode == 403) {
                     val errorLabel = if (httpCode == 400) {
                         "Некорректный запрос (HTTP 400)"
@@ -1797,9 +1813,10 @@ class PocketService : Service() {
             // Чанк 100 мс при 16 кГц Mono 16-бит = 1600 сэмплов (Shorts) = 3200 байт
             val shortBuffer = ShortArray(1600)
 
-            while (isRunning) {
+            while (isRunning && !Thread.currentThread().isInterrupted) {
                 try {
                     val read = audioRecord?.read(shortBuffer, 0, shortBuffer.size) ?: 0
+                    if (Thread.currentThread().isInterrupted) break
                     lastAudioReadResult = read
 
                     if (read > 0) {
