@@ -128,28 +128,32 @@ with open(build_gradle_path, "r", encoding="utf-8") as f:
 with open(setup_and_push_path, "r", encoding="utf-8") as f:
     setup_code = f.read()
 
-print("\n--- 1. Verification of v1.0.36 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 40' in gradle_code, "versionCode 40 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.36"' in gradle_code, "versionName 1.0.36 missing in app/build.gradle.kts"
+print("\n--- 1. Verification of v1.0.37 Version Bumps & Fixed Keystore ---")
+assert 'versionCode = 41' in gradle_code, "versionCode 41 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.37"' in gradle_code, "versionName 1.0.37 missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
 assert os.path.exists(debug_keystore_path), "app/debug.keystore missing on disk"
-assert 'text = "v1.0.36"' in main_code, "v1.0.36 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.36' in service_code, "v1.0.36 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.36 активен' in service_code, "v1.0.36 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.36' in service_code, "v1.0.36 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.36 and fixed debug.keystore OK across all files.")
+assert 'text = "v1.0.37"' in main_code, "v1.0.37 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.37' in service_code, "v1.0.37 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.37 активен' in service_code, "v1.0.37 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.37' in service_code, "v1.0.37 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.37 and fixed debug.keystore OK across all files.")
 
-print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
+print("\n--- 2. Verification of Google 10-15 min Session Rotation, Watchdog & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
 assert "SESSION_ROTATION_RECONNECT" in service_code, "Session rotation reconnect log missing"
 assert "root.has(\"goAway\")" in service_code, "Root-level goAway extraction missing"
 assert "goAwayRunnable" in service_code, "goAwayRunnable missing in PocketService.kt"
 assert "webSocket === currentWs" in service_code, "goAway race condition guard missing"
 assert "@Volatile private var isSetupComplete = false" in service_code, "isSetupComplete volatile flag missing"
+assert "@Volatile private var webSocket: WebSocket? = null" in service_code, "webSocket must be volatile"
+assert "setupWatchdogRunnable" in service_code, "setupWatchdogRunnable missing in PocketService.kt"
+assert "SETUP_TIMEOUT" in service_code, "SETUP_TIMEOUT event logging missing"
+assert "override fun onClosing" in service_code, "onClosing callback missing in WebSocketListener"
 assert "if (!isSetupComplete)" in service_code, "isSetupComplete guard missing in sendThread"
 assert "Thread.sleep(40)" in service_code, "sendThread must sleep while !isSetupComplete to hold queue"
 assert "isSetupComplete = true" in service_code, "isSetupComplete activation on setupComplete missing"
-print("  -> Session rotation & reconnect OK.")
+print("  -> Session rotation, watchdog & reconnect OK.")
 
 print("\n--- 3. Verification of Native Gemini Live Translate sendSetup() ---")
 assert '"models/gemini-3.5-live-translate-preview"' in service_code, "models/gemini-3.5-live-translate-preview missing in sendSetup"
@@ -1142,6 +1146,6 @@ assert "➔ 🇷🇺 Я выиграл 41 000 евро!" in formatted_text
 print("  -> Dialogue Persistence & Saved Sessions verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.36 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.37 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
 

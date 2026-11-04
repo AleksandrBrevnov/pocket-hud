@@ -183,7 +183,7 @@ class PocketService : Service() {
     private val tag = "PocketHUD"
     @Volatile private var isRunning = false
     private var wakeLock: PowerManager.WakeLock? = null
-    private var webSocket: WebSocket? = null
+    @Volatile private var webSocket: WebSocket? = null
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
 
@@ -193,6 +193,9 @@ class PocketService : Service() {
 
     // Флаг готовности WebSocket сессии к приему аудио (защита от отправки до setupComplete)
     @Volatile private var isSetupComplete = false
+
+    // Таймер Watchdog для ожидания setupComplete от Google Live (защита от зависания сессии)
+    private var setupWatchdogRunnable: Runnable? = null
 
     // Активная карточка диалога (Single Active Card) и стриминг перевода
     @Volatile private var activeDialogueTurn: DialogueTurn? = null
@@ -395,7 +398,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.36\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.37\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -452,7 +455,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.36 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.37 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -1090,7 +1093,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.36")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.37")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1166,7 +1169,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.36")
+            appendLine("Версия: v1.0.37")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
@@ -1343,6 +1346,8 @@ class PocketService : Service() {
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
                 isSetupComplete = false
+                setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+                setupWatchdogRunnable = null
                 hasPendingTranslation = false
                 currentTurnInputSpeech = null
                 activeTranslationTurnId = null
@@ -1385,9 +1390,21 @@ class PocketService : Service() {
                 handleConnectionDrop("Сбой сети: ${t.message}")
             }
 
+            override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                Log.d(tag, "WebSocket закрывается ($code: $reason)")
+                isSetupComplete = false
+                setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+                setupWatchdogRunnable = null
+                try {
+                    ws.close(code, reason)
+                } catch (e: Exception) {}
+            }
+
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 Log.d(tag, "WebSocket закрыт ($code: $reason)")
                 isSetupComplete = false
+                setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+                setupWatchdogRunnable = null
                 hasPendingTranslation = false
                 currentTurnInputSpeech = null
                 activeTranslationTurnId = null
@@ -1401,7 +1418,8 @@ class PocketService : Service() {
                         activeTranslationTurnId = null
                         logEvent("SESSION_ROTATION_RECONNECT", "code=$code, reason=$reason")
                         onStatusChanged?.invoke("🔄 Ротация сессии Google (15 мин). Мгновенное возобновление...")
-                        mainHandler.post {
+                        // Выдерживаем паузу 1.5с для освобождения сессии и квоты бэкендом Google Live
+                        mainHandler.postDelayed({
                             if (isRunning && activeApiKey.isNotBlank()) {
                                 try {
                                     if (webSocket === ws) {
@@ -1411,7 +1429,7 @@ class PocketService : Service() {
                                 } catch (e: Exception) {}
                                 connectWebSocket(activeApiKey)
                             }
-                        }
+                        }, 1500L)
                     } else {
                         handleConnectionDrop("Сервер закрыл сокет ($code: $reason)")
                     }
@@ -1428,6 +1446,8 @@ class PocketService : Service() {
     private fun handleConnectionDrop(reason: String) {
         if (!isRunning) return
         isSetupComplete = false
+        setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+        setupWatchdogRunnable = null
         hasPendingTranslation = false
         currentTurnInputSpeech = null
         activeTranslationTurnId = null
@@ -1496,8 +1516,29 @@ class PocketService : Service() {
         val setupJson = JSONObject().apply {
             put("setup", setupObj)
         }
-        ws.send(setupJson.toString())
+        val enqueued = ws.send(setupJson.toString())
         logEvent("SETUP_SENT", "model=models/gemini-3.5-live-translate-preview, target=ru, vad=[silence=800ms, NO_INTERRUPTION, sensitivity=LOW]")
+        if (!enqueued) {
+            Log.e(tag, "Ошибка отправки Setup: ws.send вернул false!")
+            logEvent("SETUP_SEND_FAILED")
+            handleConnectionDrop("Сбой отправки Setup в сокет")
+            return
+        }
+
+        // Запуск Watchdog таймера на случай зависания Google при инициализации сессии (5 сек)
+        setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+        val watchdog = Runnable {
+            if (isRunning && !isSetupComplete && webSocket === ws) {
+                Log.w(tag, "Setup Complete Watchdog: ответ setupComplete не получен в течение 5с. Переподключение...")
+                logEvent("SETUP_TIMEOUT", "Waited 5s for setupComplete")
+                try {
+                    ws.cancel()
+                } catch (e: Exception) {}
+                handleConnectionDrop("Таймаут инициализации Gemini Live (setupComplete не получен)")
+            }
+        }
+        setupWatchdogRunnable = watchdog
+        mainHandler.postDelayed(watchdog, 5000L)
     }
 
     private fun handleServerMessage(jsonText: String) {
@@ -1516,6 +1557,7 @@ class PocketService : Service() {
                 val runnable = Runnable {
                     if (isRunning && webSocket === currentWs) {
                         try {
+                            isSetupComplete = false
                             currentWs?.close(1000, "Clean session rotation")
                         } catch (e: Exception) {
                             currentWs?.cancel()
@@ -1523,11 +1565,13 @@ class PocketService : Service() {
                     }
                 }
                 goAwayRunnable = runnable
-                mainHandler.postDelayed(runnable, 1500L)
+                mainHandler.postDelayed(runnable, 2000L)
             }
 
             // 3. Подтверждение готовности setupComplete
             if (root.has("setupComplete")) {
+                setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+                setupWatchdogRunnable = null
                 isSetupComplete = true
                 Log.d(tag, "Setup завершён! Запуск микрофона...")
                 connectionState = "READY (Streaming)"
@@ -2084,6 +2128,8 @@ class PocketService : Service() {
 
         goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
         goAwayRunnable = null
+        setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+        setupWatchdogRunnable = null
         mainHandler.removeCallbacks(simulIdleRunnable)
 
         audioPlaybackQueue.clear()
