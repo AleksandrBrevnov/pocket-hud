@@ -104,7 +104,7 @@ def verify_utf8_no_bom(file_path):
 
 def main():
     print("=================================================================")
-    print("🚀 POCKETHUD V1.0.35 IN-APP PERSISTENT DIALOGUE VERIFICATION 🚀")
+    print("🚀 POCKETHUD V1.0.36 IN-APP PERSISTENT DIALOGUE VERIFICATION 🚀")
     print("=================================================================")
 
     # 1. Syntax check
@@ -133,14 +133,14 @@ def main():
         gradle_code = f.read()
 
     # 3. Version bump checks
-    print("\n--- 3. Version Bump v1.0.35 Verification ---")
-    assert "versionCode = 39" in gradle_code, "versionCode must be 38 in app/build.gradle.kts"
-    assert 'versionName = "1.0.35"' in gradle_code, 'versionName must be "1.0.34" in app/build.gradle.kts'
-    assert 'text = "v1.0.35"' in main_code, "v1.0.35 badge missing in MainActivity.kt"
-    assert 'PocketHUD — Ушной суфлёр v1.0.35' in service_code, "v1.0.35 missing in PocketService notification"
-    assert 'PocketHUD v1.0.35 активен' in service_code, "v1.0.35 missing in PocketService start subtitle"
-    assert 'Версия: v1.0.35' in service_code, "v1.0.35 missing in PocketService diagnostic summary"
-    print("  -> Version bump v1.0.35 verified across build.gradle.kts, MainActivity, and PocketService.")
+    print("\n--- 3. Version Bump v1.0.36 Verification ---")
+    assert "versionCode = 40" in gradle_code, "versionCode must be 40 in app/build.gradle.kts"
+    assert 'versionName = "1.0.36"' in gradle_code, 'versionName must be "1.0.36" in app/build.gradle.kts'
+    assert 'text = "v1.0.36"' in main_code, "v1.0.36 badge missing in MainActivity.kt"
+    assert 'PocketHUD — Ушной суфлёр v1.0.36' in service_code, "v1.0.36 missing in PocketService notification"
+    assert 'PocketHUD v1.0.36 активен' in service_code, "v1.0.36 missing in PocketService start subtitle"
+    assert 'Версия: v1.0.36' in service_code, "v1.0.36 missing in PocketService diagnostic summary"
+    print("  -> Version bump v1.0.36 verified across build.gradle.kts, MainActivity, and PocketService.")
 
     # 4. Storage & Persistence Checks
     print("\n--- 4. Persistent Storage Directory & Format Invariants ---")

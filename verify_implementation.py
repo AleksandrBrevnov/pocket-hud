@@ -128,16 +128,16 @@ with open(build_gradle_path, "r", encoding="utf-8") as f:
 with open(setup_and_push_path, "r", encoding="utf-8") as f:
     setup_code = f.read()
 
-print("\n--- 1. Verification of v1.0.35 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 39' in gradle_code, "versionCode 39 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.35"' in gradle_code, "versionName 1.0.35 missing in app/build.gradle.kts"
+print("\n--- 1. Verification of v1.0.36 Version Bumps & Fixed Keystore ---")
+assert 'versionCode = 40' in gradle_code, "versionCode 40 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.36"' in gradle_code, "versionName 1.0.36 missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
 assert os.path.exists(debug_keystore_path), "app/debug.keystore missing on disk"
-assert 'text = "v1.0.35"' in main_code, "v1.0.35 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.35' in service_code, "v1.0.35 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.35 активен' in service_code, "v1.0.35 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.35' in service_code, "v1.0.35 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.35 and fixed debug.keystore OK across all files.")
+assert 'text = "v1.0.36"' in main_code, "v1.0.36 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.36' in service_code, "v1.0.36 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.36 активен' in service_code, "v1.0.36 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.36' in service_code, "v1.0.36 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.36 and fixed debug.keystore OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -173,7 +173,7 @@ assert '"realtimeInputConfig"' in service_code, "realtimeInputConfig missing in 
 assert '"silenceDurationMs", 800' in service_code or '"silenceDurationMs"' in service_code, "silenceDurationMs 800 missing in sendSetup"
 assert '"NO_INTERRUPTION"' in service_code, "NO_INTERRUPTION missing in realtimeInputConfig"
 assert '"START_SENSITIVITY_HIGH"' in service_code, "START_SENSITIVITY_HIGH missing in realtimeInputConfig"
-assert '"END_SENSITIVITY_DEFAULT"' in service_code, "END_SENSITIVITY_DEFAULT missing in realtimeInputConfig"
+assert '"END_SENSITIVITY_LOW"' in service_code, "END_SENSITIVITY_LOW missing in realtimeInputConfig"
 assert '"prefixPaddingMs", 150' in service_code or '"prefixPaddingMs"' in service_code, "prefixPaddingMs missing in sendSetup"
 print("  -> Native Gemini Live Translate sendSetup() configuration verified perfectly.")
 
@@ -1125,6 +1125,6 @@ assert "➔ 🇷🇺 Я выиграл 41 000 евро!" in formatted_text
 print("  -> Dialogue Persistence & Saved Sessions verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.35 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.36 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
 

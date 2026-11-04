@@ -395,7 +395,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.35\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.36\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -452,7 +452,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.35 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.36 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -1090,7 +1090,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.35")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.36")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1166,7 +1166,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.35")
+            appendLine("Версия: v1.0.36")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
@@ -1486,7 +1486,7 @@ class PocketService : Service() {
                 put("automaticActivityDetection", JSONObject().apply {
                     put("disabled", false)
                     put("startOfSpeechSensitivity", "START_SENSITIVITY_HIGH")
-                    put("endOfSpeechSensitivity", "END_SENSITIVITY_DEFAULT")
+                    put("endOfSpeechSensitivity", "END_SENSITIVITY_LOW")
                     put("silenceDurationMs", 800)
                     put("prefixPaddingMs", 150)
                 })
@@ -1497,7 +1497,7 @@ class PocketService : Service() {
             put("setup", setupObj)
         }
         ws.send(setupJson.toString())
-        logEvent("SETUP_SENT", "model=models/gemini-3.5-live-translate-preview, target=ru, vad=[silence=800ms, NO_INTERRUPTION]")
+        logEvent("SETUP_SENT", "model=models/gemini-3.5-live-translate-preview, target=ru, vad=[silence=800ms, NO_INTERRUPTION, sensitivity=LOW]")
     }
 
     private fun handleServerMessage(jsonText: String) {
