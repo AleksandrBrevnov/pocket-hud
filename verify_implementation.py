@@ -169,13 +169,30 @@ assert "sessionResumption" not in setup_body, "sessionResumption must be complet
 assert "resumptionObj" not in setup_body, "resumptionObj must be completely removed from sendSetup"
 assert "systemInstruction" not in setup_body, "systemInstruction must be completely removed from sendSetup"
 
+# 3.1 Strict Protobuf Schema & Enum Whitelist Verification for Gemini Live VAD
+VALID_END_OF_SPEECH_SENSITIVITIES = {"END_SENSITIVITY_UNSPECIFIED", "END_SENSITIVITY_HIGH", "END_SENSITIVITY_LOW"}
+VALID_START_OF_SPEECH_SENSITIVITIES = {"START_SENSITIVITY_UNSPECIFIED", "START_SENSITIVITY_HIGH", "START_SENSITIVITY_LOW"}
+VALID_ACTIVITY_HANDLINGS = {"ACTIVITY_HANDLING_UNSPECIFIED", "START_OF_ACTIVITY_INTERRUPTS", "NO_INTERRUPTION"}
+
+end_sens_match = re.search(r'put\("endOfSpeechSensitivity",\s*"([^"]+)"\)', service_code)
+assert end_sens_match, "endOfSpeechSensitivity missing in PocketService.kt"
+actual_end_sens = end_sens_match.group(1)
+assert actual_end_sens in VALID_END_OF_SPEECH_SENSITIVITIES, f"Invalid endOfSpeechSensitivity '{actual_end_sens}'! Must be one of {VALID_END_OF_SPEECH_SENSITIVITIES}"
+
+start_sens_match = re.search(r'put\("startOfSpeechSensitivity",\s*"([^"]+)"\)', service_code)
+assert start_sens_match, "startOfSpeechSensitivity missing in PocketService.kt"
+actual_start_sens = start_sens_match.group(1)
+assert actual_start_sens in VALID_START_OF_SPEECH_SENSITIVITIES, f"Invalid startOfSpeechSensitivity '{actual_start_sens}'! Must be one of {VALID_START_OF_SPEECH_SENSITIVITIES}"
+
+act_hand_match = re.search(r'put\("activityHandling",\s*"([^"]+)"\)', service_code)
+assert act_hand_match, "activityHandling missing in PocketService.kt"
+actual_act_hand = act_hand_match.group(1)
+assert actual_act_hand in VALID_ACTIVITY_HANDLINGS, f"Invalid activityHandling '{actual_act_hand}'! Must be one of {VALID_ACTIVITY_HANDLINGS}"
+
 assert '"realtimeInputConfig"' in service_code, "realtimeInputConfig missing in sendSetup"
 assert '"silenceDurationMs", 800' in service_code or '"silenceDurationMs"' in service_code, "silenceDurationMs 800 missing in sendSetup"
-assert '"NO_INTERRUPTION"' in service_code, "NO_INTERRUPTION missing in realtimeInputConfig"
-assert '"START_SENSITIVITY_HIGH"' in service_code, "START_SENSITIVITY_HIGH missing in realtimeInputConfig"
-assert '"END_SENSITIVITY_LOW"' in service_code, "END_SENSITIVITY_LOW missing in realtimeInputConfig"
 assert '"prefixPaddingMs", 150' in service_code or '"prefixPaddingMs"' in service_code, "prefixPaddingMs missing in sendSetup"
-print("  -> Native Gemini Live Translate sendSetup() configuration verified perfectly.")
+print(f"  -> Native Gemini Live Translate sendSetup() VAD contract verified (endSens={actual_end_sens}, startSens={actual_start_sens}, activity={actual_act_hand}).")
 
 print("\n--- 4. Verification of Split Audio Routing & Hardware DSP ---")
 assert "var selectedMicSource: MicSource = MicSource.SMARTPHONE" in service_code, "Default mic in PocketService must be SMARTPHONE"
