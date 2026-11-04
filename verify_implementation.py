@@ -129,8 +129,8 @@ with open(setup_and_push_path, "r", encoding="utf-8") as f:
     setup_code = f.read()
 
 print("\n--- 1. Verification of v1.0.35 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 39' in gradle_code, "versionCode 38 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.35"' in gradle_code, "versionName 1.0.34 missing in app/build.gradle.kts"
+assert 'versionCode = 39' in gradle_code, "versionCode 39 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.35"' in gradle_code, "versionName 1.0.35 missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
 assert os.path.exists(debug_keystore_path), "app/debug.keystore missing on disk"
 assert 'text = "v1.0.35"' in main_code, "v1.0.35 badge missing in MainActivity.kt"
@@ -1125,6 +1125,6 @@ assert "➔ 🇷🇺 Я выиграл 41 000 евро!" in formatted_text
 print("  -> Dialogue Persistence & Saved Sessions verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.33 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.35 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
 
