@@ -42,19 +42,14 @@ jobs:
       - name: Build Debug APK
         run: |
           chmod +x ./gradlew
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log || {
-            echo "### ❌ Build Failure Log" >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            tail -n 80 build.log >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            exit 1
-          }
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK to Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: PocketHUD-debug-apk
           path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
 
       - name: Create Release and Upload APK
         uses: softprops/action-gh-release@v2
@@ -64,5 +59,6 @@ jobs:
           tag_name: v${{ env.VERSION_NAME }}
           name: PocketHUD Release v${{ env.VERSION_NAME }}
           files: app/build/outputs/apk/**/*.apk
+          overwrite: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

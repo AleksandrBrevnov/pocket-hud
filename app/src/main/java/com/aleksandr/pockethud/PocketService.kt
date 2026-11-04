@@ -53,6 +53,16 @@ enum class MicSource {
 
 private val dialogueTurnIdCounter = AtomicLong(0L)
 
+fun updateDialogueTurnIdCounter(maxId: Long) {
+    var cur = dialogueTurnIdCounter.get()
+    while (maxId >= cur) {
+        if (dialogueTurnIdCounter.compareAndSet(cur, maxId + 1)) {
+            break
+        }
+        cur = dialogueTurnIdCounter.get()
+    }
+}
+
 data class DialogueTurn(
     val id: Long = dialogueTurnIdCounter.incrementAndGet(),
     var italianText: String = "",
@@ -310,6 +320,20 @@ class PocketService : Service() {
             synchronized(sessionDialogueTurns) {
                 sessionDialogueTurns.clear()
                 sessionDialogueTurns.addAll(turns)
+                val maxId = turns.maxOfOrNull { it.id } ?: 0L
+                updateDialogueTurnIdCounter(maxId)
+            }
+            synchronized(sessionItalianBuilder) {
+                sessionItalianBuilder.setLength(0)
+                for (t in turns) {
+                    if (t.italianText.isNotBlank()) appendToSessionBuilder(sessionItalianBuilder, t.italianText)
+                }
+            }
+            synchronized(sessionRussianBuilder) {
+                sessionRussianBuilder.setLength(0)
+                for (t in turns) {
+                    if (t.russianText.isNotBlank()) appendToSessionBuilder(sessionRussianBuilder, t.russianText)
+                }
             }
             currentInstance?.clearActiveDialogueTurn()
         }
@@ -371,7 +395,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.33\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.35\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -428,7 +452,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.33 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.35 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -726,9 +750,10 @@ class PocketService : Service() {
             hasPendingTranslation = false
             currentTurnInputSpeech = null
 
-            // Автосохранение кэша текущей сессии при финализации реплики
+            // Автосохранение кэша и архива сессии при финализации реплики
             try {
                 DialogueHistoryManager.saveCurrentSessionCache(this@PocketService, sessionDialogueTurns)
+                DialogueHistoryManager.saveSession(this@PocketService, sessionDialogueTurns, isAutoArchive = true)
             } catch (e: Exception) {
                 // Игнорируем ошибки дискового ввода-вывода в фоновом цикле
             }
@@ -805,6 +830,10 @@ class PocketService : Service() {
                 val idx = sessionDialogueTurns.size - 1
                 val turnCopy = newTurn.copy()
                 onDialogueTurnUpdated?.invoke(idx, turnCopy, true)
+            }
+            try {
+                DialogueHistoryManager.saveCurrentSessionCache(this@PocketService, sessionDialogueTurns)
+            } catch (e: Exception) {
             }
         }
     }
@@ -934,6 +963,10 @@ class PocketService : Service() {
 
         appendToSessionBuilder(sessionRussianBuilder, cleanedText)
         onTextReceived?.invoke(cleanedText)
+        try {
+            DialogueHistoryManager.saveCurrentSessionCache(this@PocketService, sessionDialogueTurns)
+        } catch (e: Exception) {
+        }
 
         scheduleNotificationUpdate(currentSentence, recentTranslations.toString().trim())
     }
@@ -1057,7 +1090,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.33")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.35")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1133,7 +1166,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.33")
+            appendLine("Версия: v1.0.35")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")

@@ -3,11 +3,13 @@ import sys
 import os
 import math
 
-main_activity_path = r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\src\main\java\com\aleksandr\pockethud\MainActivity.kt"
-pocket_service_path = r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\src\main\java\com\aleksandr\pockethud\PocketService.kt"
-history_manager_path = r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\src\main\java\com\aleksandr\pockethud\DialogueHistoryManager.kt"
-build_gradle_path = r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\build.gradle.kts"
-setup_and_push_path = r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\setup_and_push.ps1"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+main_activity_path = os.path.join(BASE_DIR, "app", "src", "main", "java", "com", "aleksandr", "pockethud", "MainActivity.kt")
+pocket_service_path = os.path.join(BASE_DIR, "app", "src", "main", "java", "com", "aleksandr", "pockethud", "PocketService.kt")
+history_manager_path = os.path.join(BASE_DIR, "app", "src", "main", "java", "com", "aleksandr", "pockethud", "DialogueHistoryManager.kt")
+build_gradle_path = os.path.join(BASE_DIR, "app", "build.gradle.kts")
+setup_and_push_path = os.path.join(BASE_DIR, "setup_and_push.ps1")
+debug_keystore_path = os.path.join(BASE_DIR, "app", "debug.keystore")
 
 def check_brackets_kotlin(file_path):
     print(f"Checking syntax balancing for {os.path.basename(file_path)}...")
@@ -126,16 +128,16 @@ with open(build_gradle_path, "r", encoding="utf-8") as f:
 with open(setup_and_push_path, "r", encoding="utf-8") as f:
     setup_code = f.read()
 
-print("\n--- 1. Verification of v1.0.33 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 37' in gradle_code, "versionCode 37 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.33"' in gradle_code, "versionName 1.0.33 missing in app/build.gradle.kts"
+print("\n--- 1. Verification of v1.0.35 Version Bumps & Fixed Keystore ---")
+assert 'versionCode = 39' in gradle_code, "versionCode 38 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.35"' in gradle_code, "versionName 1.0.34 missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
-assert os.path.exists(r"c:\Users\Aleksandr\Documents\Private\android_pocket_hud\app\debug.keystore"), "app/debug.keystore missing on disk"
-assert 'text = "v1.0.33"' in main_code, "v1.0.33 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.33' in service_code, "v1.0.33 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.33 активен' in service_code, "v1.0.33 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.33' in service_code, "v1.0.33 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.33 and fixed debug.keystore OK across all files.")
+assert os.path.exists(debug_keystore_path), "app/debug.keystore missing on disk"
+assert 'text = "v1.0.35"' in main_code, "v1.0.35 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.35' in service_code, "v1.0.35 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.35 активен' in service_code, "v1.0.35 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.35' in service_code, "v1.0.35 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.35 and fixed debug.keystore OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"

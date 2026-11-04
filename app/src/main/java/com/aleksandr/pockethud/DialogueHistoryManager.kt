@@ -15,6 +15,7 @@ import java.util.Locale
  */
 data class SavedSessionInfo(
     val file: File,
+    val textFile: File,
     val id: String,
     val timestamp: Long,
     val formattedDate: String,
@@ -24,31 +25,55 @@ data class SavedSessionInfo(
 
 /**
  * Менеджер сохранения и управления историей диалогов PocketHUD.
- * Гарантирует надежное оффлайн-хранение всех разговоров пользователя в JSON формате.
+ *
+ * Сохраняет чистые реплики диалога (время, оригинальная речь IT/EN, русский перевод RU)
+ * на устройство в human-readable формате (.txt) и структурированном JSON (.json).
+ * Без технической телеметрии (CHUNK_STREAMING, WEBSOCKET и т.д.).
+ * Гарантирует надежное сохранение и восстановление истории диалогов при перезапуске приложения.
  */
 object DialogueHistoryManager {
     private const val TAG = "DialogueHistory"
-    private const val DIR_NAME = "saved_dialogues"
+    private const val DIR_NAME = "dialogues"
     private const val CURRENT_SESSION_FILE = "current_dialogue.json"
     private const val MAX_SAVED_SESSIONS = 100
 
     private val dateFormat = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault())
     private val fileDateFormat = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+    private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     /**
-     * Получить каталог для хранения архивных диалогов
+     * Получить каталог для хранения архивных диалогов.
+     * Приоритет: context.getExternalFilesDir("dialogues"), fallback: filesDir/dialogues.
+     * Также выполняет прозрачную миграцию старых записей из filesDir/saved_dialogues.
      */
     fun getHistoryDir(context: Context): File {
-        val dir = File(context.filesDir, DIR_NAME)
+        val dir = context.getExternalFilesDir(DIR_NAME) ?: File(context.filesDir, DIR_NAME)
         if (!dir.exists()) {
             dir.mkdirs()
         }
+
+        // Прозрачная миграция старых файлов из filesDir/saved_dialogues
+        try {
+            val oldDir = File(context.filesDir, "saved_dialogues")
+            if (oldDir.exists() && oldDir.absolutePath != dir.absolutePath) {
+                oldDir.listFiles()?.forEach { oldFile ->
+                    val targetFile = File(dir, oldFile.name)
+                    if (!targetFile.exists()) {
+                        oldFile.renameTo(targetFile)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Ошибка миграции старых диалогов: ${e.message}")
+        }
+
         return dir
     }
 
     /**
      * Сохранить текущий диалог как отдельную сессию.
-     * Вызывается при остановке сервиса, нажатии "Очистить" или ручном сохранении.
+     * Создает как human-readable .txt, так и .json для быстрого восстановления.
+     * Возвращает .txt файл диалога, готовый для экспорта и отправки.
      */
     @Synchronized
     fun saveSession(context: Context, turns: List<DialogueTurn>, isAutoArchive: Boolean = false): File? {
@@ -61,23 +86,35 @@ object DialogueHistoryManager {
             val dir = getHistoryDir(context)
             val now = System.currentTimeMillis()
             val timeStr = fileDateFormat.format(Date(now))
-            val file = File(dir, "dialogue_$timeStr.json")
-            val tmpFile = File(dir, "dialogue_$timeStr.tmp")
+            val dateStr = dateFormat.format(Date(now))
 
+            // 1. Сохранение структурированного JSON
+            val jsonFile = File(dir, "dialogue_$timeStr.json")
+            val tmpJson = File(dir, "dialogue_$timeStr.json.tmp")
             val json = serializeTurnsToJson(meaningfulTurns, now)
-
-            FileOutputStream(tmpFile).use { fos ->
+            FileOutputStream(tmpJson).use { fos ->
                 fos.write(json.toString(2).toByteArray(Charsets.UTF_8))
             }
+            tmpJson.renameTo(jsonFile)
 
-            if (tmpFile.renameTo(file)) {
-                Log.d(TAG, "Сессия диалога сохранена (${meaningfulTurns.size} реплик): ${file.name}")
-                // Также обновляем кэш текущей сессии
-                saveCurrentSessionCache(context, meaningfulTurns)
-                // Ограничиваем количество сохранённых сессий (не более 100)
-                pruneOldSessions(dir)
-                return file
+            // 2. Сохранение чистого human-readable текста диалога (.txt)
+            val txtFile = File(dir, "dialogue_$timeStr.txt")
+            val tmpTxt = File(dir, "dialogue_$timeStr.txt.tmp")
+            val textContent = formatDialogueText(meaningfulTurns, includeOriginal = true, sessionDate = dateStr)
+            FileOutputStream(tmpTxt).use { fos ->
+                fos.write(textContent.toByteArray(Charsets.UTF_8))
             }
+            tmpTxt.renameTo(txtFile)
+
+            Log.d(TAG, "Сессия диалога сохранена (${meaningfulTurns.size} реплик): ${txtFile.name}")
+
+            // Также обновляем кэш текущей активной сессии
+            saveCurrentSessionCache(context, meaningfulTurns)
+
+            // Ограничиваем количество сохранённых сессий (не более 100)
+            pruneOldSessions(dir)
+
+            return txtFile
         } catch (e: Exception) {
             Log.e(TAG, "Ошибка сохранения сессии диалога: ${e.message}", e)
         }
@@ -85,7 +122,21 @@ object DialogueHistoryManager {
     }
 
     /**
-     * Сохранить кэш активного диалога (для восстановления после поворота экрана или закрытия приложения)
+     * Сохраняет чистый human-readable файл диалога для передачи (Share) пользователем.
+     */
+    @Synchronized
+    fun saveSessionTextFile(context: Context, turns: List<DialogueTurn>, sessionDate: String? = null): File {
+        val dir = getHistoryDir(context)
+        val now = System.currentTimeMillis()
+        val timeStr = fileDateFormat.format(Date(now))
+        val file = File(dir, "dialogue_$timeStr.txt")
+        val content = formatDialogueText(turns, includeOriginal = true, sessionDate = sessionDate)
+        file.writeText(content, Charsets.UTF_8)
+        return file
+    }
+
+    /**
+     * Сохранить кэш активного диалога (для восстановления после закрытия приложения)
      */
     @Synchronized
     fun saveCurrentSessionCache(context: Context, turns: List<DialogueTurn>) {
@@ -146,6 +197,7 @@ object DialogueHistoryManager {
 
         val list = mutableListOf<SavedSessionInfo>()
         for (f in files) {
+            val txtFile = File(dir, f.nameWithoutExtension + ".txt")
             try {
                 val json = JSONObject(f.readText(Charsets.UTF_8))
                 val ts = json.optLong("timestamp", f.lastModified())
@@ -155,6 +207,7 @@ object DialogueHistoryManager {
                 list.add(
                     SavedSessionInfo(
                         file = f,
+                        textFile = txtFile,
                         id = json.optString("id", f.nameWithoutExtension),
                         timestamp = ts,
                         formattedDate = formatted,
@@ -163,10 +216,10 @@ object DialogueHistoryManager {
                     )
                 )
             } catch (e: Exception) {
-                // Если файл поврежден, показываем базовую информацию по дате файла
                 list.add(
                     SavedSessionInfo(
                         file = f,
+                        textFile = txtFile,
                         id = f.nameWithoutExtension,
                         timestamp = f.lastModified(),
                         formattedDate = dateFormat.format(Date(f.lastModified())),
@@ -180,13 +233,26 @@ object DialogueHistoryManager {
     }
 
     /**
-     * Загрузить реплики из выбранного файла сессии
+     * Возвращает самый свежий текстовый файл диалога (.txt) для экспорта
+     */
+    fun getLatestDialogueTextFile(context: Context): File? {
+        val dir = getHistoryDir(context)
+        val files = dir.listFiles { f -> f.extension == "txt" && f.name.startsWith("dialogue_") } ?: return null
+        return files.maxByOrNull { it.lastModified() }
+    }
+
+    /**
+     * Загрузить реплики из выбранного файла сессии (поддерживает .json)
      */
     @Synchronized
     fun loadSessionTurns(file: File): List<DialogueTurn> {
         if (!file.exists()) return emptyList()
         return try {
-            val content = file.readText(Charsets.UTF_8)
+            val jsonFile = if (file.extension == "json") file else {
+                val candidate = File(file.parentFile, file.nameWithoutExtension + ".json")
+                if (candidate.exists()) candidate else file
+            }
+            val content = jsonFile.readText(Charsets.UTF_8)
             parseTurnsFromJson(JSONObject(content))
         } catch (e: Exception) {
             Log.e(TAG, "Ошибка чтения файла сессии ${file.name}: ${e.message}", e)
@@ -195,11 +261,15 @@ object DialogueHistoryManager {
     }
 
     /**
-     * Удалить выбранный файл сессии
+     * Удалить выбранный файл сессии (удаляет и .json, и .txt)
      */
     @Synchronized
     fun deleteSession(file: File): Boolean {
         return try {
+            val txtFile = File(file.parentFile, file.nameWithoutExtension + ".txt")
+            if (txtFile.exists()) txtFile.delete()
+            val jsonFile = File(file.parentFile, file.nameWithoutExtension + ".json")
+            if (jsonFile.exists()) jsonFile.delete()
             file.delete()
         } catch (e: Exception) {
             false
@@ -222,26 +292,48 @@ object DialogueHistoryManager {
     }
 
     /**
-     * Форматировать список реплик в аккуратный текстовый блок для копирования
+     * Форматировать список реплик в аккуратный текстовый блок для копирования или отправки.
+     * Без технической телеметрии (CHUNK_STREAMING, WEBSOCKET и т.д.).
      */
     fun formatDialogueText(turns: List<DialogueTurn>, includeOriginal: Boolean, sessionDate: String? = null): String {
         val meaningful = turns.filter { it.italianText.isNotBlank() || it.russianText.isNotBlank() }
         if (meaningful.isEmpty()) return ""
 
         val sb = StringBuilder()
-        val title = if (sessionDate != null) "=== POCKET HUD ДИАЛОГ ($sessionDate) ===" else "=== POCKET HUD ДИАЛОГ ==="
+        val title = if (sessionDate != null) "# 🎙️ PocketHUD — Диалог ($sessionDate)" else "# 🎙️ PocketHUD — Диалог"
         sb.appendLine(title)
+        sb.appendLine("Всего реплик: ${meaningful.size}")
+        sb.appendLine()
+        sb.appendLine("---")
+        sb.appendLine()
+
         for (t in meaningful) {
-            if (includeOriginal && t.italianText.isNotBlank()) {
-                sb.appendLine("🇮🇹/🇬🇧 ${t.italianText}")
+            val timeStr = timeFormat.format(Date(t.timestamp))
+            if (includeOriginal) {
+                sb.appendLine("[$timeStr]")
+                if (t.italianText.isNotBlank()) {
+                    sb.appendLine("🇮🇹 IT: ${t.italianText.trim()}")
+                }
+                if (t.russianText.isNotBlank()) {
+                    sb.appendLine("➔ 🇷🇺 ${t.russianText.trim()}")
+                } else if (t.isFinalized) {
+                    sb.appendLine("⚠️ RU: (перевод не получен)")
+                } else {
+                    sb.appendLine("⏳ RU: (ожидание перевода...)")
+                }
+                sb.appendLine()
+            } else {
+                val ru = t.russianText.trim()
+                if (ru.isNotBlank()) {
+                    sb.appendLine("[$timeStr] 🇷🇺 $ru")
+                    sb.appendLine()
+                } else if (t.isFinalized) {
+                    sb.appendLine("[$timeStr] ⚠️ (перевод не получен)")
+                    sb.appendLine()
+                }
             }
-            if (t.russianText.isNotBlank()) {
-                sb.appendLine("➔ 🇷🇺 ${t.russianText}")
-            }
-            sb.appendLine()
         }
-        sb.appendLine("=========================================")
-        return sb.toString().trim()
+        return sb.toString().trim() + "\n"
     }
 
     private fun serializeTurnsToJson(turns: List<DialogueTurn>, timestamp: Long): JSONObject {
@@ -303,6 +395,8 @@ object DialogueHistoryManager {
             val sorted = files.sortedBy { it.lastModified() }
             val toDelete = sorted.take(files.size - MAX_SAVED_SESSIONS)
             for (f in toDelete) {
+                val txtFile = File(dir, f.nameWithoutExtension + ".txt")
+                if (txtFile.exists()) txtFile.delete()
                 f.delete()
             }
         }

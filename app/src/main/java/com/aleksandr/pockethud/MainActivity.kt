@@ -62,6 +62,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var dialogueCard: LinearLayout
     private lateinit var dialogueTitleText: TextView
     private lateinit var copyDialogueBtn: TextView
+    private lateinit var shareDialogueBtn: TextView
     private lateinit var historyDialogueBtn: TextView
     private lateinit var clearDialogueBtn: TextView
     private lateinit var showOriginalCheckBox: MaterialCheckBox
@@ -95,6 +96,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var toggleBtn: Button
     private lateinit var muteBtn: Button
+    private lateinit var shareDialogueDockBtn: Button
     private lateinit var shareLogBtn: Button
     private lateinit var copySummaryBtn: Button
 
@@ -572,6 +574,48 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun shareDialogue(
+        customTurns: List<DialogueTurn>? = null,
+        customDate: String? = null
+    ) {
+        val turns = customTurns ?: PocketService.getSessionDialogueTurns()
+        if (turns.isEmpty()) {
+            Toast.makeText(this, "История диалога пуста. Запустите суфлёр!", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val textToShare = DialogueHistoryManager.formatDialogueText(turns, showOriginalText, customDate)
+        val textFile = DialogueHistoryManager.saveSessionTextFile(this, turns, customDate)
+
+        try {
+            val uri: Uri = FileProvider.getUriForFile(
+                this,
+                "${applicationContext.packageName}.fileprovider",
+                textFile
+            )
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, textToShare)
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newRawUri("PocketHUD Dialogue", uri)
+                putExtra(Intent.EXTRA_SUBJECT, if (customDate != null) "PocketHUD Диалог ($customDate)" else "PocketHUD Диалог")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, "Поделиться диалогом PocketHUD"))
+        } catch (e: Exception) {
+            try {
+                val textIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, textToShare)
+                    putExtra(Intent.EXTRA_SUBJECT, "PocketHUD Диалог")
+                }
+                startActivity(Intent.createChooser(textIntent, "Поделиться диалогом PocketHUD"))
+            } catch (e2: Exception) {
+                Toast.makeText(this, "Ошибка отправки диалога: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     private fun setupServiceCallbacks() {
         PocketService.onStatusChanged = { status ->
             runOnUiThread {
@@ -795,6 +839,29 @@ class MainActivity : AppCompatActivity() {
             if (cached.isNotEmpty()) {
                 PocketService.restoreDialogueTurns(cached)
                 turns = PocketService.getSessionDialogueTurns()
+            } else {
+                val sessions = DialogueHistoryManager.listSavedSessions(this)
+                if (sessions.isNotEmpty()) {
+                    val lastTurns = DialogueHistoryManager.loadSessionTurns(sessions.first().file)
+                    if (lastTurns.isNotEmpty()) {
+                        PocketService.restoreDialogueTurns(lastTurns)
+                        DialogueHistoryManager.saveCurrentSessionCache(this, lastTurns)
+                        turns = PocketService.getSessionDialogueTurns()
+                    }
+                }
+            }
+        }
+
+        if (turns.isNotEmpty()) {
+            val itText = PocketService.getSessionItalianText()
+            if (itText.isNotBlank() && (italianTranscriptText.text == IT_PLACEHOLDER || italianTranscriptText.text.isBlank())) {
+                italianTranscriptText.text = itText
+                italianTranscriptText.setTextColor(0xFFE8EAED.toInt())
+            }
+            val ruText = PocketService.getSessionRussianText()
+            if (ruText.isNotBlank() && (russianTranscriptText.text == RU_PLACEHOLDER || russianTranscriptText.text.isBlank())) {
+                russianTranscriptText.text = ruText
+                russianTranscriptText.setTextColor(0xFF81C995.toInt())
             }
         }
 
@@ -886,7 +953,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.33"
+            text = "v1.0.35"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
@@ -1183,36 +1250,30 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this@MainActivity, "История диалога пуста", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
-                val sb = StringBuilder()
-                if (showOriginalText) {
-                    sb.appendLine("=== POCKET HUD ДИАЛОГ ===")
-                    for (t in turns) {
-                        if (t.italianText.isNotBlank()) {
-                            sb.appendLine("🇮🇹 ${t.italianText}")
-                        }
-                        if (t.russianText.isNotBlank()) {
-                            sb.appendLine("➔ 🇷🇺 ${t.russianText}")
-                        }
-                        sb.appendLine()
-                    }
-                    sb.appendLine("=========================")
-                } else {
-                    val ruTurns = turns.filter { it.russianText.isNotBlank() }
-                    if (ruTurns.isEmpty()) {
-                        Toast.makeText(this@MainActivity, "Переводы ещё не получены", Toast.LENGTH_SHORT).show()
-                        return@setOnClickListener
-                    }
-                    sb.appendLine("=== POCKET HUD ПЕРЕВОД ===")
-                    for (t in ruTurns) {
-                        sb.appendLine(t.russianText)
-                    }
-                    sb.appendLine("=========================")
-                }
-                copyToClipboard("PocketHUD Dialogue", sb.toString().trim())
+                val textToCopy = DialogueHistoryManager.formatDialogueText(turns, showOriginalText)
+                copyToClipboard("PocketHUD Dialogue", textToCopy.trim())
                 Toast.makeText(this@MainActivity, if (showOriginalText) "История диалога скопирована" else "Русский перевод диалога скопирован", Toast.LENGTH_SHORT).show()
             }
         }
         dialogueHeader.addView(copyDialogueBtn)
+
+        shareDialogueBtn = TextView(this).apply {
+            text = "📤 Поделиться"
+            textSize = 11f
+            setTextColor(0xFF81C995.toInt())
+            background = createRoundedDrawable(0xFF1B3828.toInt(), 0xFF2D5539.toInt(), 1, 6f)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(dp(6), 0, 0, 0) }
+            layoutParams = params
+            isClickable = true
+            setOnClickListener {
+                shareDialogue()
+            }
+        }
+        dialogueHeader.addView(shareDialogueBtn)
 
         historyDialogueBtn = TextView(this).apply {
             text = "📁 История"
@@ -1619,14 +1680,32 @@ class MainActivity : AppCompatActivity() {
             background = createButtonDrawable(0xFF1976D2.toInt(), 14f)
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
-            setPadding(dp(8), dp(10), dp(8), dp(10))
+            setPadding(dp(6), dp(10), dp(6), dp(10))
         }
         val muteParams = LinearLayout.LayoutParams(
             0,
             LinearLayout.LayoutParams.WRAP_CONTENT,
-            1.3f
+            1.1f
         ).apply { setMargins(0, 0, dp(6), 0) }
         bottomRow.addView(muteBtn, muteParams)
+
+        shareDialogueDockBtn = Button(this).apply {
+            text = "💬 ДИАЛОГ"
+            setTextColor(0xFFFFFFFF.toInt())
+            background = createButtonDrawable(0xFF1E3A5F.toInt(), 14f)
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(6), dp(10), dp(6), dp(10))
+            setOnClickListener {
+                shareDialogue()
+            }
+        }
+        val shareDiagParams = LinearLayout.LayoutParams(
+            0,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            1.1f
+        ).apply { setMargins(0, 0, dp(6), 0) }
+        bottomRow.addView(shareDialogueDockBtn, shareDiagParams)
 
         copySummaryBtn = Button(this).apply {
             text = "📋 СВОДКА"
@@ -1634,12 +1713,12 @@ class MainActivity : AppCompatActivity() {
             background = createButtonDrawable(0xFF2E333D.toInt(), 14f)
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
-            setPadding(dp(8), dp(10), dp(8), dp(10))
+            setPadding(dp(6), dp(10), dp(6), dp(10))
         }
         val copySummaryParams = LinearLayout.LayoutParams(
             0,
             LinearLayout.LayoutParams.WRAP_CONTENT,
-            1.0f
+            0.9f
         ).apply { setMargins(0, 0, dp(6), 0) }
         bottomRow.addView(copySummaryBtn, copySummaryParams)
 
@@ -1649,12 +1728,12 @@ class MainActivity : AppCompatActivity() {
             background = createButtonDrawable(0xFF1F3D2A.toInt(), 14f)
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
-            setPadding(dp(8), dp(10), dp(8), dp(10))
+            setPadding(dp(6), dp(10), dp(6), dp(10))
         }
         val shareLogParams = LinearLayout.LayoutParams(
             0,
             LinearLayout.LayoutParams.WRAP_CONTENT,
-            1.0f
+            0.9f
         )
         bottomRow.addView(shareLogBtn, shareLogParams)
 
@@ -1830,6 +1909,29 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 actionsRow.addView(copyBtn)
+
+                val shareBtn = TextView(this).apply {
+                    text = "📤"
+                    textSize = 11f
+                    setTextColor(0xFF8AB4F8.toInt())
+                    background = createRoundedDrawable(0xFF1F2B42.toInt(), cornerRadiusDp = 6f)
+                    setPadding(dp(8), dp(4), dp(8), dp(4))
+                    val params = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(dp(6), 0, 0, 0) }
+                    layoutParams = params
+                    isClickable = true
+                    setOnClickListener {
+                        val turns = DialogueHistoryManager.loadSessionTurns(session.file)
+                        if (turns.isNotEmpty()) {
+                            shareDialogue(turns, session.formattedDate)
+                        } else {
+                            Toast.makeText(this@MainActivity, "Сессия пуста", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                actionsRow.addView(shareBtn)
 
                 val deleteBtn = TextView(this).apply {
                     text = "🗑️"
