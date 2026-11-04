@@ -162,7 +162,7 @@ def parse_axml_manifest_info(apk_path):
         pos += c_size
     return info
 
-def inspect_full(apk_path, keystore_path, min_version_code=41, min_version_name="1.0.37"):
+def inspect_full(apk_path, keystore_path, min_version_code=42, min_version_name="1.0.38"):
     print(f"==================================================")
     print(f"Inspecting APK: {apk_path}")
     if not os.path.exists(apk_path):
@@ -236,7 +236,7 @@ def inspect_full(apk_path, keystore_path, min_version_code=41, min_version_name=
 def find_default_apks(base_dir):
     candidates = []
     # 1. Local APKs in base_dir
-    local_apk = os.path.join(base_dir, "PocketHUD_v1.0.37.apk")
+    local_apk = os.path.join(base_dir, "PocketHUD_v1.0.38.apk")
     if os.path.exists(local_apk):
         candidates.append(local_apk)
     
@@ -250,7 +250,7 @@ def find_default_apks(base_dir):
     for drive in drive_roots:
         if os.path.exists(drive):
             p1 = os.path.join(drive, "PocketHUD_latest.apk")
-            p2 = os.path.join(drive, "PocketHUD_v1.0.37.apk")
+            p2 = os.path.join(drive, "PocketHUD_v1.0.38.apk")
             if os.path.exists(p1) and p1 not in candidates:
                 candidates.append(p1)
             if os.path.exists(p2) and p2 not in candidates:

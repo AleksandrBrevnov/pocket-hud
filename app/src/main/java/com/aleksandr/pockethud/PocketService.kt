@@ -197,6 +197,12 @@ class PocketService : Service() {
     // Таймер Watchdog для ожидания setupComplete от Google Live (защита от зависания сессии)
     private var setupWatchdogRunnable: Runnable? = null
 
+    // Задача отложенного переподключения при ротации сессии (code=1000)
+    private var sessionRotationRunnable: Runnable? = null
+
+    // Флаг ожидания завершения фразы перед ротацией (Speech-Aware Graceful Rotation)
+    @Volatile private var isRotationPending = false
+
     // Активная карточка диалога (Single Active Card) и стриминг перевода
     @Volatile private var activeDialogueTurn: DialogueTurn? = null
     @Volatile private var activeTranslationTurnId: Long? = null
@@ -398,7 +404,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.37\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.38\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -455,7 +461,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.37 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.38 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -759,6 +765,22 @@ class PocketService : Service() {
                 DialogueHistoryManager.saveSession(this@PocketService, sessionDialogueTurns, isAutoArchive = true)
             } catch (e: Exception) {
                 // Игнорируем ошибки дискового ввода-вывода в фоновом цикле
+            }
+        }
+
+        if (isRotationPending) {
+            Log.d(tag, "Пауза в речи (idle timer), выполняется запланированная ротация goAway...")
+            goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+            goAwayRunnable = null
+            isRotationPending = false
+            val currentWs = webSocket
+            if (isRunning && currentWs != null) {
+                try {
+                    isSetupComplete = false
+                    currentWs.close(1000, "Clean session rotation")
+                } catch (e: Exception) {
+                    currentWs.cancel()
+                }
             }
         }
     }
@@ -1093,7 +1115,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.37")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.38")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1169,7 +1191,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.37")
+            appendLine("Версия: v1.0.38")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
@@ -1314,6 +1336,8 @@ class PocketService : Service() {
 
     private fun connectWebSocket(apiKey: String) {
         if (!isRunning) return
+        sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
+        sessionRotationRunnable = null
         connectionState = if (reconnectAttempts > 0) "RECONNECTING ($reconnectAttempts)" else "CONNECTING"
         logEvent("WEBSOCKET_CONNECTING", "(attempt=$reconnectAttempts)")
 
@@ -1328,6 +1352,7 @@ class PocketService : Service() {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
+                if (webSocket !== ws) return
                 Log.d(tag, "WebSocket открыт. Отправка Setup...")
                 isSetupComplete = false
                 connectionState = "OPEN (Sending Setup)"
@@ -1337,20 +1362,29 @@ class PocketService : Service() {
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
+                if (webSocket !== ws) return
                 handleServerMessage(text)
             }
 
             override fun onMessage(ws: WebSocket, bytes: ByteString) {
+                if (webSocket !== ws) return
                 handleServerMessage(bytes.utf8())
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+                if (webSocket !== ws) {
+                    Log.d(tag, "Игнорирование onFailure для устаревшего сокета: ${t.message}")
+                    return
+                }
                 isSetupComplete = false
                 setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
                 setupWatchdogRunnable = null
                 hasPendingTranslation = false
                 currentTurnInputSpeech = null
                 activeTranslationTurnId = null
+                isRotationPending = false
+                sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
+                sessionRotationRunnable = null
                 mainHandler.removeCallbacks(simulIdleRunnable)
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
@@ -1391,6 +1425,7 @@ class PocketService : Service() {
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                if (webSocket !== ws) return
                 Log.d(tag, "WebSocket закрывается ($code: $reason)")
                 isSetupComplete = false
                 setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -1401,6 +1436,10 @@ class PocketService : Service() {
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                if (webSocket !== ws && code != 1000) {
+                    Log.d(tag, "Игнорирование onClosed для устаревшего сокета ($code: $reason)")
+                    return
+                }
                 Log.d(tag, "WebSocket закрыт ($code: $reason)")
                 isSetupComplete = false
                 setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -1408,6 +1447,9 @@ class PocketService : Service() {
                 hasPendingTranslation = false
                 currentTurnInputSpeech = null
                 activeTranslationTurnId = null
+                isRotationPending = false
+                sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
+                sessionRotationRunnable = null
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
                 mainHandler.removeCallbacks(simulIdleRunnable)
@@ -1416,20 +1458,20 @@ class PocketService : Service() {
                         // Google 10-15 min Session Rotation: DO NOT call stopSelf()!
                         connectionState = "RECONNECTING (Rotation)"
                         activeTranslationTurnId = null
+                        webSocket = null
+                        audioSendQueue.clear()
                         logEvent("SESSION_ROTATION_RECONNECT", "code=$code, reason=$reason")
                         onStatusChanged?.invoke("🔄 Ротация сессии Google (15 мин). Мгновенное возобновление...")
-                        // Выдерживаем паузу 1.5с для освобождения сессии и квоты бэкендом Google Live
-                        mainHandler.postDelayed({
+                        val rotationTask = Runnable {
+                            sessionRotationRunnable = null
                             if (isRunning && activeApiKey.isNotBlank()) {
-                                try {
-                                    if (webSocket === ws) {
-                                        webSocket?.cancel()
-                                        webSocket = null
-                                    }
-                                } catch (e: Exception) {}
+                                audioSendQueue.clear()
                                 connectWebSocket(activeApiKey)
                             }
-                        }, 1500L)
+                        }
+                        sessionRotationRunnable = rotationTask
+                        // Выдерживаем паузу 1.5с для освобождения сессии и квоты бэкендом Google Live
+                        mainHandler.postDelayed(rotationTask, 1500L)
                     } else {
                         handleConnectionDrop("Сервер закрыл сокет ($code: $reason)")
                     }
@@ -1451,9 +1493,13 @@ class PocketService : Service() {
         hasPendingTranslation = false
         currentTurnInputSpeech = null
         activeTranslationTurnId = null
+        isRotationPending = false
+        sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
+        sessionRotationRunnable = null
         mainHandler.removeCallbacks(simulIdleRunnable)
         goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
         goAwayRunnable = null
+        audioSendQueue.clear()
         Log.e(tag, "Потеря соединения: $reason")
         logEvent("CONNECTION_DROP", reason)
         triggerFailureHaptic()
@@ -1483,6 +1529,7 @@ class PocketService : Service() {
     }
 
     private fun sendSetup(ws: WebSocket) {
+        audioSendQueue.clear()
         val setupObj = JSONObject().apply {
             put("model", "models/gemini-3.5-live-translate-preview")
             put("generationConfig", JSONObject().apply {
@@ -1531,6 +1578,7 @@ class PocketService : Service() {
             if (isRunning && !isSetupComplete && webSocket === ws) {
                 Log.w(tag, "Setup Complete Watchdog: ответ setupComplete не получен в течение 5с. Переподключение...")
                 logEvent("SETUP_TIMEOUT", "Waited 5s for setupComplete")
+                webSocket = null
                 try {
                     ws.cancel()
                 } catch (e: Exception) {}
@@ -1553,8 +1601,10 @@ class PocketService : Service() {
                 logEvent("SERVER_GO_AWAY", "timeLeft=$timeLeft")
                 Log.w(tag, "Получен сигнал goAway от Google Live (timeLeft=$timeLeft). Планирование чистой ротации...")
                 val currentWs = webSocket
+                isRotationPending = true
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
-                val runnable = Runnable {
+
+                fun performGracefulClose() {
                     if (isRunning && webSocket === currentWs) {
                         try {
                             isSetupComplete = false
@@ -1564,8 +1614,16 @@ class PocketService : Service() {
                         }
                     }
                 }
-                goAwayRunnable = runnable
-                mainHandler.postDelayed(runnable, 2000L)
+
+                if (activeTranslationTurnId != null || hasPendingTranslation) {
+                    val runnable = Runnable { performGracefulClose() }
+                    goAwayRunnable = runnable
+                    mainHandler.postDelayed(runnable, 8000L)
+                } else {
+                    val runnable = Runnable { performGracefulClose() }
+                    goAwayRunnable = runnable
+                    mainHandler.postDelayed(runnable, 2000L)
+                }
             }
 
             // 3. Подтверждение готовности setupComplete
@@ -1765,6 +1823,21 @@ class PocketService : Service() {
                                 val turnCopy = turn.copy()
                                 onDialogueTurnUpdated?.invoke(i, turnCopy, false)
                             }
+                        }
+                    }
+                }
+                if (isRotationPending) {
+                    Log.d(tag, "Ход завершён, выполняется запланированная ротация goAway...")
+                    goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+                    goAwayRunnable = null
+                    isRotationPending = false
+                    val currentWs = webSocket
+                    if (isRunning && currentWs != null) {
+                        try {
+                            isSetupComplete = false
+                            currentWs.close(1000, "Clean session rotation")
+                        } catch (e: Exception) {
+                            currentWs.cancel()
                         }
                     }
                 }
@@ -2130,6 +2203,9 @@ class PocketService : Service() {
         goAwayRunnable = null
         setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
         setupWatchdogRunnable = null
+        sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
+        sessionRotationRunnable = null
+        isRotationPending = false
         mainHandler.removeCallbacks(simulIdleRunnable)
 
         audioPlaybackQueue.clear()
