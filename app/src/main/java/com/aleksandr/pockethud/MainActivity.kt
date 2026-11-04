@@ -1,6 +1,7 @@
 package com.aleksandr.pockethud
 
 import android.Manifest
+import android.app.Dialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -12,9 +13,12 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.text.TextUtils
 import android.util.Log
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.view.Window
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -58,6 +62,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var dialogueCard: LinearLayout
     private lateinit var dialogueTitleText: TextView
     private lateinit var copyDialogueBtn: TextView
+    private lateinit var historyDialogueBtn: TextView
     private lateinit var clearDialogueBtn: TextView
     private lateinit var showOriginalCheckBox: MaterialCheckBox
     private lateinit var showOriginalBadge: TextView
@@ -784,7 +789,15 @@ class MainActivity : AppCompatActivity() {
         dialogueFeedLayout.removeAllViews()
         turnViewHolders.clear()
 
-        val turns = PocketService.getSessionDialogueTurns()
+        var turns = PocketService.getSessionDialogueTurns()
+        if (turns.isEmpty()) {
+            val cached = DialogueHistoryManager.loadCurrentSessionCache(this)
+            if (cached.isNotEmpty()) {
+                PocketService.restoreDialogueTurns(cached)
+                turns = PocketService.getSessionDialogueTurns()
+            }
+        }
+
         if (turns.isEmpty()) {
             dialogueEmptyPlaceholder.visibility = View.VISIBLE
             dialogueFeedLayout.addView(dialogueEmptyPlaceholder)
@@ -1201,6 +1214,24 @@ class MainActivity : AppCompatActivity() {
         }
         dialogueHeader.addView(copyDialogueBtn)
 
+        historyDialogueBtn = TextView(this).apply {
+            text = "📁 История"
+            textSize = 11f
+            setTextColor(0xFF8AB4F8.toInt())
+            background = createRoundedDrawable(0xFF1F2B42.toInt(), cornerRadiusDp = 6f)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(dp(6), 0, 0, 0) }
+            layoutParams = params
+            isClickable = true
+            setOnClickListener {
+                showSavedDialoguesDialog()
+            }
+        }
+        dialogueHeader.addView(historyDialogueBtn)
+
         clearDialogueBtn = TextView(this).apply {
             text = "🗑️ Очистить"
             textSize = 11f
@@ -1214,12 +1245,12 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
             isClickable = true
             setOnClickListener {
-                PocketService.clearDialogueTurns()
+                PocketService.clearDialogueTurns(this@MainActivity)
                 PocketService.clearSessionTexts()
                 restoreDialogueView()
                 resetItalianCard()
                 resetRussianCard()
-                Toast.makeText(this@MainActivity, "История диалога очищена", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "Диалог сохранён в историю и очищен с экрана", Toast.LENGTH_SHORT).show()
             }
         }
         dialogueHeader.addView(clearDialogueBtn)
@@ -1631,6 +1662,213 @@ class MainActivity : AppCompatActivity() {
         root.addView(dockLayout)
 
         return root
+    }
+
+    private fun showSavedDialoguesDialog() {
+        val sessions = DialogueHistoryManager.listSavedSessions(this)
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = createRoundedDrawable(0xFF131722.toInt(), 0xFF2A3448.toInt(), 2, 16f)
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+
+        // Заголовок
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(12)) }
+            layoutParams = params
+        }
+
+        val title = TextView(this).apply {
+            text = "📁 Сохранённые диалоги (${sessions.size})"
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(0xFFFFFFFF.toInt())
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+        }
+        header.addView(title)
+
+        val closeBtn = TextView(this).apply {
+            text = "✕"
+            textSize = 16f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(0xFF9AA0A6.toInt())
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            isClickable = true
+            setOnClickListener { dialog.dismiss() }
+        }
+        header.addView(closeBtn)
+        root.addView(header)
+
+        if (sessions.isEmpty()) {
+            val emptyText = TextView(this).apply {
+                text = "Нет сохранённых диалогов.\nРазговоры сохраняются автоматически при остановке суфлёра или очистке экрана."
+                textSize = 12.5f
+                setTextColor(0xFF80868B.toInt())
+                gravity = Gravity.CENTER
+                setPadding(dp(12), dp(24), dp(12), dp(24))
+            }
+            root.addView(emptyText)
+        } else {
+            val scroll = ScrollView(this).apply {
+                val params = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(420)
+                ).apply { setMargins(0, 0, 0, dp(10)) }
+                layoutParams = params
+            }
+
+            val listContainer = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+
+            for (session in sessions) {
+                val itemCard = LinearLayout(this).apply {
+                    orientation = LinearLayout.VERTICAL
+                    background = createRoundedDrawable(0xFF1C2230.toInt(), 0xFF2D384E.toInt(), 1, 12f)
+                    setPadding(dp(12), dp(10), dp(12), dp(10))
+                    val params = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(0, 0, 0, dp(8)) }
+                    layoutParams = params
+                }
+
+                // Дата и число реплик
+                val metaRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                }
+                val dateText = TextView(this).apply {
+                    text = "📅 ${session.formattedDate}"
+                    textSize = 12f
+                    typeface = Typeface.DEFAULT_BOLD
+                    setTextColor(0xFF8AB4F8.toInt())
+                    val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    layoutParams = params
+                }
+                metaRow.addView(dateText)
+
+                val countBadge = TextView(this).apply {
+                    text = "${session.turnCount} реплик"
+                    textSize = 10f
+                    setTextColor(0xFFA8C7FA.toInt())
+                    background = createRoundedDrawable(0xFF28344E.toInt(), cornerRadiusDp = 6f)
+                    setPadding(dp(6), dp(2), dp(6), dp(2))
+                }
+                metaRow.addView(countBadge)
+                itemCard.addView(metaRow)
+
+                // Превью
+                val previewText = TextView(this).apply {
+                    text = session.preview
+                    textSize = 11.5f
+                    setTextColor(0xFFD2E3FC.toInt())
+                    maxLines = 2
+                    ellipsize = TextUtils.TruncateAt.END
+                    val params = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(0, dp(4), 0, dp(8)) }
+                    layoutParams = params
+                }
+                itemCard.addView(previewText)
+
+                // Кнопки действий
+                val actionsRow = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.END
+                }
+
+                val loadBtn = TextView(this).apply {
+                    text = "📂 Загрузить"
+                    textSize = 11f
+                    setTextColor(0xFF81C995.toInt())
+                    background = createRoundedDrawable(0xFF1C3829.toInt(), cornerRadiusDp = 6f)
+                    setPadding(dp(8), dp(4), dp(8), dp(4))
+                    isClickable = true
+                    setOnClickListener {
+                        val turns = DialogueHistoryManager.loadSessionTurns(session.file)
+                        if (turns.isNotEmpty()) {
+                            PocketService.restoreDialogueTurns(turns)
+                            DialogueHistoryManager.saveCurrentSessionCache(this@MainActivity, turns)
+                            restoreDialogueView()
+                            Toast.makeText(this@MainActivity, "Сессия от ${session.formattedDate} загружена на экран", Toast.LENGTH_SHORT).show()
+                            dialog.dismiss()
+                        } else {
+                            Toast.makeText(this@MainActivity, "Ошибка загрузки сессии", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+                actionsRow.addView(loadBtn)
+
+                val copyBtn = TextView(this).apply {
+                    text = "📋 Копировать"
+                    textSize = 11f
+                    setTextColor(0xFFE8EAED.toInt())
+                    background = createRoundedDrawable(0xFF2E384D.toInt(), cornerRadiusDp = 6f)
+                    setPadding(dp(8), dp(4), dp(8), dp(4))
+                    val params = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(dp(6), 0, 0, 0) }
+                    layoutParams = params
+                    isClickable = true
+                    setOnClickListener {
+                        val turns = DialogueHistoryManager.loadSessionTurns(session.file)
+                        val textToCopy = DialogueHistoryManager.formatDialogueText(turns, showOriginalText, session.formattedDate)
+                        copyToClipboard("PocketHUD Dialogue ${session.formattedDate}", textToCopy)
+                        Toast.makeText(this@MainActivity, "Диалог от ${session.formattedDate} скопирован", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                actionsRow.addView(copyBtn)
+
+                val deleteBtn = TextView(this).apply {
+                    text = "🗑️"
+                    textSize = 11f
+                    setTextColor(0xFFF28B82.toInt())
+                    background = createRoundedDrawable(0xFF3C2020.toInt(), cornerRadiusDp = 6f)
+                    setPadding(dp(8), dp(4), dp(8), dp(4))
+                    val params = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(dp(6), 0, 0, 0) }
+                    layoutParams = params
+                    isClickable = true
+                    setOnClickListener {
+                        DialogueHistoryManager.deleteSession(session.file)
+                        Toast.makeText(this@MainActivity, "Сессия удалена", Toast.LENGTH_SHORT).show()
+                        dialog.dismiss()
+                        showSavedDialoguesDialog() // Обновляем список
+                    }
+                }
+                actionsRow.addView(deleteBtn)
+
+                itemCard.addView(actionsRow)
+                listContainer.addView(itemCard)
+            }
+
+            scroll.addView(listContainer)
+            root.addView(scroll)
+        }
+
+        dialog.setContentView(root)
+        dialog.window?.let { w ->
+            w.setLayout(
+                (resources.displayMetrics.widthPixels * 0.92).toInt(),
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            w.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+        }
+        dialog.show()
     }
 
     override fun onDestroy() {

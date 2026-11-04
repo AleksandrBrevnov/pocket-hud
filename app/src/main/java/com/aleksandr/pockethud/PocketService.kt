@@ -292,11 +292,26 @@ class PocketService : Service() {
             }
         }
 
-        fun clearDialogueTurns() {
+        fun clearDialogueTurns(context: Context? = null) {
+            if (context != null) {
+                // Перед очисткой экрана архивируем сессию в историю, чтобы ничего не потерялось
+                synchronized(sessionDialogueTurns) {
+                    DialogueHistoryManager.saveSession(context, sessionDialogueTurns)
+                }
+            }
             synchronized(sessionDialogueTurns) {
                 sessionDialogueTurns.clear()
             }
-            currentInstance?.activeDialogueTurn = null
+            context?.let { DialogueHistoryManager.clearCurrentSessionCache(it) }
+            currentInstance?.clearActiveDialogueTurn()
+        }
+
+        fun restoreDialogueTurns(turns: List<DialogueTurn>) {
+            synchronized(sessionDialogueTurns) {
+                sessionDialogueTurns.clear()
+                sessionDialogueTurns.addAll(turns)
+            }
+            currentInstance?.clearActiveDialogueTurn()
         }
 
         // Буферы текущей активной сессии для восстановления в UI при разблокировке экрана
@@ -682,6 +697,10 @@ class PocketService : Service() {
         updateOngoingNotification(latest, history)
     }
 
+    fun clearActiveDialogueTurn() {
+        activeDialogueTurn = null
+    }
+
     private fun finalizeCurrentTurn() {
         mainHandler.removeCallbacks(simulIdleRunnable)
         activeTranslationTurnId = null
@@ -706,6 +725,13 @@ class PocketService : Service() {
             }
             hasPendingTranslation = false
             currentTurnInputSpeech = null
+
+            // Автосохранение кэша текущей сессии при финализации реплики
+            try {
+                DialogueHistoryManager.saveCurrentSessionCache(this@PocketService, sessionDialogueTurns)
+            } catch (e: Exception) {
+                // Игнорируем ошибки дискового ввода-вывода в фоновом цикле
+            }
         }
     }
 
@@ -817,8 +843,9 @@ class PocketService : Service() {
                     }
                 }
                 // Приоритет 3: Активная диалоговая карточка (Single Active Card)
-                if (targetIdx == -1 && activeDialogueTurn != null) {
-                    targetIdx = sessionDialogueTurns.indexOf(activeDialogueTurn)
+                val curActive = activeDialogueTurn
+                if (targetIdx == -1 && curActive != null) {
+                    targetIdx = sessionDialogueTurns.indexOf(curActive)
                 }
                 // Приоритет 4: Любая последняя нефинализированная карточка
                 if (targetIdx == -1) {
@@ -2002,6 +2029,13 @@ class PocketService : Service() {
 
         // Сохраняем полный финальный снимок диагностики перед обнулением instance
         lastDiagnosticSnapshot = buildDiagnosticSnapshot()
+
+        // Автоматически архивируем завершённую сессию диалога в постоянную историю
+        try {
+            DialogueHistoryManager.saveSession(this, sessionDialogueTurns)
+        } catch (e: Exception) {
+            Log.e(tag, "Ошибка архивации диалога при остановке сервиса: ${e.message}", e)
+        }
 
         restoreAudioRouting()
         releaseHardwareEffects()
