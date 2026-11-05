@@ -162,7 +162,7 @@ def parse_axml_manifest_info(apk_path):
         pos += c_size
     return info
 
-def inspect_full(apk_path, keystore_path, min_version_code=43, min_version_name="1.0.39"):
+def inspect_full(apk_path, keystore_path, min_version_code=44, min_version_name="1.0.40"):
     print(f"==================================================")
     print(f"Inspecting APK: {apk_path}")
     if not os.path.exists(apk_path):
@@ -236,9 +236,12 @@ def inspect_full(apk_path, keystore_path, min_version_code=43, min_version_name=
 def find_default_apks(base_dir):
     candidates = []
     # 1. Local APKs in base_dir
-    local_apk = os.path.join(base_dir, "PocketHUD_v1.0.39.apk")
-    if os.path.exists(local_apk):
-        candidates.append(local_apk)
+    local_apk_40 = os.path.join(base_dir, "PocketHUD_v1.0.40.apk")
+    if os.path.exists(local_apk_40):
+        candidates.append(local_apk_40)
+    local_apk_39 = os.path.join(base_dir, "PocketHUD_v1.0.39.apk")
+    if os.path.exists(local_apk_39) and not os.path.exists(local_apk_40):
+        candidates.append(local_apk_39)
     
     # 2. Local Gradle build output
     build_apk = os.path.join(base_dir, "app", "build", "outputs", "apk", "debug", "app-debug.apk")
@@ -250,11 +253,14 @@ def find_default_apks(base_dir):
     for drive in drive_roots:
         if os.path.exists(drive):
             p1 = os.path.join(drive, "PocketHUD_latest.apk")
-            p2 = os.path.join(drive, "PocketHUD_v1.0.39.apk")
+            p2 = os.path.join(drive, "PocketHUD_v1.0.40.apk")
+            p3 = os.path.join(drive, "PocketHUD_v1.0.39.apk")
             if os.path.exists(p1) and p1 not in candidates:
                 candidates.append(p1)
             if os.path.exists(p2) and p2 not in candidates:
                 candidates.append(p2)
+            if os.path.exists(p3) and p3 not in candidates and not os.path.exists(p2):
+                candidates.append(p3)
     return candidates
 
 if __name__ == "__main__":

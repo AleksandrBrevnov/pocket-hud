@@ -237,6 +237,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        currentMicSource = PocketService.selectedMicSource
         setupServiceCallbacks()
         updateUi()
         updateMuteButtonUi()
@@ -651,6 +652,19 @@ class MainActivity : AppCompatActivity() {
         PocketService.onDialogueTurnUpdated = { turnIndex, turn, isNew ->
             onDialogueUpdated(turnIndex, turn, isNew)
         }
+
+        PocketService.onMuteStateChanged = { isMuted ->
+            runOnUiThread {
+                updateMuteButtonUi()
+            }
+        }
+
+        PocketService.onMicSourceChanged = { source ->
+            runOnUiThread {
+                currentMicSource = source
+                updateMicSourceStyles()
+            }
+        }
     }
 
     private fun createTurnViewHolder(turn: DialogueTurn): TurnViewHolder {
@@ -936,7 +950,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.39"
+            text = "v1.0.40"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)

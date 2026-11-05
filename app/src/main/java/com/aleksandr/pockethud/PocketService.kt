@@ -281,6 +281,12 @@ class PocketService : Service() {
         const val EXTRA_IS_MUTED = "extra_is_muted"
         const val EXTRA_MIC_SOURCE = "extra_mic_source"
 
+        // Wear OS / Xiaomi Watch 2 Companion Control Actions
+        const val ACTION_TOGGLE_MUTE = "com.aleksandr.pockethud.ACTION_TOGGLE_MUTE"
+        const val ACTION_SWITCH_MIC = "com.aleksandr.pockethud.ACTION_SWITCH_MIC"
+        const val ACTION_CLEAR_SUBTITLES = "com.aleksandr.pockethud.ACTION_CLEAR_SUBTITLES"
+        const val ACTION_STOP_SERVICE = "com.aleksandr.pockethud.ACTION_STOP_SERVICE"
+
         @Volatile
         var isServiceActive = false
 
@@ -304,6 +310,8 @@ class PocketService : Service() {
         @Volatile var onInputTextReceived: ((String) -> Unit)? = null
         @Volatile var onDialogueTurnUpdated: ((turnIndex: Int, turn: DialogueTurn, isNew: Boolean) -> Unit)? = null
         @Volatile var onTelemetryUpdated: ((micAmp: Int, chunks: Long, responses: Long) -> Unit)? = null
+        @Volatile var onMuteStateChanged: ((Boolean) -> Unit)? = null
+        @Volatile var onMicSourceChanged: ((MicSource) -> Unit)? = null
 
         // Диалог текущей сессии (Google Translate Conversation Mode)
         private val sessionDialogueTurns = ArrayList<DialogueTurn>()
@@ -407,7 +415,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.39\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.40\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -421,8 +429,52 @@ class PocketService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val action = intent?.action
+        if (action != null) {
+            when (action) {
+                ACTION_TOGGLE_MUTE -> {
+                    isAudioMuted = !isAudioMuted
+                    triggerWearHapticFeedback()
+                    logEvent("WEAR_ACTION_TOGGLE_MUTE", "(isMuted=$isAudioMuted)")
+                    onMuteStateChanged?.invoke(isAudioMuted)
+                    applyMuteState(isAudioMuted)
+                    return START_STICKY
+                }
+                ACTION_SWITCH_MIC -> {
+                    val nextSource = if (selectedMicSource == MicSource.SMARTPHONE) MicSource.BLUETOOTH else MicSource.SMARTPHONE
+                    triggerWearHapticFeedback()
+                    logEvent("WEAR_ACTION_SWITCH_MIC", "(nextSource=$nextSource)")
+                    selectedMicSource = nextSource
+                    onMicSourceChanged?.invoke(nextSource)
+                    applyMicSourceChange(nextSource)
+                    return START_STICKY
+                }
+                ACTION_CLEAR_SUBTITLES -> {
+                    triggerWearHapticFeedback()
+                    logEvent("WEAR_ACTION_CLEAR_SUBTITLES")
+                    finalizeCurrentTurn()
+                    lastPostedSubtitleText = ""
+                    lastPostedSubtitleHistory = ""
+                    updateOngoingNotification(
+                        "🧹 Экран очищен",
+                        "Субтитры очищены. Ожидание новой реплики собеседника..."
+                    )
+                    return START_STICKY
+                }
+                ACTION_STOP_SERVICE -> {
+                    triggerWearHapticFeedback()
+                    logEvent("WEAR_ACTION_STOP_SERVICE")
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+            }
+        }
+
         val apiKey = intent?.getStringExtra(EXTRA_API_KEY) ?: ""
         if (apiKey.isBlank()) {
+            if (isRunning) {
+                return START_STICKY
+            }
             onStatusChanged?.invoke("🔴 Ошибка: API ключ пуст")
             stopSelf()
             return START_NOT_STICKY
@@ -464,7 +516,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.39 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.40 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -529,6 +581,9 @@ class PocketService : Service() {
             val modeStr = if (muted) "Карманный суфлёр (🔇 Режим только субтитров)" else "Карманный суфлёр (🔊 Звук в наушник)"
             val updatedFg = buildNotification(modeStr)
             nm?.notify(NOTIFICATION_ID, updatedFg)
+            if (lastPostedSubtitleText.isNotBlank()) {
+                updateOngoingNotification(lastPostedSubtitleText, lastPostedSubtitleHistory)
+            }
         } catch (e: Exception) {
             Log.w(tag, "Ошибка обновления уведомления при смене mute: ${e.message}")
         }
@@ -583,6 +638,11 @@ class PocketService : Service() {
                         if (isRunning) {
                             startRecordThread()
                         }
+                        mainHandler.post {
+                            if (lastPostedSubtitleText.isNotBlank()) {
+                                updateOngoingNotification(lastPostedSubtitleText, lastPostedSubtitleHistory)
+                            }
+                        }
                     } catch (e: Exception) {
                         logEvent("MIC_SOURCE_START_FAILED", "${e.message}")
                     }
@@ -610,6 +670,26 @@ class PocketService : Service() {
             }
         } catch (e: Exception) {
             Log.w(tag, "Не удалось выполнить виброотклик: ${e.message}")
+        }
+    }
+
+    private fun triggerWearHapticFeedback() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                vm?.defaultVibrator?.vibrate(VibrationEffect.createOneShot(35, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                val v = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    v?.vibrate(VibrationEffect.createOneShot(35, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    v?.vibrate(35)
+                }
+            }
+        } catch (e: Exception) {
+            // Ignore haptic errors
         }
     }
 
@@ -1156,6 +1236,71 @@ class PocketService : Service() {
         }
     }
 
+    private data class NotificationActionsBundle(
+        val muteAction: NotificationCompat.Action,
+        val switchMicAction: NotificationCompat.Action,
+        val clearAction: NotificationCompat.Action,
+        val stopAction: NotificationCompat.Action
+    )
+
+    private fun createNotificationActions(): NotificationActionsBundle {
+        val muteIntent = Intent(this, PocketService::class.java).apply { action = ACTION_TOGGLE_MUTE }
+        val mutePendingIntent = PendingIntent.getService(
+            this,
+            101,
+            muteIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val muteTitle = if (isAudioMuted) "🎙️ Включить" else "🔇 Заглушить"
+        val muteAction = NotificationCompat.Action.Builder(
+            if (isAudioMuted) android.R.drawable.ic_lock_silent_mode_off else android.R.drawable.ic_lock_silent_mode,
+            muteTitle,
+            mutePendingIntent
+        ).build()
+
+        val switchMicIntent = Intent(this, PocketService::class.java).apply { action = ACTION_SWITCH_MIC }
+        val switchMicPendingIntent = PendingIntent.getService(
+            this,
+            102,
+            switchMicIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val micTitle = if (selectedMicSource == MicSource.SMARTPHONE) "🎧 Гарнитура" else "📱 Смартфон"
+        val switchMicAction = NotificationCompat.Action.Builder(
+            android.R.drawable.ic_btn_speak_now,
+            micTitle,
+            switchMicPendingIntent
+        ).build()
+
+        val clearIntent = Intent(this, PocketService::class.java).apply { action = ACTION_CLEAR_SUBTITLES }
+        val clearPendingIntent = PendingIntent.getService(
+            this,
+            103,
+            clearIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val clearAction = NotificationCompat.Action.Builder(
+            android.R.drawable.ic_menu_delete,
+            "🧹 Очистить",
+            clearPendingIntent
+        ).build()
+
+        val stopIntent = Intent(this, PocketService::class.java).apply { action = ACTION_STOP_SERVICE }
+        val stopPendingIntent = PendingIntent.getService(
+            this,
+            104,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val stopAction = NotificationCompat.Action.Builder(
+            android.R.drawable.ic_menu_close_clear_cancel,
+            "⏹️ Стоп",
+            stopPendingIntent
+        ).build()
+
+        return NotificationActionsBundle(muteAction, switchMicAction, clearAction, stopAction)
+    }
+
     private fun buildNotification(text: String): Notification {
         val pendingIntent = PendingIntent.getActivity(
             this,
@@ -1166,12 +1311,18 @@ class PocketService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val actions = createNotificationActions()
+
         val wearableExtender = NotificationCompat.WearableExtender()
             .setContentIntentAvailableOffline(false)
             .setHintShowBackgroundOnly(false)
+            .setBridgeTag("pockethud_wear")
+            .addAction(actions.muteAction)
+            .addAction(actions.switchMicAction)
+            .addAction(actions.stopAction)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.39")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.40")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1181,6 +1332,9 @@ class PocketService : Service() {
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .addAction(actions.muteAction)
+            .addAction(actions.switchMicAction)
+            .addAction(actions.stopAction)
             .extend(wearableExtender)
             .build()
     }
@@ -1200,13 +1354,22 @@ class PocketService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val actions = createNotificationActions()
+
         val wearableExtender = NotificationCompat.WearableExtender()
             .setContentIntentAvailableOffline(false)
             .setHintShowBackgroundOnly(false)
+            .setBridgeTag("pockethud_wear")
+            .addAction(actions.muteAction)
+            .addAction(actions.switchMicAction)
+            .addAction(actions.clearAction)
+            .addAction(actions.stopAction)
 
         // 1. Обновляем статус постоянного сервиса
+        val micStatus = if (selectedMicSource == MicSource.SMARTPHONE) "📱 Смартфон" else "🎧 Гарнитура"
+        val fgTitle = if (isAudioMuted) "PocketHUD — MUTE" else "PocketHUD — Перевод ($micStatus)"
         val fgNotification = NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Перевод")
+            .setContentTitle(fgTitle)
             .setContentText(latestText)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1216,16 +1379,21 @@ class PocketService : Service() {
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .addAction(actions.muteAction)
+            .addAction(actions.switchMicAction)
+            .addAction(actions.stopAction)
             .extend(wearableExtender)
             .build()
         nm.notify(NOTIFICATION_ID, fgNotification)
 
         // 2. Карточка субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         // setOngoing(false) критично: Wear OS 5 и Mi Fitness скрывают ongoing карточки из карусели!
+        val watchTitle = if (isAudioMuted) "PocketHUD [🔇 MUTE]" else "PocketHUD [🎙️ $micStatus]"
+        val watchBody = if (fullHistory.isNotBlank()) fullHistory else latestText
         val subtitleNotification = NotificationCompat.Builder(this, CHANNEL_SUBTITLES_ID)
-            .setContentTitle("PocketHUD (Субтитры)")
+            .setContentTitle(watchTitle)
             .setContentText(latestText)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(fullHistory))
+            .setStyle(NotificationCompat.BigTextStyle().bigText(watchBody))
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
             .setOngoing(false) // КРИТИЧНО для Wear OS 5!
@@ -1234,6 +1402,10 @@ class PocketService : Service() {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .addAction(actions.muteAction)
+            .addAction(actions.switchMicAction)
+            .addAction(actions.clearAction)
+            .addAction(actions.stopAction)
             .extend(wearableExtender)
             .build()
         nm.notify(SUBTITLE_NOTIFICATION_ID, subtitleNotification)
@@ -1247,7 +1419,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.39")
+            appendLine("Версия: v1.0.40")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
