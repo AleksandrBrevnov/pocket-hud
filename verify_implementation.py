@@ -128,16 +128,16 @@ with open(build_gradle_path, "r", encoding="utf-8") as f:
 with open(setup_and_push_path, "r", encoding="utf-8") as f:
     setup_code = f.read()
 
-print("\n--- 1. Verification of v1.0.38 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 42' in gradle_code, "versionCode 42 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.38"' in gradle_code, "versionName 1.0.38 missing in app/build.gradle.kts"
+print("\n--- 1. Verification of v1.0.39 Version Bumps & Fixed Keystore ---")
+assert 'versionCode = 43' in gradle_code, "versionCode 43 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.39"' in gradle_code, "versionName 1.0.39 missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
 assert os.path.exists(debug_keystore_path), "app/debug.keystore missing on disk"
-assert 'text = "v1.0.38"' in main_code, "v1.0.38 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.38' in service_code, "v1.0.38 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.38 активен' in service_code, "v1.0.38 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.38' in service_code, "v1.0.38 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.38 and fixed debug.keystore OK across all files.")
+assert 'text = "v1.0.39"' in main_code, "v1.0.39 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.39' in service_code, "v1.0.39 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.39 активен' in service_code, "v1.0.39 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.39' in service_code, "v1.0.39 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.39 and fixed debug.keystore OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation, Watchdog & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -1092,7 +1092,7 @@ assert "val curActive = activeDialogueTurn" in service_code, "curActive local va
 assert "historyDialogueBtn" in main_code, "historyDialogueBtn button missing in MainActivity.kt"
 assert "📁 История" in main_code, "📁 История button label missing in MainActivity.kt"
 assert "showSavedDialoguesDialog" in main_code, "showSavedDialoguesDialog method missing in MainActivity.kt"
-assert "DialogueHistoryManager.loadCurrentSessionCache" in main_code, "loadCurrentSessionCache call missing in restoreDialogueView"
+assert "DialogueHistoryManager.loadCurrentSessionCache" not in main_code, "loadCurrentSessionCache must be removed from MainActivity to guarantee clean startup screen"
 assert "PocketService.clearDialogueTurns(this" in main_code, "clearDialogueTurns with context missing in MainActivity.kt"
 
 # 4. Functional Test: Simulated dialogue session serialization, deserialization, and preview formatting
@@ -1147,7 +1147,90 @@ assert "➔ 🇷🇺 Я выиграл 41 000 евро!" in formatted_text
 
 print("  -> Dialogue Persistence & Saved Sessions verified perfectly.")
 
+print("\n--- 12. Verification of v1.0.39 Enhancements & Guardrails ---")
+
+# 1. Clean Startup Screen:
+assert "val turns = PocketService.getSessionDialogueTurns()" in main_code, "Direct retrieval of session dialogue turns missing in MainActivity"
+assert "DialogueHistoryManager.loadCurrentSessionCache" not in main_code, "Automatic restore of cached past sessions must be purged from MainActivity"
+
+# 2. ASR Prefix Overlap Resolution:
+assert "inputTrim.startsWith(currentText" in service_code, "inputTrim.startsWith(currentText) check missing in PocketService.kt"
+assert "currentText.startsWith(inputTrim" in service_code, "currentText.startsWith(inputTrim) check missing in PocketService.kt"
+
+# Prefix Overlap Simulation Test:
+def sim_prefix_overlap_resolve(currentText, incomingInput):
+    c_trim = currentText.strip()
+    i_trim = incomingInput.strip()
+    if not c_trim:
+        return incomingInput
+    if i_trim.lower().startswith(c_trim.lower()):
+        return incomingInput
+    if c_trim.lower().startswith(i_trim.lower()):
+        return currentText
+    return appendWithPunctuationAwareSpace(currentText, incomingInput)
+
+assert sim_prefix_overlap_resolve("No, io non ho mai", "No, io non ho mai visto") == "No, io non ho mai visto"
+assert sim_prefix_overlap_resolve("No, io non ho mai visto", "No, io non ho mai") == "No, io non ho mai visto"
+assert sim_prefix_overlap_resolve("Ciao.", "Come stai?") == "Ciao. Come stai?"
+
+# 3. Prevent Zombie Card Resurrection:
+assert "(!it.isFinalized || (nowTime - it.lastActivityTime < 4000L))" not in service_code, "4-second resurrection of finalized cards must be purged from Priority 2"
+assert "it.italianText.isNotBlank() && it.russianText.isBlank() && !it.isFinalized" in service_code, "Priority 2 must strictly require !it.isFinalized"
+assert "curActive != null && !curActive.isFinalized" in service_code, "Priority 3 must strictly require !curActive.isFinalized"
+record_speech_pos = service_code.find("private fun recordInputSpeech")
+finalize_pos = service_code.find("private fun finalizeCurrentTurn")
+finalize_block = service_code[finalize_pos:record_speech_pos]
+assert "turn.lastActivityTime = now" not in finalize_block, "simulIdleRunnable / finalizeCurrentTurn must not bump lastActivityTime"
+
+# 4. Attention Sink Watchdog:
+assert "@Volatile private var lastAsrPhrase: String? = null" in service_code, "lastAsrPhrase field missing in PocketService.kt"
+assert "@Volatile private var consecutiveAsrRepeatCount = 0" in service_code, "consecutiveAsrRepeatCount field missing in PocketService.kt"
+assert "ATTENTION_SINK_WATCHDOG" in service_code, "ATTENTION_SINK_WATCHDOG log missing in PocketService.kt"
+assert "micPeakAmplitude <= 1" in service_code, "micPeakAmplitude <= 1% check missing in PocketService.kt"
+assert "consecutiveAsrRepeatCount >= 3" in service_code, "3+ consecutive repeats threshold missing in PocketService.kt"
+assert "Attention sink watchdog session rotation" in service_code, "Watchdog rotation reason missing in PocketService.kt"
+
+# Attention Sink Simulation Test:
+class AttentionSinkSimulator:
+    def __init__(self):
+        self.lastAsrPhrase = None
+        self.consecutiveAsrRepeatCount = 0
+        self.sessionRotated = False
+    
+    def onAsrReceived(self, text, micPeak):
+        trimmed = text.strip()
+        if not trimmed: return "EMPTY"
+        if self.lastAsrPhrase and trimmed.lower() == self.lastAsrPhrase.lower() and micPeak <= 1:
+            self.consecutiveAsrRepeatCount += 1
+            if self.consecutiveAsrRepeatCount >= 3:
+                self.sessionRotated = True
+                self.consecutiveAsrRepeatCount = 0
+                self.lastAsrPhrase = None
+                return "ROTATE"
+        else:
+            self.lastAsrPhrase = trimmed
+            self.consecutiveAsrRepeatCount = 1 if micPeak <= 1 else 0
+        return "OK"
+
+watchdog = AttentionSinkSimulator()
+assert watchdog.onAsrReceived("Sì.", micPeak=0) == "OK"
+assert watchdog.consecutiveAsrRepeatCount == 1
+assert watchdog.onAsrReceived("Sì.", micPeak=1) == "OK"
+assert watchdog.consecutiveAsrRepeatCount == 2
+assert watchdog.onAsrReceived("Sì.", micPeak=1) == "ROTATE"
+assert watchdog.sessionRotated == True
+assert watchdog.consecutiveAsrRepeatCount == 0
+
+# If speech amplitude is real (> 1%), repetition does not trigger watchdog:
+watchdog2 = AttentionSinkSimulator()
+assert watchdog2.onAsrReceived("Bravo.", micPeak=15) == "OK"
+assert watchdog2.onAsrReceived("Bravo.", micPeak=12) == "OK"
+assert watchdog2.onAsrReceived("Bravo.", micPeak=10) == "OK"
+assert watchdog2.sessionRotated == False
+
+print("  -> v1.0.39 Clean Startup, Prefix Overlap Resolution, Zombie Prevention & Attention Sink Watchdog verified perfectly.")
+
 print("\n=======================================================")
-print("🎉 ALL V1.0.38 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.39 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
 

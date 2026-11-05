@@ -833,24 +833,7 @@ class MainActivity : AppCompatActivity() {
         dialogueFeedLayout.removeAllViews()
         turnViewHolders.clear()
 
-        var turns = PocketService.getSessionDialogueTurns()
-        if (turns.isEmpty()) {
-            val cached = DialogueHistoryManager.loadCurrentSessionCache(this)
-            if (cached.isNotEmpty()) {
-                PocketService.restoreDialogueTurns(cached)
-                turns = PocketService.getSessionDialogueTurns()
-            } else {
-                val sessions = DialogueHistoryManager.listSavedSessions(this)
-                if (sessions.isNotEmpty()) {
-                    val lastTurns = DialogueHistoryManager.loadSessionTurns(sessions.first().file)
-                    if (lastTurns.isNotEmpty()) {
-                        PocketService.restoreDialogueTurns(lastTurns)
-                        DialogueHistoryManager.saveCurrentSessionCache(this, lastTurns)
-                        turns = PocketService.getSessionDialogueTurns()
-                    }
-                }
-            }
-        }
+        val turns = PocketService.getSessionDialogueTurns()
 
         if (turns.isNotEmpty()) {
             val itText = PocketService.getSessionItalianText()
@@ -953,7 +936,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.38"
+            text = "v1.0.39"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)

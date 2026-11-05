@@ -247,6 +247,9 @@ class PocketService : Service() {
     @Volatile private var connectionState = "DISCONNECTED"
     @Volatile private var activeAudioSource = "NONE"
     @Volatile private var serviceStartTime = 0L
+    // Attention Sink Watchdog: детекция галлюцинаторного зацикливания ASR в тишине
+    @Volatile private var lastAsrPhrase: String? = null
+    @Volatile private var consecutiveAsrRepeatCount = 0
     private val recentTranslations = StringBuilder()
 
     // Состояние переподключения и троттлинга
@@ -404,7 +407,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.38\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.39\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -461,7 +464,7 @@ class PocketService : Service() {
         // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
         updateOngoingNotification(
             "🔵 Подключение...",
-            "PocketHUD v1.0.38 активен. Ожидание подключения к Gemini Live API..."
+            "PocketHUD v1.0.39 активен. Ожидание подключения к Gemini Live API..."
         )
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -744,7 +747,7 @@ class PocketService : Service() {
                 val turn = sessionDialogueTurns[i]
                 if (!turn.isFinalized) {
                     turn.isFinalized = true
-                    turn.lastActivityTime = now
+                    // Idle timer finalization preserves original speech timestamp to prevent zombie resurrection
                     if (turn.russianText.isBlank()) {
                         val origPrompt = turn.italianText.ifBlank { null }
                             ?: currentTurnInputSpeech
@@ -786,6 +789,32 @@ class PocketService : Service() {
     }
 
     private fun recordInputSpeech(cleanedInput: String) {
+        val trimmedInput = cleanedInput.trim()
+        if (trimmedInput.isNotEmpty()) {
+            if (trimmedInput.equals(lastAsrPhrase, ignoreCase = true) && micPeakAmplitude <= 1) {
+                consecutiveAsrRepeatCount++
+                if (consecutiveAsrRepeatCount >= 3) {
+                    Log.w(tag, "Attention Sink Watchdog: фраза '$trimmedInput' повторилась $consecutiveAsrRepeatCount раз подряд при micPeakAmplitude <= 1%. Запуск ротации сессии...")
+                    logEvent("ATTENTION_SINK_WATCHDOG", "phrase=\"$trimmedInput\", count=$consecutiveAsrRepeatCount, mic_peak=$micPeakAmplitude%")
+                    consecutiveAsrRepeatCount = 0
+                    lastAsrPhrase = null
+                    val currentWs = webSocket
+                    if (isRunning && currentWs != null) {
+                        try {
+                            isSetupComplete = false
+                            currentWs.close(1000, "Attention sink watchdog session rotation")
+                        } catch (e: Exception) {
+                            currentWs.cancel()
+                        }
+                    }
+                    return
+                }
+            } else {
+                lastAsrPhrase = trimmedInput
+                consecutiveAsrRepeatCount = if (micPeakAmplitude <= 1) 1 else 0
+            }
+        }
+
         Log.d(tag, "Распознана речь (IT/EN): $cleanedInput")
         logEvent("INPUT_SPEECH:", "\"$cleanedInput\"")
         appendToSessionBuilder(sessionItalianBuilder, cleanedInput)
@@ -814,7 +843,14 @@ class PocketService : Service() {
 
             val lastTurn = activeDialogueTurn
             if (lastTurn != null) {
-                lastTurn.italianText = appendWithPunctuationAwareSpace(lastTurn.italianText, cleanedInput)
+                val currentText = lastTurn.italianText.trim()
+                val inputTrim = cleanedInput.trim()
+                lastTurn.italianText = when {
+                    currentText.isEmpty() -> cleanedInput
+                    inputTrim.startsWith(currentText, ignoreCase = true) -> cleanedInput
+                    currentText.startsWith(inputTrim, ignoreCase = true) -> lastTurn.italianText
+                    else -> appendWithPunctuationAwareSpace(lastTurn.italianText, cleanedInput)
+                }
                 lastTurn.lastActivityTime = now
                 lastRecognizedInput = lastTurn.italianText
                 currentTurnInputSpeech = lastTurn.italianText
@@ -888,17 +924,15 @@ class PocketService : Service() {
                     it.italianText.isNotBlank() && it.russianText.isNotBlank() && !it.isFinalized &&
                     (!isSentenceEnding(it.russianText) || isContinuation(it.russianText))
                 }
-                // Приоритет 2: Самая ранняя (FIFO) карточка речи, ожидающая перевод:
-                // нефинализированная ИЛИ только что закрытая (< 4 сек) с пустым русским текстом
+                // Приоритет 2: Самая ранняя (FIFO) нефинализированная карточка речи, ожидающая перевод
                 if (targetIdx == -1) {
                     targetIdx = sessionDialogueTurns.indexOfFirst {
-                        it.italianText.isNotBlank() && it.russianText.isBlank() &&
-                        (!it.isFinalized || (nowTime - it.lastActivityTime < 4000L))
+                        it.italianText.isNotBlank() && it.russianText.isBlank() && !it.isFinalized
                     }
                 }
                 // Приоритет 3: Активная диалоговая карточка (Single Active Card)
                 val curActive = activeDialogueTurn
-                if (targetIdx == -1 && curActive != null) {
+                if (targetIdx == -1 && curActive != null && !curActive.isFinalized) {
                     targetIdx = sessionDialogueTurns.indexOf(curActive)
                 }
                 // Приоритет 4: Любая последняя нефинализированная карточка
@@ -1115,7 +1149,7 @@ class PocketService : Service() {
             .setHintShowBackgroundOnly(false)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.38")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.39")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1191,7 +1225,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.38")
+            appendLine("Версия: v1.0.39")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
@@ -1338,6 +1372,8 @@ class PocketService : Service() {
         if (!isRunning) return
         sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
         sessionRotationRunnable = null
+        lastAsrPhrase = null
+        consecutiveAsrRepeatCount = 0
         connectionState = if (reconnectAttempts > 0) "RECONNECTING ($reconnectAttempts)" else "CONNECTING"
         logEvent("WEBSOCKET_CONNECTING", "(attempt=$reconnectAttempts)")
 
@@ -1453,6 +1489,8 @@ class PocketService : Service() {
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
                 mainHandler.removeCallbacks(simulIdleRunnable)
+                lastAsrPhrase = null
+                consecutiveAsrRepeatCount = 0
                 if (isRunning) {
                     if (code == 1000) {
                         // Google 10-15 min Session Rotation: DO NOT call stopSelf()!
