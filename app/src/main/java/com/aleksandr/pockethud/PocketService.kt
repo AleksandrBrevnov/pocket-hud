@@ -459,7 +459,6 @@ class PocketService : Service() {
                     pendingNotificationLatest = null
                     pendingNotificationHistory = null
                     recentTranslations.setLength(0)
-                    currentSentence = ""
                     lastPostedSubtitleText = "🧹 Экран очищен"
                     lastPostedSubtitleHistory = "Субтитры очищены. Ожидание новой реплики собеседника..."
                     updateOngoingNotification(
