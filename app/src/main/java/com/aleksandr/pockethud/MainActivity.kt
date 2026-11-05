@@ -950,7 +950,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.40"
+            text = "v1.0.41"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
@@ -1976,6 +1976,8 @@ class MainActivity : AppCompatActivity() {
         PocketService.onInputTextReceived = null
         PocketService.onTextReceived = null
         PocketService.onDialogueTurnUpdated = null
+        PocketService.onMuteStateChanged = null
+        PocketService.onMicSourceChanged = null
         super.onDestroy()
     }
 }

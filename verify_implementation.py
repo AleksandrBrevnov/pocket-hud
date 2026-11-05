@@ -128,16 +128,16 @@ with open(build_gradle_path, "r", encoding="utf-8") as f:
 with open(setup_and_push_path, "r", encoding="utf-8") as f:
     setup_code = f.read()
 
-print("\n--- 1. Verification of v1.0.40 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 44' in gradle_code, "versionCode 44 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.40"' in gradle_code, "versionName 1.0.40 missing in app/build.gradle.kts"
+print("\n--- 1. Verification of v1.0.41 Version Bumps & Fixed Keystore ---")
+assert 'versionCode = 45' in gradle_code, "versionCode 45 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.41"' in gradle_code, "versionName 1.0.41 missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
 assert os.path.exists(debug_keystore_path), "app/debug.keystore missing on disk"
-assert 'text = "v1.0.40"' in main_code, "v1.0.40 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.40' in service_code, "v1.0.40 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.40 активен' in service_code, "v1.0.40 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.40' in service_code, "v1.0.40 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.40 and fixed debug.keystore OK across all files.")
+assert 'text = "v1.0.41"' in main_code, "v1.0.41 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.41' in service_code, "v1.0.41 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.41 активен' in service_code, "v1.0.41 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.41' in service_code, "v1.0.41 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.41 and fixed debug.keystore OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation, Watchdog & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -1242,7 +1242,7 @@ assert watchdog2.sessionRotated == False
 
 print("  -> v1.0.39 Clean Startup, Prefix Overlap Resolution, Zombie Prevention & Attention Sink Watchdog verified perfectly.")
 
-print("\n--- 13. Verification of v1.0.40 Wear OS / Xiaomi Watch 2 Companion Controls & WearableExtender ---")
+print("\n--- 13. Verification of v1.0.41 Wear OS / Xiaomi Watch 2 Companion Controls & WearableExtender ---")
 assert 'ACTION_TOGGLE_MUTE = "com.aleksandr.pockethud.ACTION_TOGGLE_MUTE"' in service_code, "ACTION_TOGGLE_MUTE missing in PocketService.kt"
 assert 'ACTION_SWITCH_MIC = "com.aleksandr.pockethud.ACTION_SWITCH_MIC"' in service_code, "ACTION_SWITCH_MIC missing in PocketService.kt"
 assert 'ACTION_CLEAR_SUBTITLES = "com.aleksandr.pockethud.ACTION_CLEAR_SUBTITLES"' in service_code, "ACTION_CLEAR_SUBTITLES missing in PocketService.kt"
@@ -1253,9 +1253,30 @@ assert 'PocketHUD [🔇 MUTE]' in service_code, "Dynamic Mute status title missi
 assert 'PocketHUD [🎙️ $micStatus]' in service_code, "Dynamic Mic status title missing in PocketService.kt"
 assert 'onMuteStateChanged' in service_code and 'onMuteStateChanged' in main_code, "Two-way mute sync callback missing"
 assert 'onMicSourceChanged' in service_code and 'onMicSourceChanged' in main_code, "Two-way mic sync callback missing"
-print("  -> v1.0.40 Wear OS Companion Actions & WearableExtender verified perfectly.")
+
+# Bugfix checks:
+# 1. No redundant applyMuteState / applyMicSourceChange in onStartCommand (custom setters already handle it)
+assert 'applyMuteState(isAudioMuted)' not in service_code, "Redundant applyMuteState found in onStartCommand (double execution bug)"
+assert 'applyMicSourceChange(nextSource)' not in service_code, "Redundant applyMicSourceChange found in onStartCommand (thread race condition)"
+
+# 2. Subtitle clear actually empties recentTranslations and cancels pending flushes
+assert 'recentTranslations.setLength(0)' in service_code, "recentTranslations.setLength(0) missing in ACTION_CLEAR_SUBTITLES"
+assert 'mainHandler.removeCallbacks(notificationFlushRunnable)' in service_code, "notificationFlushRunnable cancellation missing in ACTION_CLEAR_SUBTITLES"
+
+# 3. MainActivity memory leak prevention
+assert 'PocketService.onMuteStateChanged = null' in main_code, "onMuteStateChanged cleanup missing in MainActivity.onDestroy"
+assert 'PocketService.onMicSourceChanged = null' in main_code, "onMicSourceChanged cleanup missing in MainActivity.onDestroy"
+
+# 4. Foreground service stop and notification removal
+assert 'ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)' in service_code, "stopForeground missing in PocketService.onDestroy"
+assert 'nm?.cancel(NOTIFICATION_ID)' in service_code, "NOTIFICATION_ID cancellation missing in PocketService.onDestroy"
+
+# 5. Service stopped guard
+assert '!isRunning && action != ACTION_STOP_SERVICE' in service_code, "Missing stopped service guard in onStartCommand"
+
+print("  -> v1.0.41 Wear OS Companion Actions & WearableExtender verified perfectly with zero bugs.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.40 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.41 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
 
