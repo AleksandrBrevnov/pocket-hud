@@ -666,6 +666,23 @@ class PocketService : Service() {
         }
     }
 
+    private fun isPrefixExpansion(longer: String, shorter: String): Boolean {
+        val l = longer.trim()
+        val s = shorter.trim()
+        if (s.isEmpty() || l.isEmpty()) return false
+        if (l.equals(s, ignoreCase = true)) return true
+        if (l.length > s.length && l.startsWith(s, ignoreCase = true)) {
+            val nextChar = l[s.length]
+            if (nextChar.isWhitespace() || nextChar in ",.;:!?'\"-…") return true
+        }
+        val sNorm = s.trimEnd('.', ',', ';', ':', '!', '?', '\'', '"', '-', '…')
+        if (sNorm.isNotEmpty() && l.length > sNorm.length && l.startsWith(sNorm, ignoreCase = true)) {
+            val nextChar = l[sNorm.length]
+            if (nextChar.isWhitespace() || nextChar in ",.;:!?'\"-…") return true
+        }
+        return false
+    }
+
     private fun splitSentences(text: String): List<String> {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return emptyList()
@@ -742,7 +759,6 @@ class PocketService : Service() {
         activeTranslationTurnId = null
         activeDialogueTurn = null
         synchronized(sessionDialogueTurns) {
-            val now = System.currentTimeMillis()
             for (i in 0 until sessionDialogueTurns.size) {
                 val turn = sessionDialogueTurns[i]
                 if (!turn.isFinalized) {
@@ -838,6 +854,9 @@ class PocketService : Service() {
                 if (idx != -1) {
                     onDialogueTurnUpdated?.invoke(idx, currentActive.copy(), false)
                 }
+                if (activeTranslationTurnId == currentActive.id) {
+                    activeTranslationTurnId = null
+                }
                 activeDialogueTurn = null
             }
 
@@ -847,8 +866,8 @@ class PocketService : Service() {
                 val inputTrim = cleanedInput.trim()
                 lastTurn.italianText = when {
                     currentText.isEmpty() -> cleanedInput
-                    inputTrim.startsWith(currentText, ignoreCase = true) -> cleanedInput
-                    currentText.startsWith(inputTrim, ignoreCase = true) -> lastTurn.italianText
+                    isPrefixExpansion(inputTrim, currentText) -> cleanedInput
+                    isPrefixExpansion(currentText, inputTrim) -> lastTurn.italianText
                     else -> appendWithPunctuationAwareSpace(lastTurn.italianText, cleanedInput)
                 }
                 lastTurn.lastActivityTime = now
@@ -913,7 +932,10 @@ class PocketService : Service() {
 
             // 1. Если есть активная карточка в процессе стриминга — продолжаем направлять чанки в неё
             if (activeTranslationTurnId != null) {
-                targetTurn = sessionDialogueTurns.find { it.id == activeTranslationTurnId }
+                targetTurn = sessionDialogueTurns.find { it.id == activeTranslationTurnId && !it.isFinalized }
+                if (targetTurn == null) {
+                    activeTranslationTurnId = null
+                }
             }
 
             // 2. Если активной карточки нет, ищем подходящую по приоритетам:
@@ -1418,6 +1440,8 @@ class PocketService : Service() {
                 hasPendingTranslation = false
                 currentTurnInputSpeech = null
                 activeTranslationTurnId = null
+                lastAsrPhrase = null
+                consecutiveAsrRepeatCount = 0
                 isRotationPending = false
                 sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
                 sessionRotationRunnable = null
@@ -1531,6 +1555,8 @@ class PocketService : Service() {
         hasPendingTranslation = false
         currentTurnInputSpeech = null
         activeTranslationTurnId = null
+        lastAsrPhrase = null
+        consecutiveAsrRepeatCount = 0
         isRotationPending = false
         sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
         sessionRotationRunnable = null

@@ -515,8 +515,7 @@ class SynchronousTurnStateMachine:
         for turn in self.sessionDialogueTurns:
             if not turn.isFinalized:
                 turn.isFinalized = True
-                if now is not None:
-                    turn.lastActivityTime = now
+                # Idle timer finalization preserves original speech timestamp to prevent zombie resurrection
                 if self.hasPendingTranslation and not turn.russianText.strip():
                     origPrompt = turn.italianText or self.currentTurnInputSpeech or self.lastRecognizedInput
                     self.logged_events.append(("TRANSLATION_EMPTY", f'ORIG="{origPrompt}"'))
@@ -564,12 +563,14 @@ class SynchronousTurnStateMachine:
         self.currentTurnInputSpeech = None
 
         targetTurn = None
-        # 1. If active streaming turn is bound, continue streaming into it
+        # 1. If active streaming turn is bound, continue streaming into it (strictly unfinalized)
         if self.activeTranslationTurnId is not None:
             for turn in self.sessionDialogueTurns:
-                if turn.id == self.activeTranslationTurnId:
+                if turn.id == self.activeTranslationTurnId and not turn.isFinalized:
                     targetTurn = turn
                     break
+            if targetTurn is None:
+                self.activeTranslationTurnId = None
 
         # 2. Otherwise search by priority
         if targetTurn is None:
@@ -583,11 +584,10 @@ class SynchronousTurnStateMachine:
                 ):
                     targetTurn = turn
                     break
-            # Priority 2: Earliest (FIFO) turn waiting for translation (unfinalized OR closed < 4000ms ago)
+            # Priority 2: Earliest (FIFO) turn waiting for translation (strictly unfinalized)
             if targetTurn is None:
                 for turn in self.sessionDialogueTurns:
-                    if (turn.italianText.strip() and not turn.russianText.strip() and
-                        (not turn.isFinalized or (now - turn.lastActivityTime < 4000))):
+                    if (turn.italianText.strip() and not turn.russianText.strip() and not turn.isFinalized):
                         targetTurn = turn
                         break
             # Priority 3: Last unfinalized turn
@@ -778,7 +778,7 @@ sm7.recordTranslationOutput("Хорошо.", now=7000, isFinished=True)
 assert sm7.sessionDialogueTurns[1].russianText == "Хорошо."
 assert sm7.sessionDialogueTurns[1].isFinalized == True
 
-# Scenario 9: Delayed translation arriving to finalized turn with blank Russian text attaches correctly
+# Scenario 9: Delayed translation arriving to finalized turn must NOT resurrect finalized card (anti-zombie guard)
 sm9 = SynchronousTurnStateMachine()
 sm9.recordInputSpeech("Ciao", now=1000)
 # Silence timeout triggers finalization before translation arrives
@@ -786,10 +786,11 @@ sm9.checkIdleTimer(now=3500)
 sm9.finalizeCurrentTurn()
 assert sm9.sessionDialogueTurns[0].isFinalized == True
 assert sm9.sessionDialogueTurns[0].russianText == ""
-# Delayed translation arrives
+# Delayed translation arrives -> anti-zombie guard prevents attaching to finalized card, creating fresh card
 sm9.recordTranslationOutput("Привет", now=3600, isFinished=True)
-assert len(sm9.sessionDialogueTurns) == 1, "Delayed translation must attach to existing turn with blank Russian text!"
-assert sm9.sessionDialogueTurns[0].russianText == "Привет"
+assert len(sm9.sessionDialogueTurns) == 2, "Delayed translation must NOT resurrect finalized card; must create new turn!"
+assert sm9.sessionDialogueTurns[0].isFinalized == True
+assert sm9.sessionDialogueTurns[1].russianText == "Привет"
 
 # Scenario 10: Abbreviations (sig., dott., руб.) and hesitation ellipsis (...) do not prematurely split cards
 sm10 = SynchronousTurnStateMachine()
@@ -842,65 +843,50 @@ assert sm12.logged_events[0] == ("TRANSLATION", 'ORIG="Quanto costa?" -> RU="С�
 
 # Scenario 13: Multiple sequential turns with delayed translations attach in FIFO order without orphan or inverted cards
 sm13 = SynchronousTurnStateMachine()
-sm13.recordInputSpeech("Uno", now=1000)
-sm13.checkIdleTimer(now=3050)
-assert sm13.sessionDialogueTurns[0].isFinalized == True
-assert sm13.sessionDialogueTurns[0].russianText == ""
+sm13.recordInputSpeech("Uno.", now=1000)
+sm13.recordInputSpeech("Due.", now=2000)
+sm13.recordInputSpeech("Tre.", now=3000)
 
-sm13.recordInputSpeech("Due", now=3100)
-sm13.checkIdleTimer(now=5150)
-assert sm13.sessionDialogueTurns[1].isFinalized == True
-assert sm13.sessionDialogueTurns[1].russianText == ""
-
-sm13.recordInputSpeech("Tre", now=5200)
-
-# Delayed translations arrive in chronological FIFO order (testing that wasFinalized preservation works without isFinished=True):
-sm13.recordTranslationOutput("Т_Один.", now=5300, isFinished=False)
-sm13.recordTranslationOutput("Т_Два.", now=5400, isFinished=False)
-sm13.recordTranslationOutput("Т_Три.", now=5500, isFinished=True)
+# Delayed translations arrive in chronological FIFO order (testing that FIFO preservation works):
+sm13.recordTranslationOutput("Т_Один.", now=3100, isFinished=False)
+sm13.recordTranslationOutput("Т_Два.", now=3200, isFinished=False)
+sm13.recordTranslationOutput("Т_Три.", now=3300, isFinished=True)
 
 assert len(sm13.sessionDialogueTurns) == 3
-assert sm13.sessionDialogueTurns[0].italianText == "Uno"
+assert sm13.sessionDialogueTurns[0].italianText == "Uno."
 assert sm13.sessionDialogueTurns[0].russianText == "Т_Один."
 assert sm13.sessionDialogueTurns[0].isFinalized == True
 
-assert sm13.sessionDialogueTurns[1].italianText == "Due"
+assert sm13.sessionDialogueTurns[1].italianText == "Due."
 assert sm13.sessionDialogueTurns[1].russianText == "Т_Два."
 assert sm13.sessionDialogueTurns[1].isFinalized == True
 
-assert sm13.sessionDialogueTurns[2].italianText == "Tre"
+assert sm13.sessionDialogueTurns[2].italianText == "Tre."
 assert sm13.sessionDialogueTurns[2].russianText == "Т_Три."
 assert sm13.sessionDialogueTurns[2].isFinalized == True
 
 for turn in sm13.sessionDialogueTurns:
     assert turn.russianText.strip() != "", f"Turn {turn.italianText} was left without translation!"
 
-# Scenario 14: Multi-chunk streaming into delayed/finalized turns preserves continuity and prevents orphan cards
+# Scenario 14: Multi-chunk streaming into turns preserves continuity and prevents orphan cards
 sm14 = SynchronousTurnStateMachine()
-sm14.recordInputSpeech("Uno", now=1000)
-sm14.checkIdleTimer(now=3050)
-assert sm14.sessionDialogueTurns[0].isFinalized == True
-assert sm14.sessionDialogueTurns[0].russianText == ""
-
-sm14.recordInputSpeech("Due", now=3100)
-sm14.checkIdleTimer(now=5150)
-assert sm14.sessionDialogueTurns[1].isFinalized == True
-assert sm14.sessionDialogueTurns[1].russianText == ""
+sm14.recordInputSpeech("Uno.", now=1000)
+sm14.recordInputSpeech("Due.", now=2000)
 
 # Delayed translation for Uno arrives in 2 streaming micro-chunks without isFinished:
-sm14.recordTranslationOutput("Т_Один", now=5300, isFinished=False)
-sm14.recordTranslationOutput(" продолжение.", now=5350, isFinished=False)
+sm14.recordTranslationOutput("Т_Один", now=3100, isFinished=False)
+sm14.recordTranslationOutput(" продолжение.", now=3150, isFinished=False)
 
 # Delayed translation for Due arrives in 2 streaming micro-chunks with turnComplete:
-sm14.recordTranslationOutput("Т_Два", now=5400, isFinished=False)
-sm14.recordTranslationOutput(" продолжение.", now=5450, isFinished=True)
+sm14.recordTranslationOutput("Т_Два", now=3200, isFinished=False)
+sm14.recordTranslationOutput(" продолжение.", now=3250, isFinished=True)
 
 assert len(sm14.sessionDialogueTurns) == 2, f"Expected exactly 2 turns, got {len(sm14.sessionDialogueTurns)}"
-assert sm14.sessionDialogueTurns[0].italianText == "Uno"
+assert sm14.sessionDialogueTurns[0].italianText == "Uno."
 assert sm14.sessionDialogueTurns[0].russianText == "Т_Один продолжение."
 assert sm14.sessionDialogueTurns[0].isFinalized == True
 
-assert sm14.sessionDialogueTurns[1].italianText == "Due"
+assert sm14.sessionDialogueTurns[1].italianText == "Due."
 assert sm14.sessionDialogueTurns[1].russianText == "Т_Два продолжение."
 assert sm14.sessionDialogueTurns[1].isFinalized == True
 
@@ -1154,27 +1140,53 @@ assert "val turns = PocketService.getSessionDialogueTurns()" in main_code, "Dire
 assert "DialogueHistoryManager.loadCurrentSessionCache" not in main_code, "Automatic restore of cached past sessions must be purged from MainActivity"
 
 # 2. ASR Prefix Overlap Resolution:
-assert "inputTrim.startsWith(currentText" in service_code, "inputTrim.startsWith(currentText) check missing in PocketService.kt"
-assert "currentText.startsWith(inputTrim" in service_code, "currentText.startsWith(inputTrim) check missing in PocketService.kt"
+assert "isPrefixExpansion(inputTrim, currentText)" in service_code, "isPrefixExpansion(inputTrim, currentText) check missing in PocketService.kt"
+assert "isPrefixExpansion(currentText, inputTrim)" in service_code, "isPrefixExpansion(currentText, inputTrim) check missing in PocketService.kt"
+assert "fun isPrefixExpansion" in service_code, "fun isPrefixExpansion helper missing in PocketService.kt"
 
 # Prefix Overlap Simulation Test:
+def sim_is_prefix_expansion(longer, shorter):
+    l = longer.strip()
+    s = shorter.strip()
+    if not s or not l:
+        return False
+    if l.lower() == s.lower():
+        return True
+    if len(l) > len(s) and l[:len(s)].lower() == s.lower():
+        next_char = l[len(s)]
+        if next_char in " \t\n,.;:!?'-…":
+            return True
+    s_norm = s.rstrip(".,;!?:-…'\"")
+    if s_norm and len(l) > len(s_norm) and l[:len(s_norm)].lower() == s_norm.lower():
+        next_char = l[len(s_norm)]
+        if next_char in " \t\n,.;:!?'-…":
+            return True
+    return False
+
 def sim_prefix_overlap_resolve(currentText, incomingInput):
     c_trim = currentText.strip()
     i_trim = incomingInput.strip()
     if not c_trim:
         return incomingInput
-    if i_trim.lower().startswith(c_trim.lower()):
+    if sim_is_prefix_expansion(i_trim, c_trim):
         return incomingInput
-    if c_trim.lower().startswith(i_trim.lower()):
+    if sim_is_prefix_expansion(c_trim, i_trim):
         return currentText
     return appendWithPunctuationAwareSpace(currentText, incomingInput)
 
 assert sim_prefix_overlap_resolve("No, io non ho mai", "No, io non ho mai visto") == "No, io non ho mai visto"
 assert sim_prefix_overlap_resolve("No, io non ho mai visto", "No, io non ho mai") == "No, io non ho mai visto"
 assert sim_prefix_overlap_resolve("Ciao.", "Come stai?") == "Ciao. Come stai?"
+# False prefix collision prevention (word boundary guard):
+assert sim_prefix_overlap_resolve("No", "Non so") == "No Non so"
+assert sim_prefix_overlap_resolve("Per", "Perché no") == "Per Perché no"
+assert sim_prefix_overlap_resolve("A", "Anche tu") == "A Anche tu"
+# Punctuation mismatch resolution (comma normalization guard):
+assert sim_prefix_overlap_resolve("No,", "No io non ho mai visto") == "No io non ho mai visto"
 
 # 3. Prevent Zombie Card Resurrection:
 assert "(!it.isFinalized || (nowTime - it.lastActivityTime < 4000L))" not in service_code, "4-second resurrection of finalized cards must be purged from Priority 2"
+assert "it.id == activeTranslationTurnId && !it.isFinalized" in service_code, "Step 1 must strictly require !it.isFinalized"
 assert "it.italianText.isNotBlank() && it.russianText.isBlank() && !it.isFinalized" in service_code, "Priority 2 must strictly require !it.isFinalized"
 assert "curActive != null && !curActive.isFinalized" in service_code, "Priority 3 must strictly require !curActive.isFinalized"
 record_speech_pos = service_code.find("private fun recordInputSpeech")
