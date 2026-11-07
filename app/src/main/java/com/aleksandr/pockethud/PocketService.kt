@@ -26,12 +26,19 @@ import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -49,6 +56,11 @@ import java.util.concurrent.atomic.AtomicLong
 enum class MicSource {
     SMARTPHONE, // 📱 Встроенный микрофон смартфона (AudioSource.VOICE_RECOGNITION, Hardware AGC, Soft-knee DSP)
     BLUETOOTH   // 🎧 Микрофон гарнитуры (VOICE_COMMUNICATION, Bluetooth SCO)
+}
+
+enum class TranslationEngine {
+    CASCADED_REST,     // Вариант А: Continuous SpeechRecognizer (it-IT) + REST Flash + TTS (по умолчанию)
+    LIVE_WEBSOCKET     // Вариант Б: Gemini Live WebSocket (models/gemini-3.5-live-translate-preview)
 }
 
 private val dialogueTurnIdCounter = AtomicLong(0L)
@@ -268,6 +280,26 @@ class PocketService : Service() {
     private val notificationFlushRunnable = Runnable { flushPendingNotification() }
     private val simulIdleRunnable = Runnable { finalizeCurrentTurn() }
 
+    // Option A: Continuous Speech Recognition & REST Translation & TTS
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var recognizerIntent: Intent? = null
+    @Volatile private var isRecognitionPaused = false
+    @Volatile private var consecutiveSpeechErrors = 0
+    @Volatile private var lastSpeechRecognitionError = 0
+
+    private var tts: TextToSpeech? = null
+    @Volatile private var isTtsInitialized = false
+    @Volatile private var isTtsSpeaking = false
+    private val ttsWatchdogRunnable = Runnable {
+        if (isTtsSpeaking) {
+            Log.w(tag, "TTS Watchdog: сброс зависшего флага isTtsSpeaking")
+            isTtsSpeaking = false
+            resumeRecognition()
+        }
+    }
+
+    @Volatile private var activeRestModel: String = "gemini-2.5-flash"
+
     private val logDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
     companion object {
@@ -280,15 +312,38 @@ class PocketService : Service() {
         const val EXTRA_API_KEY = "extra_api_key"
         const val EXTRA_IS_MUTED = "extra_is_muted"
         const val EXTRA_MIC_SOURCE = "extra_mic_source"
+        const val EXTRA_TRANSLATION_ENGINE = "extra_translation_engine"
+        const val EXTRA_REST_MODEL = "extra_rest_model"
 
         // Wear OS / Xiaomi Watch 2 Companion Control Actions
         const val ACTION_TOGGLE_MUTE = "com.aleksandr.pockethud.ACTION_TOGGLE_MUTE"
         const val ACTION_SWITCH_MIC = "com.aleksandr.pockethud.ACTION_SWITCH_MIC"
         const val ACTION_CLEAR_SUBTITLES = "com.aleksandr.pockethud.ACTION_CLEAR_SUBTITLES"
         const val ACTION_STOP_SERVICE = "com.aleksandr.pockethud.ACTION_STOP_SERVICE"
+        const val ACTION_SWITCH_ENGINE = "com.aleksandr.pockethud.ACTION_SWITCH_ENGINE"
+
+        val REST_FLASH_MODELS = listOf(
+            "gemini-2.5-flash",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash"
+        )
 
         @Volatile
         var isServiceActive = false
+
+        @Volatile
+        var selectedEngine: TranslationEngine = TranslationEngine.CASCADED_REST
+            set(value) {
+                field = value
+                currentInstance?.applyEngineChange(value)
+            }
+
+        @Volatile
+        var selectedRestModel: String = "gemini-2.5-flash"
+            set(value) {
+                field = value
+                currentInstance?.applyRestModelChange(value)
+            }
 
         @Volatile
         var isAudioMuted: Boolean = false
@@ -312,6 +367,8 @@ class PocketService : Service() {
         @Volatile var onTelemetryUpdated: ((micAmp: Int, chunks: Long, responses: Long) -> Unit)? = null
         @Volatile var onMuteStateChanged: ((Boolean) -> Unit)? = null
         @Volatile var onMicSourceChanged: ((MicSource) -> Unit)? = null
+        @Volatile var onEngineChanged: ((TranslationEngine) -> Unit)? = null
+        @Volatile var onRestModelChanged: ((String) -> Unit)? = null
 
         // Диалог текущей сессии (Google Translate Conversation Mode)
         private val sessionDialogueTurns = ArrayList<DialogueTurn>()
@@ -415,7 +472,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.41\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.42\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nДвижок: $selectedEngine (REST модель: $selectedRestModel)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -449,6 +506,18 @@ class PocketService : Service() {
                     logEvent("WEAR_ACTION_SWITCH_MIC", "(nextSource=$nextSource)")
                     selectedMicSource = nextSource
                     onMicSourceChanged?.invoke(nextSource)
+                    return START_STICKY
+                }
+                ACTION_SWITCH_ENGINE -> {
+                    val nextEngine = if (selectedEngine == TranslationEngine.CASCADED_REST) {
+                        TranslationEngine.LIVE_WEBSOCKET
+                    } else {
+                        TranslationEngine.CASCADED_REST
+                    }
+                    triggerWearHapticFeedback()
+                    logEvent("WEAR_ACTION_SWITCH_ENGINE", "(nextEngine=$nextEngine)")
+                    selectedEngine = nextEngine
+                    onEngineChanged?.invoke(nextEngine)
                     return START_STICKY
                 }
                 ACTION_CLEAR_SUBTITLES -> {
@@ -498,6 +567,21 @@ class PocketService : Service() {
             }
         }
 
+        val engineExtra = intent?.getStringExtra(EXTRA_TRANSLATION_ENGINE)
+        if (engineExtra != null) {
+            selectedEngine = try {
+                TranslationEngine.valueOf(engineExtra)
+            } catch (e: Exception) {
+                TranslationEngine.CASCADED_REST
+            }
+        }
+
+        val restModelExtra = intent?.getStringExtra(EXTRA_REST_MODEL)
+        if (!restModelExtra.isNullOrBlank()) {
+            selectedRestModel = restModelExtra
+            activeRestModel = restModelExtra
+        }
+
         activeApiKey = apiKey
         reconnectAttempts = 0
         currentInstance = this
@@ -505,7 +589,7 @@ class PocketService : Service() {
         serviceStartTime = System.currentTimeMillis()
         connectionState = "STARTING"
 
-        logEvent("SERVICE_START", "(mic=$selectedMicSource, isAudioMuted=$isAudioMuted)")
+        logEvent("SERVICE_START", "(engine=$selectedEngine, mic=$selectedMicSource, isAudioMuted=$isAudioMuted)")
 
         val notification = buildNotification("Карманный суфлёр активен (экран можно выключить)")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -519,12 +603,6 @@ class PocketService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
-        // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
-        updateOngoingNotification(
-            "🔵 Подключение...",
-            "PocketHUD v1.0.41 активен. Ожидание подключения к Gemini Live API..."
-        )
-
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PocketHUD::WakeLock").apply {
             acquire(24 * 60 * 60 * 1000L)
@@ -533,10 +611,28 @@ class PocketService : Service() {
         isRunning = true
         isServiceActive = true
 
-        setupAudioRouting()
-        onStatusChanged?.invoke("🔵 Подключение к Google Gemini Live API...")
-        initAudioOutput()
-        connectWebSocket(apiKey)
+        if (selectedEngine == TranslationEngine.CASCADED_REST) {
+            // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
+            updateOngoingNotification(
+                "⚡ Подключение...",
+                "PocketHUD v1.0.42 активен (Каскадный ASR + REST Flash). Слушаю итальянскую речь..."
+            )
+            onStatusChanged?.invoke("⚡ Каскадный режим активен (ASR + REST Flash)")
+            setupAudioRouting()
+            initTts()
+            initSpeechRecognizer()
+            startListeningSafe()
+        } else {
+            // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
+            updateOngoingNotification(
+                "🔵 Подключение...",
+                "PocketHUD v1.0.42 активен. Ожидание подключения к Gemini Live API..."
+            )
+            setupAudioRouting()
+            onStatusChanged?.invoke("🔵 Подключение к Google Gemini Live API...")
+            initAudioOutput()
+            connectWebSocket(apiKey)
+        }
 
         return START_NOT_STICKY
     }
@@ -563,21 +659,31 @@ class PocketService : Service() {
 
     fun applyMuteState(muted: Boolean) {
         logEvent("MUTE_STATE_CHANGED", "(isMuted=$muted)")
-        if (muted) {
-            audioPlaybackQueue.clear()
-            queuedPlaybackBytes.set(0L)
-            isPlaybackSpeedBoosted = false
-            try {
-                audioTrack?.pause()
-                audioTrack?.flush()
-            } catch (e: Exception) {
-                Log.e(tag, "Ошибка паузы AudioTrack при отключении звука: ${e.message}")
+        if (selectedEngine == TranslationEngine.CASCADED_REST) {
+            if (muted) {
+                try {
+                    tts?.stop()
+                } catch (e: Exception) {}
+                isTtsSpeaking = false
+                resumeRecognition()
             }
         } else {
-            try {
-                audioTrack?.play()
-            } catch (e: Exception) {
-                Log.e(tag, "Ошибка возобновления AudioTrack при включении звука: ${e.message}")
+            if (muted) {
+                audioPlaybackQueue.clear()
+                queuedPlaybackBytes.set(0L)
+                isPlaybackSpeedBoosted = false
+                try {
+                    audioTrack?.pause()
+                    audioTrack?.flush()
+                } catch (e: Exception) {
+                    Log.e(tag, "Ошибка паузы AudioTrack при отключении звука: ${e.message}")
+                }
+            } else {
+                try {
+                    audioTrack?.play()
+                } catch (e: Exception) {
+                    Log.e(tag, "Ошибка возобновления AudioTrack при включении звука: ${e.message}")
+                }
             }
         }
 
@@ -604,6 +710,21 @@ class PocketService : Service() {
             return
         }
         if (!isRunning) return
+
+        if (selectedEngine == TranslationEngine.CASCADED_REST) {
+            setupAudioRouting()
+            restartSpeechRecognizer()
+            mainHandler.post {
+                val modeStr = if (isAudioMuted) "Карманный суфлёр (🔇 Режим только субтитров)" else "Карманный суфлёр (🔊 Звук в наушник)"
+                val updatedFg = buildNotification(modeStr)
+                val nm = getSystemService(NotificationManager::class.java)
+                nm?.notify(NOTIFICATION_ID, updatedFg)
+                if (lastPostedSubtitleText.isNotBlank()) {
+                    updateOngoingNotification(lastPostedSubtitleText, lastPostedSubtitleHistory)
+                }
+            }
+            return
+        }
 
         Thread {
             synchronized(micSwitchLock) {
@@ -1332,7 +1453,7 @@ class PocketService : Service() {
             .addAction(actions.stopAction)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.41")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.42")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1429,8 +1550,15 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.41")
+            appendLine("Версия: v1.0.42")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
+            appendLine("--- ДВИЖОК ПЕРЕВОДА ---")
+            appendLine("Активный движок: ${selectedEngine.name}")
+            if (selectedEngine == TranslationEngine.CASCADED_REST) {
+                appendLine("Модель REST Flash: $activeRestModel (резерв: ${REST_FLASH_MODELS.joinToString(", ")})")
+                appendLine("TTS активен: $isTtsInitialized (воспроизведение: $isTtsSpeaking)")
+                appendLine("ASR распознавание: ${if (isRecognitionPaused) "ПАУЗА (TTS)" else "СЛУШАЕТ it-IT"} (ошибок: $consecutiveSpeechErrors)")
+            }
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
             appendLine("Модель: models/gemini-3.5-live-translate-preview")
@@ -2410,6 +2538,508 @@ class PocketService : Service() {
         sendThread?.start()
     }
 
+    fun applyEngineChange(newEngine: TranslationEngine) {
+        logEvent("ENGINE_SWITCH_REQUESTED", "newEngine=$newEngine")
+        if (!isRunning) return
+
+        mainHandler.post {
+            if (newEngine == TranslationEngine.CASCADED_REST) {
+                // Shut down WebSocket Live components
+                try {
+                    sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
+                    setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+                    goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+                    webSocket?.close(1000, "Switching to Cascaded REST")
+                } catch (e: Exception) {
+                    webSocket?.cancel()
+                }
+                webSocket = null
+                isSetupComplete = false
+                isRotationPending = false
+
+                try {
+                    recordThread?.interrupt()
+                    audioRecord?.stop()
+                } catch (e: Exception) {}
+                recordThread = null
+
+                try {
+                    sendThread?.interrupt()
+                } catch (e: Exception) {}
+                sendThread = null
+
+                releaseHardwareEffects()
+                try {
+                    audioRecord?.release()
+                } catch (e: Exception) {}
+                audioRecord = null
+                audioSendQueue.clear()
+
+                try {
+                    audioTrack?.stop()
+                    audioTrack?.release()
+                } catch (e: Exception) {}
+                audioTrack = null
+
+                // Start Cascaded REST components
+                setupAudioRouting()
+                initTts()
+                initSpeechRecognizer()
+                startListeningSafe()
+                val statusMsg = "⚡ Каскадный режим активен (ASR + REST Flash)"
+                onStatusChanged?.invoke(statusMsg)
+                updateOngoingNotification(
+                    "⚡ Каскадный ASR+REST",
+                    "PocketHUD v1.0.42: переключено на каскадный перевод (ASR + REST Flash)"
+                )
+            } else {
+                // Shut down Cascaded REST components
+                mainHandler.removeCallbacks(ttsWatchdogRunnable)
+                try {
+                    speechRecognizer?.stopListening()
+                    speechRecognizer?.destroy()
+                } catch (e: Exception) {}
+                speechRecognizer = null
+
+                try {
+                    tts?.stop()
+                } catch (e: Exception) {}
+                isTtsSpeaking = false
+                isRecognitionPaused = false
+
+                // Start WebSocket Live components
+                setupAudioRouting()
+                initAudioOutput()
+                val statusMsg = "🔵 Подключение к Google Gemini Live API..."
+                onStatusChanged?.invoke(statusMsg)
+                updateOngoingNotification(
+                    "🔵 Gemini Live WS",
+                    "PocketHUD v1.0.42: переключено на Gemini Live WebSocket..."
+                )
+                connectWebSocket(activeApiKey)
+            }
+            onEngineChanged?.invoke(newEngine)
+        }
+    }
+
+    fun applyRestModelChange(newModel: String) {
+        logEvent("REST_MODEL_CHANGED", "newModel=$newModel")
+        activeRestModel = newModel
+    }
+
+    private fun initTts() {
+        if (tts != null) return
+        try {
+            tts = TextToSpeech(applicationContext) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    val result = tts?.setLanguage(Locale("ru", "RU"))
+                    if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                        Log.w(tag, "Русский язык TTS не поддерживается или отсутствуют данные")
+                        logEvent("TTS_LANG_UNSUPPORTED", "lang=ru-RU")
+                    } else {
+                        isTtsInitialized = true
+                        tts?.setSpeechRate(1.1f)
+                        tts?.setPitch(1.0f)
+                        logEvent("TTS_INITIALIZED", "lang=ru-RU, rate=1.1")
+                    }
+                } else {
+                    Log.w(tag, "Ошибка инициализации TextToSpeech: статус $status")
+                    logEvent("TTS_INIT_FAILED", "status=$status")
+                }
+            }
+
+            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    isTtsSpeaking = true
+                    mainHandler.removeCallbacks(ttsWatchdogRunnable)
+                    mainHandler.postDelayed(ttsWatchdogRunnable, 12000L)
+                }
+
+                override fun onDone(utteranceId: String?) {
+                    isTtsSpeaking = false
+                    mainHandler.removeCallbacks(ttsWatchdogRunnable)
+                    mainHandler.postDelayed({
+                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
+                            resumeRecognition()
+                        }
+                    }, 150L)
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) {
+                    isTtsSpeaking = false
+                    mainHandler.removeCallbacks(ttsWatchdogRunnable)
+                    mainHandler.post {
+                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST) {
+                            resumeRecognition()
+                        }
+                    }
+                }
+
+                override fun onError(utteranceId: String?, errorCode: Int) {
+                    isTtsSpeaking = false
+                    mainHandler.removeCallbacks(ttsWatchdogRunnable)
+                    mainHandler.post {
+                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST) {
+                            resumeRecognition()
+                        }
+                    }
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(tag, "Исключение TextToSpeech: ${e.message}")
+            logEvent("TTS_EXCEPTION", "${e.message}")
+        }
+    }
+
+    private fun speakTts(russianText: String) {
+        if (isAudioMuted || !isTtsInitialized || tts == null || russianText.isBlank()) return
+        val cleanSpeech = sanitizeTtsSpeech(russianText)
+        if (cleanSpeech.isBlank()) return
+
+        isTtsSpeaking = true
+        pauseRecognition()
+
+        val utteranceId = "pockethud_tts_${System.currentTimeMillis()}"
+        val params = Bundle().apply {
+            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
+        }
+        val result = tts?.speak(cleanSpeech, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
+        logEvent("TTS_SPEAK", "utteranceId=$utteranceId, res=$result, text=\"$cleanSpeech\"")
+    }
+
+    private fun sanitizeTtsSpeech(raw: String): String {
+        return raw.replace(Regex("[«»\"'*\\[\\]{}()]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private fun initSpeechRecognizer() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            val err = "🔴 Ошибка: SpeechRecognizer недоступен на данном устройстве"
+            logEvent("SPEECH_RECOGNIZER_UNAVAILABLE")
+            onStatusChanged?.invoke(err)
+            return
+        }
+
+        try {
+            speechRecognizer?.destroy()
+        } catch (e: Exception) {}
+
+        recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "it-IT")
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "it-IT")
+            putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, "it-IT")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L)
+        }
+
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+            setRecognitionListener(object : RecognitionListener {
+                override fun onReadyForSpeech(params: Bundle?) {
+                    consecutiveSpeechErrors = 0
+                    onStatusChanged?.invoke("⚡ Слушаю итальянскую речь (Каскадный ASR)...")
+                }
+
+                override fun onBeginningOfSpeech() {
+                    logEvent("ASR_SPEECH_START")
+                }
+
+                override fun onRmsChanged(rmsdB: Float) {
+                    val amp = ((rmsdB + 2f) * 8.33f).toInt().coerceIn(0, 100)
+                    micPeakAmplitude = amp
+                    onTelemetryUpdated?.invoke(amp, chunksSent, serverTextChunksReceived)
+                }
+
+                override fun onBufferReceived(buffer: ByteArray?) {}
+
+                override fun onEndOfSpeech() {
+                    logEvent("ASR_SPEECH_END")
+                }
+
+                override fun onError(error: Int) {
+                    lastSpeechRecognitionError = error
+                    consecutiveSpeechErrors++
+                    val errName = when (error) {
+                        SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"
+                        SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT"
+                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "ERROR_INSUFFICIENT_PERMISSIONS"
+                        SpeechRecognizer.ERROR_NETWORK -> "ERROR_NETWORK"
+                        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "ERROR_NETWORK_TIMEOUT"
+                        SpeechRecognizer.ERROR_NO_MATCH -> "ERROR_NO_MATCH"
+                        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ERROR_RECOGNIZER_BUSY"
+                        SpeechRecognizer.ERROR_SERVER -> "ERROR_SERVER"
+                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT"
+                        else -> "ERROR_$error"
+                    }
+                    logEvent("ASR_ERROR", "code=$error, name=$errName, repeats=$consecutiveSpeechErrors")
+
+                    if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
+                        val delayMs = when {
+                            consecutiveSpeechErrors > 5 -> 1000L
+                            error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || error == SpeechRecognizer.ERROR_CLIENT -> 300L
+                            else -> 100L
+                        }
+                        mainHandler.postDelayed({
+                            startListeningSafe()
+                        }, delayMs)
+                    }
+                }
+
+                override fun onResults(results: Bundle?) {
+                    consecutiveSpeechErrors = 0
+                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val finalText = matches?.firstOrNull()?.trim()
+                    if (!finalText.isNullOrBlank()) {
+                        logEvent("ASR_FINAL_SPEECH", "\"$finalText\"")
+                        recordInputSpeech(finalText)
+                        requestRestTranslation(finalText)
+                    }
+                    if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
+                        mainHandler.postDelayed({
+                            startListeningSafe()
+                        }, 50L)
+                    }
+                }
+
+                override fun onPartialResults(partialResults: Bundle?) {
+                    val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    val partialText = matches?.firstOrNull()?.trim()
+                    if (!partialText.isNullOrBlank()) {
+                        updateInterimSpeech(partialText)
+                    }
+                }
+
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+        }
+    }
+
+    private fun startListeningSafe() {
+        if (!isRunning || selectedEngine != TranslationEngine.CASCADED_REST || isTtsSpeaking || isRecognitionPaused) {
+            return
+        }
+        mainHandler.post {
+            try {
+                if (speechRecognizer == null) {
+                    initSpeechRecognizer()
+                }
+                val intent = recognizerIntent ?: Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, "it-IT")
+                    putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                }
+                speechRecognizer?.startListening(intent)
+                logEvent("ASR_LISTENING_START", "lang=it-IT")
+            } catch (e: Exception) {
+                Log.w(tag, "Ошибка startListening: ${e.message}")
+                logEvent("ASR_START_EXCEPTION", "${e.message}")
+                mainHandler.postDelayed({
+                    if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
+                        try {
+                            speechRecognizer?.cancel()
+                            speechRecognizer?.startListening(recognizerIntent)
+                        } catch (ex: Exception) {}
+                    }
+                }, 400L)
+            }
+        }
+    }
+
+    private fun pauseRecognition() {
+        isRecognitionPaused = true
+        mainHandler.post {
+            try {
+                speechRecognizer?.stopListening()
+                logEvent("ASR_PAUSED")
+            } catch (e: Exception) {
+                Log.w(tag, "Ошибка pauseRecognition: ${e.message}")
+            }
+        }
+    }
+
+    private fun resumeRecognition() {
+        isRecognitionPaused = false
+        logEvent("ASR_RESUMED")
+        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
+            startListeningSafe()
+        }
+    }
+
+    private fun restartSpeechRecognizer() {
+        mainHandler.post {
+            try {
+                speechRecognizer?.cancel()
+                speechRecognizer?.destroy()
+                speechRecognizer = null
+            } catch (e: Exception) {}
+            if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
+                initSpeechRecognizer()
+                startListeningSafe()
+            }
+        }
+    }
+
+    private fun updateInterimSpeech(interim: String) {
+        onInputTextReceived?.invoke(interim)
+        synchronized(sessionDialogueTurns) {
+            val now = System.currentTimeMillis()
+            val curTurn = activeDialogueTurn
+            if (curTurn != null && !curTurn.isFinalized) {
+                curTurn.italianText = interim
+                curTurn.lastActivityTime = now
+                val idx = sessionDialogueTurns.indexOf(curTurn)
+                if (idx != -1) {
+                    onDialogueTurnUpdated?.invoke(idx, curTurn.copy(), false)
+                }
+            } else {
+                val newTurn = DialogueTurn(
+                    italianText = interim,
+                    russianText = "",
+                    timestamp = now,
+                    lastActivityTime = now,
+                    isFinalized = false
+                )
+                sessionDialogueTurns.add(newTurn)
+                if (sessionDialogueTurns.size > 200) {
+                    sessionDialogueTurns.removeAt(0)
+                }
+                activeDialogueTurn = newTurn
+                val idx = sessionDialogueTurns.size - 1
+                onDialogueTurnUpdated?.invoke(idx, newTurn.copy(), true)
+            }
+        }
+        scheduleNotificationUpdate(
+            "🗣️ $interim",
+            if (lastPostedSubtitleHistory.isNotBlank()) lastPostedSubtitleHistory else interim
+        )
+    }
+
+    private fun requestRestTranslation(italianText: String) {
+        if (activeApiKey.isBlank()) {
+            logEvent("REST_TRANSLATE_NO_KEY")
+            return
+        }
+
+        val turnToTranslate = activeDialogueTurn
+        val turnId = turnToTranslate?.id ?: 0L
+        logEvent("REST_TRANSLATE_REQUEST", "model=$activeRestModel, turnId=$turnId, text=\"$italianText\"")
+
+        val client = OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .build()
+
+        fun executeTranslationCall(modelIndex: Int) {
+            if (modelIndex >= REST_FLASH_MODELS.size) {
+                logEvent("REST_TRANSLATE_ALL_MODELS_FAILED", "text=\"$italianText\"")
+                return
+            }
+
+            val candidateModel = REST_FLASH_MODELS[modelIndex]
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$candidateModel:generateContent?key=$activeApiKey"
+
+            val promptText = "Translate the following Italian text to Russian. Return ONLY the translation, nothing else. No explanations.\n\n$italianText"
+
+            val jsonPayload = JSONObject().apply {
+                put("contents", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", promptText)
+                            })
+                        })
+                    })
+                })
+                put("generationConfig", JSONObject().apply {
+                    put("temperature", 0.3)
+                    put("maxOutputTokens", 256)
+                })
+            }
+
+            val mediaType = "application/json; charset=utf-8".toMediaType()
+            val body = jsonPayload.toString().toRequestBody(mediaType)
+            val req = Request.Builder().url(url).post(body).build()
+
+            client.newCall(req).enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    Log.e(tag, "REST translation network error with model $candidateModel: ${e.message}")
+                    logEvent("REST_TRANSLATE_FAIL", "model=$candidateModel, err=${e.message}")
+                    executeTranslationCall(modelIndex + 1)
+                }
+
+                override fun onResponse(call: okhttp3.Call, response: Response) {
+                    response.use { resp ->
+                        val respCode = resp.code
+                        val respString = resp.body?.string() ?: ""
+
+                        if (respCode == 200) {
+                            try {
+                                val root = JSONObject(respString)
+                                val candidates = root.optJSONArray("candidates")
+                                if (candidates != null && candidates.length() > 0) {
+                                    val cand = candidates.getJSONObject(0)
+                                    val content = cand.optJSONObject("content")
+                                    val parts = content?.optJSONArray("parts")
+                                    if (parts != null && parts.length() > 0) {
+                                        val rawText = parts.getJSONObject(0).optString("text", "").trim()
+                                        val cleaned = sanitizeRestTranslation(rawText)
+                                        if (cleaned.isNotBlank()) {
+                                            activeRestModel = candidateModel
+                                            mainHandler.post {
+                                                deliverRestTranslation(cleaned, turnId)
+                                            }
+                                            return
+                                        }
+                                    }
+                                }
+                                logEvent("REST_TRANSLATE_EMPTY_RESPONSE", "model=$candidateModel")
+                            } catch (e: Exception) {
+                                Log.e(tag, "Ошибка парсинга ответа REST перевода: ${e.message}")
+                            }
+                        } else if (respCode == 404 || respCode == 400) {
+                            Log.w(tag, "Модель $candidateModel вернула HTTP $respCode, fallback на следующую модель...")
+                            logEvent("REST_MODEL_NOT_FOUND", "model=$candidateModel, http=$respCode")
+                            executeTranslationCall(modelIndex + 1)
+                            return
+                        } else {
+                            Log.w(tag, "REST translation HTTP error: $respCode")
+                            logEvent("REST_TRANSLATE_HTTP_ERROR", "model=$candidateModel, code=$respCode")
+                        }
+                    }
+                }
+            })
+        }
+
+        val initialIdx = REST_FLASH_MODELS.indexOf(activeRestModel).coerceAtLeast(0)
+        executeTranslationCall(initialIdx)
+    }
+
+    private fun deliverRestTranslation(russianTranslation: String, turnId: Long) {
+        Log.d(tag, "Доставлен REST перевод: $russianTranslation")
+        logEvent("TRANSLATION:", "ORIG=\"$lastRecognizedInput\" -> RU=\"$russianTranslation\"")
+        recordTranslationOutput(russianTranslation)
+
+        if (!isAudioMuted && isTtsInitialized && russianTranslation.isNotBlank()) {
+            speakTts(russianTranslation)
+        }
+    }
+
+    fun sanitizeRestTranslation(raw: String): String {
+        var text = raw.trim()
+        text = text.removeSurrounding("\"").removeSurrounding("«", "»").trim()
+        if (text.startsWith("Перевод:", ignoreCase = true)) {
+            text = text.substring("Перевод:".length).trim()
+        }
+        if (text.startsWith("**Перевод:**", ignoreCase = true)) {
+            text = text.substring("**Перевод:**".length).trim()
+        }
+        return text.trim()
+    }
+
     override fun onDestroy() {
         isRunning = false
         isServiceActive = false
@@ -2422,6 +3052,21 @@ class PocketService : Service() {
             "SERVICE_STOP",
             "(uptime=${uptimeSec}s, total_chunks=$chunksSent, total_resp=$totalResp)"
         )
+
+        mainHandler.removeCallbacks(ttsWatchdogRunnable)
+        try {
+            speechRecognizer?.stopListening()
+            speechRecognizer?.destroy()
+            speechRecognizer = null
+        } catch (e: Exception) {}
+        try {
+            tts?.stop()
+            tts?.shutdown()
+            tts = null
+        } catch (e: Exception) {}
+        isTtsInitialized = false
+        isTtsSpeaking = false
+        isRecognitionPaused = false
 
         // Сохраняем полный финальный снимок диагностики перед обнулением instance
         lastDiagnosticSnapshot = buildDiagnosticSnapshot()

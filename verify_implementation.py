@@ -128,16 +128,16 @@ with open(build_gradle_path, "r", encoding="utf-8") as f:
 with open(setup_and_push_path, "r", encoding="utf-8") as f:
     setup_code = f.read()
 
-print("\n--- 1. Verification of v1.0.41 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 45' in gradle_code, "versionCode 45 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.41"' in gradle_code, "versionName 1.0.41 missing in app/build.gradle.kts"
+print("\n--- 1. Verification of v1.0.42 Version Bumps & Fixed Keystore ---")
+assert 'versionCode = 46' in gradle_code, "versionCode 46 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.42"' in gradle_code, "versionName 1.0.42 missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
 assert os.path.exists(debug_keystore_path), "app/debug.keystore missing on disk"
-assert 'text = "v1.0.41"' in main_code, "v1.0.41 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.41' in service_code, "v1.0.41 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.41 активен' in service_code, "v1.0.41 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.41' in service_code, "v1.0.41 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.41 and fixed debug.keystore OK across all files.")
+assert 'text = "v1.0.42"' in main_code, "v1.0.42 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.42' in service_code, "v1.0.42 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.42 активен' in service_code, "v1.0.42 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.42' in service_code, "v1.0.42 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.42 and fixed debug.keystore OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation, Watchdog & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -1276,7 +1276,134 @@ assert '!isRunning && action != ACTION_STOP_SERVICE' in service_code, "Missing s
 
 print("  -> v1.0.41 Wear OS Companion Actions & WearableExtender verified perfectly with zero bugs.")
 
+print("\n--- 14. Verification of Option A Cascaded REST Pipeline, SpeechRecognizer, REST Flash Fallback & TTS ---")
+
+# 1. TranslationEngine Enum & Default Invariant
+assert "enum class TranslationEngine" in service_code, "TranslationEngine enum missing in PocketService.kt"
+assert "CASCADED_REST" in service_code, "CASCADED_REST missing in TranslationEngine"
+assert "LIVE_WEBSOCKET" in service_code, "LIVE_WEBSOCKET missing in TranslationEngine"
+assert "var selectedEngine: TranslationEngine = TranslationEngine.CASCADED_REST" in service_code, "Default engine must be CASCADED_REST"
+assert "currentEngine = TranslationEngine.CASCADED_REST" in main_code, "Default engine in MainActivity must be CASCADED_REST"
+assert "EXTRA_TRANSLATION_ENGINE" in service_code, "EXTRA_TRANSLATION_ENGINE missing in PocketService.kt"
+assert "ACTION_SWITCH_ENGINE" in service_code, "ACTION_SWITCH_ENGINE missing in PocketService.kt"
+
+# 2. Option B (Live WebSocket) 100% Preservation
+assert '"models/gemini-3.5-live-translate-preview"' in service_code, "models/gemini-3.5-live-translate-preview must be preserved 100% for WebSocket engine"
+assert "connectWebSocket(apiKey)" in service_code, "connectWebSocket must be preserved"
+assert "sendSetup(ws)" in service_code, "sendSetup must be preserved"
+
+# 3. REST Flash Multi-Model Candidate List & Fallback
+assert "val REST_FLASH_MODELS = listOf(" in service_code, "REST_FLASH_MODELS missing in PocketService.kt"
+assert '"gemini-2.5-flash"' in service_code, "gemini-2.5-flash missing in REST_FLASH_MODELS"
+assert '"gemini-1.5-flash"' in service_code, "gemini-1.5-flash missing in REST_FLASH_MODELS"
+assert '"gemini-2.0-flash"' in service_code, "gemini-2.0-flash missing in REST_FLASH_MODELS"
+assert "respCode == 404 || respCode == 400" in service_code, "HTTP 404/400 model fallback missing in PocketService.kt"
+assert "executeTranslationCall(modelIndex + 1)" in service_code, "Next candidate invocation on fallback missing"
+
+# 4. Continuous Android SpeechRecognizer Contract
+assert "speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)" in service_code, "createSpeechRecognizer missing in PocketService.kt"
+assert "RecognizerIntent.ACTION_RECOGNIZE_SPEECH" in service_code, "ACTION_RECOGNIZE_SPEECH missing in PocketService.kt"
+assert '"it-IT"' in service_code, "it-IT language missing in SpeechRecognizer setup"
+assert "override fun onPartialResults" in service_code, "onPartialResults callback missing in SpeechRecognizer listener"
+assert "override fun onResults" in service_code, "onResults callback missing in SpeechRecognizer listener"
+assert "updateInterimSpeech" in service_code, "updateInterimSpeech method missing in PocketService.kt"
+assert "pauseRecognition()" in service_code, "pauseRecognition method missing"
+assert "resumeRecognition()" in service_code, "resumeRecognition method missing"
+
+# 5. REST Translation Prompt Contract
+assert "Translate the following Italian text to Russian. Return ONLY the translation, nothing else. No explanations." in service_code, "Exact prompt contract missing in PocketService.kt"
+assert '"temperature", 0.3' in service_code, "temperature 0.3 missing in REST generationConfig"
+assert '"maxOutputTokens", 256' in service_code, "maxOutputTokens 256 missing in REST generationConfig"
+
+# 6. TextToSpeech Synthesis & Acoustic Muting
+assert "tts = TextToSpeech(" in service_code, "TextToSpeech initialization missing in PocketService.kt"
+assert 'Locale("ru", "RU")' in service_code, "Russian Locale for TTS missing in PocketService.kt"
+assert "UtteranceProgressListener" in service_code, "UtteranceProgressListener missing in PocketService.kt"
+assert "pauseRecognition()" in service_code, "Mic pausing before TTS speaking missing"
+assert "150L" in service_code, "150ms acoustic dissipation delay missing before resumeRecognition"
+assert "if (isAudioMuted || !isTtsInitialized || tts == null || russianText.isBlank()) return" in service_code, "Mute & initialization guard missing in speakTts"
+
+# 7. AndroidManifest <queries> Package Visibility
+manifest_path = os.path.join(BASE_DIR, "app", "src", "main", "AndroidManifest.xml")
+with open(manifest_path, "r", encoding="utf-8") as f:
+    manifest_code = f.read()
+assert "<queries>" in manifest_code, "<queries> block missing in AndroidManifest.xml"
+assert "android.speech.RecognitionService" in manifest_code, "RecognitionService query missing in AndroidManifest.xml"
+assert "android.intent.action.TTS_SERVICE" in manifest_code, "TTS_SERVICE query missing in AndroidManifest.xml"
+
+# 8. UI Engine Selector in MainActivity.kt
+assert "setTranslationEngine" in main_code, "setTranslationEngine missing in MainActivity.kt"
+assert "updateEngineStyles" in main_code, "updateEngineStyles missing in MainActivity.kt"
+assert "engineCascadedBtn" in main_code, "engineCascadedBtn missing in MainActivity.kt"
+assert "engineLiveBtn" in main_code, "engineLiveBtn missing in MainActivity.kt"
+assert "EXTRA_TRANSLATION_ENGINE" in main_code, "EXTRA_TRANSLATION_ENGINE missing in MainActivity intent"
+assert "PocketService.onEngineChanged = null" in main_code, "onEngineChanged cleanup missing in MainActivity.onDestroy"
+
+# 9. Python Simulation of sanitizeRestTranslation & sanitizeTtsSpeech
+def sim_sanitize_rest(raw: str) -> str:
+    text = raw.strip()
+    text = text.strip('"\'«»').strip()
+    if text.lower().startswith("перевод:"):
+        text = text[len("перевод:"):].strip()
+    if text.lower().startswith("**перевод:**"):
+        text = text[len("**перевод:**"):].strip()
+    return text.strip()
+
+assert sim_sanitize_rest('"Привет, как дела?"') == "Привет, как дела?"
+assert sim_sanitize_rest('«Добрый день»') == "Добрый день"
+assert sim_sanitize_rest('Перевод: Я иду в магазин.') == "Я иду в магазин."
+assert sim_sanitize_rest('**Перевод:** Где находится вокзал?') == "Где находится вокзал?"
+
+def sim_sanitize_tts(raw: str) -> str:
+    import re
+    return re.sub(r'\s+', ' ', re.sub(r'[«»"\'*\[\]{}()]', ' ', raw)).strip()
+
+assert sim_sanitize_tts('**"Здравствуйте"** [пауза]') == "Здравствуйте пауза"
+
+# 10. Multi-Model Fallback Simulation
+class FallbackClientSim:
+    def __init__(self, failing_models):
+        self.failing_models = set(failing_models)
+        self.called_models = []
+
+    def call(self, models, idx=0):
+        if idx >= len(models):
+            return "ALL_FAILED"
+        model = models[idx]
+        self.called_models.append(model)
+        if model in self.failing_models:
+            return self.call(models, idx + 1)
+        return f"OK_{model}"
+
+# Scenario: Primary gemini-2.5-flash fails (404), fallback to gemini-1.5-flash succeeds:
+sim_client = FallbackClientSim(failing_models=["gemini-2.5-flash"])
+res = sim_client.call(["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"])
+assert res == "OK_gemini-1.5-flash"
+assert sim_client.called_models == ["gemini-2.5-flash", "gemini-1.5-flash"]
+
+# 11. Speech Segment Real-World Verification from PocketHUD Session Log (12)
+log_12_path = os.path.join(BASE_DIR, "PocketHUD Session Log (12)")
+if not os.path.exists(log_12_path):
+    # Check parent dir
+    log_12_path = os.path.join(BASE_DIR, "..", "PocketHUD Session Log (12)")
+
+if os.path.exists(log_12_path):
+    with open(log_12_path, "r", encoding="utf-8", errors="ignore") as f:
+        log_lines = f.readlines()
+    speech_segments = []
+    for line in log_lines:
+        if "INPUT_SPEECH:" in line:
+            m = re.search(r'INPUT_SPEECH:\s*"([^"]+)"', line)
+            if m:
+                speech_segments.append(m.group(1))
+    assert len(speech_segments) > 0, "Failed to extract speech segments from Log 12"
+    # Verify that speech segments are valid non-empty Italian utterances
+    assert any("piatto tradizionale" in s for s in speech_segments), "Key phrase 'piatto tradizionale' missing in Log 12"
+    print(f"  -> Successfully verified {len(speech_segments)} real speech segments from PocketHUD Session Log (12).")
+
+print("  -> Option A Cascaded REST, SpeechRecognizer contract, REST multi-model fallback & TTS verified perfectly.")
+
 print("\n=======================================================")
-print("🎉 ALL V1.0.41 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.42 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
 

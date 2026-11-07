@@ -99,6 +99,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var shareDialogueDockBtn: Button
     private lateinit var shareLogBtn: Button
     private lateinit var copySummaryBtn: Button
+    private lateinit var engineSelectorBar: LinearLayout
+    private lateinit var engineCascadedBtn: TextView
+    private lateinit var engineLiveBtn: TextView
 
     private val prefsName = "pocket_hud_prefs"
     private val keyApiKey = "api_key"
@@ -106,9 +109,12 @@ class MainActivity : AppCompatActivity() {
     private val keyScreenMode = "screen_mode"
     private val keyMicSource = "mic_source"
     private val keyShowOriginalText = "show_original_text"
+    private val keyTranslationEngine = "translation_engine"
+    private val keyRestModel = "rest_flash_model"
 
     private var currentMode = ScreenMode.DIALOGUE
     private var currentMicSource = MicSource.SMARTPHONE
+    private var currentEngine = TranslationEngine.CASCADED_REST
     private var showOriginalText = true
 
     companion object {
@@ -141,6 +147,18 @@ class MainActivity : AppCompatActivity() {
         }
         PocketService.selectedMicSource = currentMicSource
         updateMicSourceStyles()
+
+        val savedEngineStr = prefs.getString(keyTranslationEngine, TranslationEngine.CASCADED_REST.name) ?: TranslationEngine.CASCADED_REST.name
+        currentEngine = try {
+            TranslationEngine.valueOf(savedEngineStr)
+        } catch (e: Exception) {
+            TranslationEngine.CASCADED_REST
+        }
+        PocketService.selectedEngine = currentEngine
+        updateEngineStyles()
+
+        val savedModel = prefs.getString(keyRestModel, "gemini-2.5-flash") ?: "gemini-2.5-flash"
+        PocketService.selectedRestModel = savedModel
 
         val isMuted = prefs.getBoolean(keyAudioMuted, false)
         PocketService.isAudioMuted = isMuted
@@ -203,6 +221,8 @@ class MainActivity : AppCompatActivity() {
                     putExtra(PocketService.EXTRA_API_KEY, key)
                     putExtra(PocketService.EXTRA_IS_MUTED, PocketService.isAudioMuted)
                     putExtra(PocketService.EXTRA_MIC_SOURCE, currentMicSource.name)
+                    putExtra(PocketService.EXTRA_TRANSLATION_ENGINE, currentEngine.name)
+                    putExtra(PocketService.EXTRA_REST_MODEL, PocketService.selectedRestModel)
                 }
                 ContextCompat.startForegroundService(this, intent)
                 PocketService.isServiceActive = true
@@ -238,10 +258,12 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         currentMicSource = PocketService.selectedMicSource
+        currentEngine = PocketService.selectedEngine
         setupServiceCallbacks()
         updateUi()
         updateMuteButtonUi()
         updateMicSourceStyles()
+        updateEngineStyles()
 
         val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         val savedShowOriginal = prefs.getBoolean(keyShowOriginalText, true)
@@ -387,6 +409,41 @@ class MainActivity : AppCompatActivity() {
             micPhoneBtn.background = inactiveBg
             micPhoneBtn.setTextColor(0xFF9AA0A6.toInt())
         }
+    }
+
+    private fun updateEngineStyles() {
+        if (!::engineCascadedBtn.isInitialized || !::engineLiveBtn.isInitialized) return
+
+        val activeCascadedBg = createRoundedDrawable(0xFF2E2A14.toInt(), 0xFFFBC02D.toInt(), 1, 12f)
+        val activeLiveBg = createRoundedDrawable(0xFF1E3A5F.toInt(), 0xFF4285F4.toInt(), 1, 12f)
+        val inactiveBg = createRoundedDrawable(0x00000000, cornerRadiusDp = 12f)
+
+        if (currentEngine == TranslationEngine.CASCADED_REST) {
+            engineCascadedBtn.background = activeCascadedBg
+            engineCascadedBtn.setTextColor(0xFFFDD835.toInt())
+            engineLiveBtn.background = inactiveBg
+            engineLiveBtn.setTextColor(0xFF9AA0A6.toInt())
+        } else {
+            engineLiveBtn.background = activeLiveBg
+            engineLiveBtn.setTextColor(0xFF8AB4F8.toInt())
+            engineCascadedBtn.background = inactiveBg
+            engineCascadedBtn.setTextColor(0xFF9AA0A6.toInt())
+        }
+    }
+
+    private fun setTranslationEngine(engine: TranslationEngine) {
+        if (currentEngine == engine) return
+        currentEngine = engine
+        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        prefs.edit().putString(keyTranslationEngine, engine.name).apply()
+        PocketService.selectedEngine = engine
+        updateEngineStyles()
+        val msg = if (engine == TranslationEngine.CASCADED_REST) {
+            "⚡ Включен каскадный режим (ASR it-IT + Flash REST + TTS)"
+        } else {
+            "🌐 Включен синхронный режим (Gemini Live WebSocket)"
+        }
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
     private fun updateTabStyles() {
@@ -621,7 +678,7 @@ class MainActivity : AppCompatActivity() {
         PocketService.onStatusChanged = { status ->
             runOnUiThread {
                 statusBadgeText.text = status
-                if (status.contains("🟢") || status.contains("🔵")) {
+                if (status.contains("🟢") || status.contains("🔵") || status.contains("⚡")) {
                     toggleBtn.text = "⏹️ ОСТАНОВИТЬ СУФЛЁР"
                     toggleBtn.background = createButtonDrawable(0xFFD93025.toInt(), 26f)
                 } else if (status.contains("🔴") || status.contains("⚪")) {
@@ -663,6 +720,13 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 currentMicSource = source
                 updateMicSourceStyles()
+            }
+        }
+
+        PocketService.onEngineChanged = { engine ->
+            runOnUiThread {
+                currentEngine = engine
+                updateEngineStyles()
             }
         }
     }
@@ -950,7 +1014,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.41"
+            text = "v1.0.42"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
@@ -1008,7 +1072,7 @@ class MainActivity : AppCompatActivity() {
         apiSettingsContainer.addView(apiKeyInput)
 
         val apiHint = TextView(this).apply {
-            text = "Ключ сохраняется локально на устройстве для Gemini Live WebSocket"
+            text = "Ключ сохраняется локально на устройстве для Gemini Live WebSocket и REST Flash"
             textSize = 11f
             setTextColor(0xFF80868B.toInt())
             val params = LinearLayout.LayoutParams(
@@ -1019,6 +1083,54 @@ class MainActivity : AppCompatActivity() {
         }
         apiSettingsContainer.addView(apiHint)
         root.addView(apiSettingsContainer)
+
+        // ==========================================
+        // 1.5. Селектор движка: Каскадный (ASR+REST) vs Live (WS)
+        // ==========================================
+        engineSelectorBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = createRoundedDrawable(0xFF1A1D24.toInt(), 0xFF2B3240.toInt(), 1, 14f)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(8)) }
+            layoutParams = params
+        }
+
+        engineCascadedBtn = TextView(this).apply {
+            text = "⚡ Каскадный (ASR + Flash)"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+            isClickable = true
+            setOnClickListener {
+                setTranslationEngine(TranslationEngine.CASCADED_REST)
+            }
+        }
+        engineSelectorBar.addView(engineCascadedBtn)
+
+        engineLiveBtn = TextView(this).apply {
+            text = "🌐 Gemini Live (WebSocket)"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = params
+            isClickable = true
+            setOnClickListener {
+                setTranslationEngine(TranslationEngine.LIVE_WEBSOCKET)
+            }
+        }
+        engineSelectorBar.addView(engineLiveBtn)
+        root.addView(engineSelectorBar)
+
+        updateEngineStyles()
 
         // ==========================================
         // 2. Селектор микрофона: Смартфон vs Гарнитура
@@ -1978,6 +2090,8 @@ class MainActivity : AppCompatActivity() {
         PocketService.onDialogueTurnUpdated = null
         PocketService.onMuteStateChanged = null
         PocketService.onMicSourceChanged = null
+        PocketService.onEngineChanged = null
+        PocketService.onRestModelChanged = null
         super.onDestroy()
     }
 }
