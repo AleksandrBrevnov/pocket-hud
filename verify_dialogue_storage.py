@@ -133,14 +133,14 @@ def main():
         gradle_code = f.read()
 
     # 3. Version bump checks
-    print("\n--- 3. Version Bump v1.0.42 Verification ---")
-    assert "versionCode = 46" in gradle_code, "versionCode must be 46 in app/build.gradle.kts"
-    assert 'versionName = "1.0.42"' in gradle_code, 'versionName must be "1.0.42" in app/build.gradle.kts'
-    assert 'text = "v1.0.42"' in main_code, "v1.0.42 badge missing in MainActivity.kt"
-    assert 'PocketHUD — Ушной суфлёр v1.0.42' in service_code, "v1.0.42 missing in PocketService notification"
-    assert 'PocketHUD v1.0.42 активен' in service_code, "v1.0.42 missing in PocketService start subtitle"
-    assert 'Версия: v1.0.42' in service_code, "v1.0.42 missing in PocketService diagnostic summary"
-    print("  -> Version bump v1.0.42 verified across build.gradle.kts, MainActivity, and PocketService.")
+    print("\n--- 3. Version Bump v1.0.43 Verification ---")
+    assert "versionCode = 47" in gradle_code, "versionCode must be 47 in app/build.gradle.kts"
+    assert 'versionName = "1.0.43"' in gradle_code, 'versionName must be "1.0.43" in app/build.gradle.kts'
+    assert 'text = "v1.0.43"' in main_code, "v1.0.43 badge missing in MainActivity.kt"
+    assert 'PocketHUD — Ушной суфлёр v1.0.43' in service_code, "v1.0.43 missing in PocketService notification"
+    assert 'PocketHUD v1.0.43 активен' in service_code, "v1.0.43 missing in PocketService start subtitle"
+    assert 'Версия: v1.0.43' in service_code, "v1.0.43 missing in PocketService diagnostic summary"
+    print("  -> Version bump v1.0.43 verified across build.gradle.kts, MainActivity, and PocketService.")
 
     # 4. Storage & Persistence Checks
     print("\n--- 4. Persistent Storage Directory & Format Invariants ---")

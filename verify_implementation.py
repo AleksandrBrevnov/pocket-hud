@@ -128,16 +128,16 @@ with open(build_gradle_path, "r", encoding="utf-8") as f:
 with open(setup_and_push_path, "r", encoding="utf-8") as f:
     setup_code = f.read()
 
-print("\n--- 1. Verification of v1.0.42 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 46' in gradle_code, "versionCode 46 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.42"' in gradle_code, "versionName 1.0.42 missing in app/build.gradle.kts"
+print("\n--- 1. Verification of v1.0.43 Version Bumps & Fixed Keystore ---")
+assert 'versionCode = 47' in gradle_code, "versionCode 47 missing in app/build.gradle.kts"
+assert 'versionName = "1.0.43"' in gradle_code, "versionName 1.0.43 missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
 assert os.path.exists(debug_keystore_path), "app/debug.keystore missing on disk"
-assert 'text = "v1.0.42"' in main_code, "v1.0.42 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.42' in service_code, "v1.0.42 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.42 активен' in service_code, "v1.0.42 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.42' in service_code, "v1.0.42 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.42 and fixed debug.keystore OK across all files.")
+assert 'text = "v1.0.43"' in main_code, "v1.0.43 badge missing in MainActivity.kt"
+assert 'PocketHUD — Ушной суфлёр v1.0.43' in service_code, "v1.0.43 notification title missing in PocketService.kt"
+assert 'PocketHUD v1.0.43 активен' in service_code, "v1.0.43 start subtitle missing in PocketService.kt"
+assert 'Версия: v1.0.43' in service_code, "v1.0.43 diagnostic summary missing in PocketService.kt"
+print("  -> Version bump v1.0.43 and fixed debug.keystore OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation, Watchdog & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -1294,11 +1294,12 @@ assert "sendSetup(ws)" in service_code, "sendSetup must be preserved"
 
 # 3. REST Flash Multi-Model Candidate List & Fallback
 assert "val REST_FLASH_MODELS = listOf(" in service_code, "REST_FLASH_MODELS missing in PocketService.kt"
-assert '"gemini-2.5-flash"' in service_code, "gemini-2.5-flash missing in REST_FLASH_MODELS"
-assert '"gemini-1.5-flash"' in service_code, "gemini-1.5-flash missing in REST_FLASH_MODELS"
 assert '"gemini-2.0-flash"' in service_code, "gemini-2.0-flash missing in REST_FLASH_MODELS"
+assert '"gemini-1.5-flash"' in service_code, "gemini-1.5-flash missing in REST_FLASH_MODELS"
 assert "respCode == 404 || respCode == 400" in service_code, "HTTP 404/400 model fallback missing in PocketService.kt"
 assert "executeTranslationCall(modelIndex + 1)" in service_code, "Next candidate invocation on fallback missing"
+assert "commitFinalizedSpeech" in service_code, "commitFinalizedSpeech method missing in PocketService.kt"
+assert "turnId" in service_code, "turnId parameter missing in requestRestTranslation / deliverRestTranslation"
 
 # 4. Continuous Android SpeechRecognizer Contract
 assert "speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)" in service_code, "createSpeechRecognizer missing in PocketService.kt"
@@ -1375,11 +1376,11 @@ class FallbackClientSim:
             return self.call(models, idx + 1)
         return f"OK_{model}"
 
-# Scenario: Primary gemini-2.5-flash fails (404), fallback to gemini-1.5-flash succeeds:
-sim_client = FallbackClientSim(failing_models=["gemini-2.5-flash"])
-res = sim_client.call(["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"])
+# Scenario: Primary gemini-2.0-flash fails (404/503), fallback to gemini-1.5-flash succeeds:
+sim_client = FallbackClientSim(failing_models=["gemini-2.0-flash"])
+res = sim_client.call(["gemini-2.0-flash", "gemini-1.5-flash"])
 assert res == "OK_gemini-1.5-flash"
-assert sim_client.called_models == ["gemini-2.5-flash", "gemini-1.5-flash"]
+assert sim_client.called_models == ["gemini-2.0-flash", "gemini-1.5-flash"]
 
 # 11. Speech Segment Real-World Verification from PocketHUD Session Log (12)
 log_12_path = os.path.join(BASE_DIR, "PocketHUD Session Log (12)")
@@ -1398,12 +1399,12 @@ if os.path.exists(log_12_path):
                 speech_segments.append(m.group(1))
     assert len(speech_segments) > 0, "Failed to extract speech segments from Log 12"
     # Verify that speech segments are valid non-empty Italian utterances
-    assert any("piatto tradizionale" in s for s in speech_segments), "Key phrase 'piatto tradizionale' missing in Log 12"
+    assert any("piatto tradizionale" in s for s in speech_segments), "Key phrase 'piatto превратилась в tradizionale' missing in Log 12"
     print(f"  -> Successfully verified {len(speech_segments)} real speech segments from PocketHUD Session Log (12).")
 
 print("  -> Option A Cascaded REST, SpeechRecognizer contract, REST multi-model fallback & TTS verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.42 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print("🎉 ALL V1.0.43 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
 

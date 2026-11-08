@@ -299,7 +299,12 @@ class PocketService : Service() {
         }
     }
 
-    @Volatile private var activeRestModel: String = "gemini-2.5-flash"
+    @Volatile private var activeRestModel: String = "gemini-2.0-flash"
+
+    private val restHttpClient = OkHttpClient.Builder()
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
+        .build()
 
     private val logDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
@@ -324,9 +329,8 @@ class PocketService : Service() {
         const val ACTION_SWITCH_ENGINE = "com.aleksandr.pockethud.ACTION_SWITCH_ENGINE"
 
         val REST_FLASH_MODELS = listOf(
-            "gemini-2.5-flash",
-            "gemini-1.5-flash",
-            "gemini-2.0-flash"
+            "gemini-2.0-flash",
+            "gemini-1.5-flash"
         )
 
         @Volatile
@@ -340,7 +344,7 @@ class PocketService : Service() {
             }
 
         @Volatile
-        var selectedRestModel: String = "gemini-2.5-flash"
+        var selectedRestModel: String = "gemini-2.0-flash"
             set(value) {
                 field = value
                 currentInstance?.applyRestModelChange(value)
@@ -473,7 +477,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.42\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nДвижок: $selectedEngine (REST модель: $selectedRestModel)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.43\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nДвижок: $selectedEngine (REST модель: $selectedRestModel)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -578,10 +582,13 @@ class PocketService : Service() {
         }
 
         val restModelExtra = intent?.getStringExtra(EXTRA_REST_MODEL)
-        if (!restModelExtra.isNullOrBlank()) {
-            selectedRestModel = restModelExtra
-            activeRestModel = restModelExtra
+        val validRestModel = if (!restModelExtra.isNullOrBlank() && restModelExtra in REST_FLASH_MODELS) {
+            restModelExtra
+        } else {
+            "gemini-2.0-flash"
         }
+        selectedRestModel = validRestModel
+        activeRestModel = validRestModel
 
         activeApiKey = apiKey
         reconnectAttempts = 0
@@ -616,7 +623,7 @@ class PocketService : Service() {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
             updateOngoingNotification(
                 "⚡ Подключение...",
-                "PocketHUD v1.0.42 активен (Каскадный ASR + REST Flash). Слушаю итальянскую речь..."
+                "PocketHUD v1.0.43 активен (Каскадный ASR + REST Flash). Слушаю итальянскую речь..."
             )
             onStatusChanged?.invoke("⚡ Каскадный режим активен (ASR + REST Flash)")
             setupAudioRouting()
@@ -627,7 +634,7 @@ class PocketService : Service() {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
             updateOngoingNotification(
                 "🔵 Подключение...",
-                "PocketHUD v1.0.42 активен. Ожидание подключения к Gemini Live API..."
+                "PocketHUD v1.0.43 активен. Ожидание подключения к Gemini Live API..."
             )
             setupAudioRouting()
             onStatusChanged?.invoke("🔵 Подключение к Google Gemini Live API...")
@@ -1454,7 +1461,7 @@ class PocketService : Service() {
             .addAction(actions.stopAction)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.42")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.43")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1551,7 +1558,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.42")
+            appendLine("Версия: v1.0.43")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("--- ДВИЖОК ПЕРЕВОДА ---")
             appendLine("Активный движок: ${selectedEngine.name}")
@@ -2591,7 +2598,7 @@ class PocketService : Service() {
                 onStatusChanged?.invoke(statusMsg)
                 updateOngoingNotification(
                     "⚡ Каскадный ASR+REST",
-                    "PocketHUD v1.0.42: переключено на каскадный перевод (ASR + REST Flash)"
+                    "PocketHUD v1.0.43: переключено на каскадный перевод (ASR + REST Flash)"
                 )
             } else {
                 // Shut down Cascaded REST components
@@ -2615,7 +2622,7 @@ class PocketService : Service() {
                 onStatusChanged?.invoke(statusMsg)
                 updateOngoingNotification(
                     "🔵 Gemini Live WS",
-                    "PocketHUD v1.0.42: переключено на Gemini Live WebSocket..."
+                    "PocketHUD v1.0.43: переключено на Gemini Live WebSocket..."
                 )
                 connectWebSocket(activeApiKey)
             }
@@ -2707,6 +2714,12 @@ class PocketService : Service() {
         }
         val result = tts?.speak(cleanSpeech, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
         logEvent("TTS_SPEAK", "utteranceId=$utteranceId, res=$result, text=\"$cleanSpeech\"")
+        if (result != TextToSpeech.SUCCESS) {
+            Log.w(tag, "tts.speak вернул код ошибки: $result, сброс состояния")
+            isTtsSpeaking = false
+            mainHandler.removeCallbacks(ttsWatchdogRunnable)
+            resumeRecognition()
+        }
     }
 
     private fun sanitizeTtsSpeech(raw: String): String {
@@ -2763,7 +2776,6 @@ class PocketService : Service() {
 
                 override fun onError(error: Int) {
                     lastSpeechRecognitionError = error
-                    consecutiveSpeechErrors++
                     val errName = when (error) {
                         SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"
                         SpeechRecognizer.ERROR_CLIENT -> "ERROR_CLIENT"
@@ -2776,13 +2788,18 @@ class PocketService : Service() {
                         SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "ERROR_SPEECH_TIMEOUT"
                         else -> "ERROR_$error"
                     }
+                    if (error != SpeechRecognizer.ERROR_NO_MATCH && error != SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                        consecutiveSpeechErrors++
+                    } else {
+                        consecutiveSpeechErrors = 0
+                    }
                     logEvent("ASR_ERROR", "code=$error, name=$errName, repeats=$consecutiveSpeechErrors")
 
                     if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
                         val delayMs = when {
                             consecutiveSpeechErrors > 5 -> 1000L
                             error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY || error == SpeechRecognizer.ERROR_CLIENT -> 300L
-                            else -> 100L
+                            else -> 50L
                         }
                         mainHandler.postDelayed({
                             startListeningSafe()
@@ -2796,8 +2813,8 @@ class PocketService : Service() {
                     val finalText = matches?.firstOrNull()?.trim()
                     if (!finalText.isNullOrBlank()) {
                         logEvent("ASR_FINAL_SPEECH", "\"$finalText\"")
-                        recordInputSpeech(finalText)
-                        requestRestTranslation(finalText)
+                        val turnId = commitFinalizedSpeech(finalText)
+                        requestRestTranslation(finalText, turnId)
                     }
                     if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
                         mainHandler.postDelayed({
@@ -2833,6 +2850,7 @@ class PocketService : Service() {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE, "it-IT")
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 }
+                speechRecognizer?.cancel()
                 speechRecognizer?.startListening(intent)
                 logEvent("ASR_LISTENING_START", "lang=it-IT")
             } catch (e: Exception) {
@@ -2923,24 +2941,69 @@ class PocketService : Service() {
         )
     }
 
-    private fun requestRestTranslation(italianText: String) {
+    private fun commitFinalizedSpeech(finalText: String): Long {
+        lastRecognizedInput = finalText
+        appendToSessionBuilder(sessionItalianBuilder, finalText)
+        onInputTextReceived?.invoke(finalText)
+
+        synchronized(sessionDialogueTurns) {
+            val now = System.currentTimeMillis()
+            val curTurn = activeDialogueTurn
+            val targetTurn = if (curTurn != null && !curTurn.isFinalized) {
+                curTurn.italianText = finalText
+                curTurn.lastActivityTime = now
+                val idx = sessionDialogueTurns.indexOf(curTurn)
+                if (idx != -1) {
+                    onDialogueTurnUpdated?.invoke(idx, curTurn.copy(), false)
+                }
+                curTurn
+            } else {
+                val newTurn = DialogueTurn(
+                    italianText = finalText,
+                    russianText = "",
+                    timestamp = now,
+                    lastActivityTime = now,
+                    isFinalized = false
+                )
+                sessionDialogueTurns.add(newTurn)
+                if (sessionDialogueTurns.size > 200) {
+                    sessionDialogueTurns.removeAt(0)
+                }
+                val idx = sessionDialogueTurns.size - 1
+                onDialogueTurnUpdated?.invoke(idx, newTurn.copy(), true)
+                newTurn
+            }
+            activeDialogueTurn = null
+            try {
+                DialogueHistoryManager.saveCurrentSessionCache(this@PocketService, sessionDialogueTurns)
+            } catch (e: Exception) {}
+            return targetTurn.id
+        }
+    }
+
+    private fun requestRestTranslation(italianText: String, turnId: Long) {
         if (activeApiKey.isBlank()) {
             logEvent("REST_TRANSLATE_NO_KEY")
             return
         }
 
-        val turnToTranslate = activeDialogueTurn
-        val turnId = turnToTranslate?.id ?: 0L
         logEvent("REST_TRANSLATE_REQUEST", "model=$activeRestModel, turnId=$turnId, text=\"$italianText\"")
-
-        val client = OkHttpClient.Builder()
-            .connectTimeout(5, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS)
-            .build()
 
         fun executeTranslationCall(modelIndex: Int) {
             if (modelIndex >= REST_FLASH_MODELS.size) {
-                logEvent("REST_TRANSLATE_ALL_MODELS_FAILED", "text=\"$italianText\"")
+                logEvent("REST_TRANSLATE_ALL_MODELS_FAILED", "turnId=$turnId, text=\"$italianText\"")
+                mainHandler.post {
+                    synchronized(sessionDialogueTurns) {
+                        val turn = sessionDialogueTurns.find { it.id == turnId }
+                        if (turn != null && !turn.isFinalized) {
+                            turn.isFinalized = true
+                            val idx = sessionDialogueTurns.indexOf(turn)
+                            if (idx != -1) {
+                                onDialogueTurnUpdated?.invoke(idx, turn.copy(), false)
+                            }
+                        }
+                    }
+                }
                 return
             }
 
@@ -2969,7 +3032,7 @@ class PocketService : Service() {
             val body = jsonPayload.toString().toRequestBody(mediaType)
             val req = Request.Builder().url(url).post(body).build()
 
-            client.newCall(req).enqueue(object : okhttp3.Callback {
+            restHttpClient.newCall(req).enqueue(object : okhttp3.Callback {
                 override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                     Log.e(tag, "REST translation network error with model $candidateModel: ${e.message}")
                     logEvent("REST_TRANSLATE_FAIL", "model=$candidateModel, err=${e.message}")
@@ -3013,6 +3076,8 @@ class PocketService : Service() {
                         } else {
                             Log.w(tag, "REST translation HTTP error: $respCode")
                             logEvent("REST_TRANSLATE_HTTP_ERROR", "model=$candidateModel, code=$respCode")
+                            executeTranslationCall(modelIndex + 1)
+                            return
                         }
                     }
                 }
@@ -3024,9 +3089,64 @@ class PocketService : Service() {
     }
 
     private fun deliverRestTranslation(russianTranslation: String, turnId: Long) {
-        Log.d(tag, "Доставлен REST перевод: $russianTranslation")
-        logEvent("TRANSLATION:", "ORIG=\"$lastRecognizedInput\" -> RU=\"$russianTranslation\"")
-        recordTranslationOutput(russianTranslation)
+        Log.d(tag, "Доставлен REST перевод: $russianTranslation (turnId=$turnId)")
+        serverTextChunksReceived++
+        lastServerText = russianTranslation
+
+        val origItalian: String
+        synchronized(sessionDialogueTurns) {
+            var targetTurn = sessionDialogueTurns.find { it.id == turnId }
+            if (targetTurn == null) {
+                targetTurn = sessionDialogueTurns.findLast { it.russianText.isBlank() }
+            }
+
+            if (targetTurn != null) {
+                targetTurn.russianText = russianTranslation
+                targetTurn.isFinalized = true
+                targetTurn.lastActivityTime = System.currentTimeMillis()
+                origItalian = targetTurn.italianText.ifBlank { lastRecognizedInput }
+                val idx = sessionDialogueTurns.indexOf(targetTurn)
+                if (idx != -1) {
+                    onDialogueTurnUpdated?.invoke(idx, targetTurn.copy(), false)
+                }
+            } else {
+                origItalian = lastRecognizedInput
+                val newTurn = DialogueTurn(
+                    italianText = origItalian,
+                    russianText = russianTranslation,
+                    timestamp = System.currentTimeMillis(),
+                    lastActivityTime = System.currentTimeMillis(),
+                    isFinalized = true
+                )
+                sessionDialogueTurns.add(newTurn)
+                if (sessionDialogueTurns.size > 200) {
+                    sessionDialogueTurns.removeAt(0)
+                }
+                val idx = sessionDialogueTurns.size - 1
+                onDialogueTurnUpdated?.invoke(idx, newTurn.copy(), true)
+            }
+            if (activeDialogueTurn?.id == turnId) {
+                activeDialogueTurn = null
+            }
+            try {
+                DialogueHistoryManager.saveCurrentSessionCache(this@PocketService, sessionDialogueTurns)
+            } catch (e: Exception) {}
+        }
+
+        logEvent("TRANSLATION:", "ORIG=\"$origItalian\" -> RU=\"$russianTranslation\"")
+        recentTranslations.append(russianTranslation).append(" ")
+        if (recentTranslations.length > 800) {
+            val cutIndex = recentTranslations.indexOf(". ", recentTranslations.length - 450)
+            if (cutIndex != -1) {
+                recentTranslations.delete(0, cutIndex + 2)
+            } else {
+                recentTranslations.delete(0, recentTranslations.length - 450)
+            }
+        }
+        appendToSessionBuilder(sessionRussianBuilder, russianTranslation)
+        onTextReceived?.invoke(russianTranslation)
+
+        scheduleNotificationUpdate(russianTranslation, recentTranslations.toString().trim())
 
         if (!isAudioMuted && isTtsInitialized && russianTranslation.isNotBlank()) {
             speakTts(russianTranslation)
