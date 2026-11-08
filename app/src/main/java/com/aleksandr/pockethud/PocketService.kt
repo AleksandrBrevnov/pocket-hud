@@ -194,6 +194,7 @@ class StreamingTagCleaner {
 class PocketService : Service() {
 
     private val tag = "PocketHUD"
+    private val TAG = "PocketHUD"
     @Volatile private var isRunning = false
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var webSocket: WebSocket? = null
@@ -299,16 +300,17 @@ class PocketService : Service() {
         }
     }
 
-    @Volatile private var activeRestModel: String = "gemini-3.8-flash"
+    @Volatile private var activeRestModel: String = "gemini-3.5-flash-lite"
 
     private val restHttpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
         .build()
 
     private val logDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
     companion object {
+        const val TAG = "PocketHUD"
         const val CHANNEL_SERVICE_ID = "pocket_hud_service_v2"
         const val CHANNEL_SUBTITLES_ID = "pocket_hud_subtitles_v2"
         const val NOTIFICATION_ID = 1001
@@ -329,9 +331,9 @@ class PocketService : Service() {
         const val ACTION_SWITCH_ENGINE = "com.aleksandr.pockethud.ACTION_SWITCH_ENGINE"
 
         val REST_FLASH_MODELS = listOf(
+            "gemini-3.5-flash-lite",
             "gemini-3.8-flash",
-            "gemini-2.0-flash",
-            "gemini-1.5-flash"
+            "gemini-flash-latest"
         )
 
         @Volatile
@@ -345,7 +347,7 @@ class PocketService : Service() {
             }
 
         @Volatile
-        var selectedRestModel: String = "gemini-3.8-flash"
+        var selectedRestModel: String = "gemini-3.5-flash-lite"
             set(value) {
                 field = value
                 currentInstance?.applyRestModelChange(value)
@@ -478,7 +480,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.44\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nДвижок: $selectedEngine (REST модель: $selectedRestModel)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.45\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nДвижок: $selectedEngine (REST модель: $selectedRestModel)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -586,7 +588,7 @@ class PocketService : Service() {
         val validRestModel = if (!restModelExtra.isNullOrBlank() && restModelExtra in REST_FLASH_MODELS) {
             restModelExtra
         } else {
-            "gemini-3.8-flash"
+            "gemini-3.5-flash-lite"
         }
         selectedRestModel = validRestModel
         activeRestModel = validRestModel
@@ -624,7 +626,7 @@ class PocketService : Service() {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
             updateOngoingNotification(
                 "⚡ Подключение...",
-                "PocketHUD v1.0.44 активен (Каскадный ASR + REST Flash). Слушаю итальянскую речь..."
+                "PocketHUD v1.0.45 активен (Каскадный ASR + REST Flash). Слушаю итальянскую речь..."
             )
             onStatusChanged?.invoke("⚡ Каскадный режим активен (ASR + REST Flash)")
             setupAudioRouting()
@@ -635,7 +637,7 @@ class PocketService : Service() {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
             updateOngoingNotification(
                 "🔵 Подключение...",
-                "PocketHUD v1.0.44 активен. Ожидание подключения к Gemini Live API..."
+                "PocketHUD v1.0.45 активен. Ожидание подключения к Gemini Live API..."
             )
             setupAudioRouting()
             onStatusChanged?.invoke("🔵 Подключение к Google Gemini Live API...")
@@ -1462,7 +1464,7 @@ class PocketService : Service() {
             .addAction(actions.stopAction)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.44")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.45")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1559,7 +1561,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.44")
+            appendLine("Версия: v1.0.45")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("--- ДВИЖОК ПЕРЕВОДА ---")
             appendLine("Активный движок: ${selectedEngine.name}")
@@ -1711,6 +1713,10 @@ class PocketService : Service() {
 
     private fun connectWebSocket(apiKey: String) {
         if (!isRunning) return
+        if (selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
+            Log.d(TAG, "connectWebSocket skipped: engine is $selectedEngine")
+            return
+        }
         sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
         sessionRotationRunnable = null
         lastAsrPhrase = null
@@ -1834,6 +1840,15 @@ class PocketService : Service() {
                 mainHandler.removeCallbacks(simulIdleRunnable)
                 lastAsrPhrase = null
                 consecutiveAsrRepeatCount = 0
+
+                // Ghost Reconnect Guard: If selected engine is not LIVE_WEBSOCKET, DO NOT schedule websocket reconnection
+                if (selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
+                    Log.d(TAG, "onClosed skipped reconnect: engine is $selectedEngine")
+                    connectionState = "CLOSED ($code: $reason)"
+                    webSocket = null
+                    return
+                }
+
                 if (isRunning) {
                     if (code == 1000) {
                         // Google 10-15 min Session Rotation: DO NOT call stopSelf()!
@@ -1868,6 +1883,20 @@ class PocketService : Service() {
 
     private fun handleConnectionDrop(reason: String) {
         if (!isRunning) return
+        // Ghost Reconnect Guard: if selected engine is not LIVE_WEBSOCKET, DO NOT call stopSelf()
+        if (selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
+            Log.d(TAG, "handleConnectionDrop skipped stopSelf: engine is $selectedEngine ($reason)")
+            isSetupComplete = false
+            setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+            setupWatchdogRunnable = null
+            sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
+            sessionRotationRunnable = null
+            goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+            goAwayRunnable = null
+            mainHandler.removeCallbacks(simulIdleRunnable)
+            webSocket = null
+            return
+        }
         isSetupComplete = false
         setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
         setupWatchdogRunnable = null
@@ -2556,8 +2585,12 @@ class PocketService : Service() {
                 // Shut down WebSocket Live components
                 try {
                     sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
+                    sessionRotationRunnable = null
                     setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+                    setupWatchdogRunnable = null
                     goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+                    goAwayRunnable = null
+                    mainHandler.removeCallbacks(simulIdleRunnable)
                     webSocket?.close(1000, "Switching to Cascaded REST")
                 } catch (e: Exception) {
                     webSocket?.cancel()
@@ -2599,7 +2632,7 @@ class PocketService : Service() {
                 onStatusChanged?.invoke(statusMsg)
                 updateOngoingNotification(
                     "⚡ Каскадный ASR+REST",
-                    "PocketHUD v1.0.44: переключено на каскадный перевод (ASR + REST Flash)"
+                    "PocketHUD v1.0.45: переключено на каскадный перевод (ASR + REST Flash)"
                 )
             } else {
                 // Shut down Cascaded REST components
@@ -2623,7 +2656,7 @@ class PocketService : Service() {
                 onStatusChanged?.invoke(statusMsg)
                 updateOngoingNotification(
                     "🔵 Gemini Live WS",
-                    "PocketHUD v1.0.44: переключено на Gemini Live WebSocket..."
+                    "PocketHUD v1.0.45: переключено на Gemini Live WebSocket..."
                 )
                 connectWebSocket(activeApiKey)
             }
@@ -2634,6 +2667,7 @@ class PocketService : Service() {
     fun applyRestModelChange(newModel: String) {
         logEvent("REST_MODEL_CHANGED", "newModel=$newModel")
         activeRestModel = newModel
+        onRestModelChanged?.invoke(newModel)
     }
 
     private fun initTts() {
@@ -2990,7 +3024,7 @@ class PocketService : Service() {
 
         logEvent("REST_TRANSLATE_REQUEST", "model=$activeRestModel, turnId=$turnId, text=\"$italianText\"")
 
-        fun executeTranslationCall(modelIndex: Int) {
+        fun executeTranslationCall(modelIndex: Int, retryCount: Int = 0) {
             if (modelIndex >= REST_FLASH_MODELS.size) {
                 logEvent("REST_TRANSLATE_ALL_MODELS_FAILED", "turnId=$turnId, text=\"$italianText\"")
                 mainHandler.post {
@@ -3029,6 +3063,7 @@ class PocketService : Service() {
                     if (candidateModel == "gemini-3.8-flash" || candidateModel.startsWith("gemini-3") || candidateModel.contains("thinking")) {
                         put("thinkingConfig", JSONObject().apply {
                             put("thinkingLevel", "low")
+                            put("includeThoughts", false)
                         })
                     }
                 })
@@ -3042,7 +3077,15 @@ class PocketService : Service() {
                 override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                     Log.e(tag, "REST translation network error with model $candidateModel: ${e.message}")
                     logEvent("REST_TRANSLATE_FAIL", "model=$candidateModel, err=${e.message}")
-                    executeTranslationCall(modelIndex + 1)
+                    if (e is java.net.SocketTimeoutException && retryCount < 1) {
+                        Log.w(tag, "Timeout with model $candidateModel, retrying in 600ms (retry ${retryCount + 1}/1)...")
+                        logEvent("REST_TRANSLATE_RETRY", "model=$candidateModel, reason=timeout")
+                        mainHandler.postDelayed({
+                            executeTranslationCall(modelIndex, retryCount + 1)
+                        }, 600L)
+                    } else {
+                        executeTranslationCall(modelIndex + 1, 0)
+                    }
                 }
 
                 override fun onResponse(call: okhttp3.Call, response: Response) {
@@ -3091,18 +3134,25 @@ class PocketService : Service() {
                                 return
                             } else {
                                 logEvent("REST_TRANSLATE_EMPTY_RESPONSE", "model=$candidateModel")
-                                executeTranslationCall(modelIndex + 1)
+                                executeTranslationCall(modelIndex + 1, 0)
                                 return
                             }
+                        } else if (respCode == 503 && retryCount < 1) {
+                            Log.w(tag, "Модель $candidateModel вернула HTTP 503, повтор через 600 мс (retry ${retryCount + 1}/1)...")
+                            logEvent("REST_TRANSLATE_RETRY", "model=$candidateModel, reason=http_503")
+                            mainHandler.postDelayed({
+                                executeTranslationCall(modelIndex, retryCount + 1)
+                            }, 600L)
+                            return
                         } else if (respCode == 404 || respCode == 400) {
                             Log.w(tag, "Модель $candidateModel вернула HTTP $respCode, fallback на следующую модель...")
                             logEvent("REST_MODEL_NOT_FOUND", "model=$candidateModel, http=$respCode")
-                            executeTranslationCall(modelIndex + 1)
+                            executeTranslationCall(modelIndex + 1, 0)
                             return
                         } else {
                             Log.w(tag, "REST translation HTTP error: $respCode")
                             logEvent("REST_TRANSLATE_HTTP_ERROR", "model=$candidateModel, code=$respCode")
-                            executeTranslationCall(modelIndex + 1)
+                            executeTranslationCall(modelIndex + 1, 0)
                             return
                         }
                     }
@@ -3111,7 +3161,7 @@ class PocketService : Service() {
         }
 
         val initialIdx = REST_FLASH_MODELS.indexOf(activeRestModel).coerceAtLeast(0)
-        executeTranslationCall(initialIdx)
+        executeTranslationCall(initialIdx, 0)
     }
 
     private fun deliverRestTranslation(russianTranslation: String, turnId: Long) {

@@ -128,16 +128,19 @@ with open(build_gradle_path, "r", encoding="utf-8") as f:
 with open(setup_and_push_path, "r", encoding="utf-8") as f:
     setup_code = f.read()
 
-print("\n--- 1. Verification of v1.0.44 Version Bumps & Fixed Keystore ---")
-assert 'versionCode = 48' in gradle_code, "versionCode 48 missing in app/build.gradle.kts"
-assert 'versionName = "1.0.44"' in gradle_code, "versionName 1.0.44 missing in app/build.gradle.kts"
+TARGET_VERSION_NAME = "1.0.45"
+TARGET_VERSION_CODE = 49
+
+print(f"\n--- 1. Verification of v{TARGET_VERSION_NAME} (code {TARGET_VERSION_CODE}) Version Bumps & Fixed Keystore ---")
+assert f'versionCode = {TARGET_VERSION_CODE}' in gradle_code, f"versionCode {TARGET_VERSION_CODE} missing in app/build.gradle.kts"
+assert f'versionName = "{TARGET_VERSION_NAME}"' in gradle_code, f"versionName {TARGET_VERSION_NAME} missing in app/build.gradle.kts"
 assert 'signingConfigs' in gradle_code and 'debug.keystore' in gradle_code, "signingConfigs with fixed debug.keystore missing in app/build.gradle.kts"
 assert os.path.exists(debug_keystore_path), "app/debug.keystore missing on disk"
-assert 'text = "v1.0.44"' in main_code, "v1.0.44 badge missing in MainActivity.kt"
-assert 'PocketHUD — Ушной суфлёр v1.0.44' in service_code, "v1.0.44 notification title missing in PocketService.kt"
-assert 'PocketHUD v1.0.44 активен' in service_code, "v1.0.44 start subtitle missing in PocketService.kt"
-assert 'Версия: v1.0.44' in service_code, "v1.0.44 diagnostic summary missing in PocketService.kt"
-print("  -> Version bump v1.0.44 and fixed debug.keystore OK across all files.")
+assert f'text = "v{TARGET_VERSION_NAME}"' in main_code, f"v{TARGET_VERSION_NAME} badge missing in MainActivity.kt"
+assert f'PocketHUD — Ушной суфлёр v{TARGET_VERSION_NAME}' in service_code, f"v{TARGET_VERSION_NAME} notification title missing in PocketService.kt"
+assert f'PocketHUD v{TARGET_VERSION_NAME} активен' in service_code, f"v{TARGET_VERSION_NAME} start subtitle missing in PocketService.kt"
+assert f'Версия: v{TARGET_VERSION_NAME}' in service_code, f"v{TARGET_VERSION_NAME} diagnostic summary missing in PocketService.kt"
+print(f"  -> Version bump v{TARGET_VERSION_NAME} and fixed debug.keystore OK across all files.")
 
 print("\n--- 2. Verification of Google 10-15 min Session Rotation, Watchdog & Reconnect ---")
 assert "code == 1000" in service_code, "Session rotation code 1000 check missing in onClosed"
@@ -1294,13 +1297,19 @@ assert "sendSetup(ws)" in service_code, "sendSetup must be preserved"
 
 # 3. REST Flash Multi-Model Candidate List & Fallback
 assert "val REST_FLASH_MODELS = listOf(" in service_code, "REST_FLASH_MODELS missing in PocketService.kt"
+assert '"gemini-3.5-flash-lite"' in service_code, "gemini-3.5-flash-lite missing in REST_FLASH_MODELS"
 assert '"gemini-3.8-flash"' in service_code, "gemini-3.8-flash missing in REST_FLASH_MODELS"
-assert '"gemini-2.0-flash"' in service_code, "gemini-2.0-flash missing in REST_FLASH_MODELS"
-assert '"gemini-1.5-flash"' in service_code, "gemini-1.5-flash missing in REST_FLASH_MODELS"
+assert '"gemini-flash-latest"' in service_code, "gemini-flash-latest missing in REST_FLASH_MODELS"
 assert "respCode == 404 || respCode == 400" in service_code, "HTTP 404/400 model fallback missing in PocketService.kt"
-assert "executeTranslationCall(modelIndex + 1)" in service_code, "Next candidate invocation on fallback missing"
+assert "executeTranslationCall(modelIndex + 1" in service_code, "Next candidate invocation on fallback missing"
 assert "commitFinalizedSpeech" in service_code, "commitFinalizedSpeech method missing in PocketService.kt"
 assert "turnId" in service_code, "turnId parameter missing in requestRestTranslation / deliverRestTranslation"
+
+# Ghost Reconnect Guard: Check selectedEngine check in connectWebSocket, onClosed, handleConnectionDrop
+assert "selectedEngine != TranslationEngine.LIVE_WEBSOCKET" in service_code, "selectedEngine check missing in PocketService.kt"
+assert "connectWebSocket skipped" in service_code, "Ghost connectWebSocket guard missing"
+assert "onClosed skipped reconnect" in service_code, "Ghost onClosed guard missing"
+assert "handleConnectionDrop skipped stopSelf" in service_code, "Ghost handleConnectionDrop guard missing"
 
 # 4. Continuous Android SpeechRecognizer Contract
 assert "speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)" in service_code, "createSpeechRecognizer missing in PocketService.kt"
@@ -1437,11 +1446,11 @@ class FallbackClientSim:
             return self.call(models, idx + 1)
         return f"OK_{model}"
 
-# Scenario: Primary gemini-3.8-flash fails (404/503), fallback to gemini-2.0-flash succeeds:
-sim_client = FallbackClientSim(failing_models=["gemini-3.8-flash"])
-res = sim_client.call(["gemini-3.8-flash", "gemini-2.0-flash", "gemini-1.5-flash"])
-assert res == "OK_gemini-2.0-flash"
-assert sim_client.called_models == ["gemini-3.8-flash", "gemini-2.0-flash"]
+# Scenario: Primary gemini-3.5-flash-lite fails (404/503), fallback to gemini-3.8-flash succeeds:
+sim_client = FallbackClientSim(failing_models=["gemini-3.5-flash-lite"])
+res = sim_client.call(["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"])
+assert res == "OK_gemini-3.8-flash"
+assert sim_client.called_models == ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
 
 # 11. Speech Segment Real-World Verification from PocketHUD Session Log (12)
 log_12_path = os.path.join(BASE_DIR, "PocketHUD Session Log (12)")
@@ -1466,6 +1475,6 @@ if os.path.exists(log_12_path):
 print("  -> Option A Cascaded REST, SpeechRecognizer contract, REST multi-model fallback & TTS verified perfectly.")
 
 print("\n=======================================================")
-print("🎉 ALL V1.0.44 ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
+print(f"🎉 ALL V{TARGET_VERSION_NAME} ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")
 print("=======================================================")
 

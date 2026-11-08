@@ -133,14 +133,16 @@ def main():
         gradle_code = f.read()
 
     # 3. Version bump checks
-    print("\n--- 3. Version Bump v1.0.44 Verification ---")
-    assert "versionCode = 48" in gradle_code, "versionCode must be 48 in app/build.gradle.kts"
-    assert 'versionName = "1.0.44"' in gradle_code, 'versionName must be "1.0.44" in app/build.gradle.kts'
-    assert 'text = "v1.0.44"' in main_code, "v1.0.44 badge missing in MainActivity.kt"
-    assert 'PocketHUD — Ушной суфлёр v1.0.44' in service_code, "v1.0.44 missing in PocketService notification"
-    assert 'PocketHUD v1.0.44 активен' in service_code, "v1.0.44 missing in PocketService start subtitle"
-    assert 'Версия: v1.0.44' in service_code, "v1.0.44 missing in PocketService diagnostic summary"
-    print("  -> Version bump v1.0.44 verified across build.gradle.kts, MainActivity, and PocketService.")
+    TARGET_VERSION_NAME = "1.0.45"
+    TARGET_VERSION_CODE = 49
+    print(f"\n--- 3. Version Bump v{TARGET_VERSION_NAME} Verification ---")
+    assert f"versionCode = {TARGET_VERSION_CODE}" in gradle_code, f"versionCode must be {TARGET_VERSION_CODE} in app/build.gradle.kts"
+    assert f'versionName = "{TARGET_VERSION_NAME}"' in gradle_code, f'versionName must be "{TARGET_VERSION_NAME}" in app/build.gradle.kts'
+    assert f'text = "v{TARGET_VERSION_NAME}"' in main_code, f"v{TARGET_VERSION_NAME} badge missing in MainActivity.kt"
+    assert f'PocketHUD — Ушной суфлёр v{TARGET_VERSION_NAME}' in service_code, f"v{TARGET_VERSION_NAME} missing in PocketService notification"
+    assert f'PocketHUD v{TARGET_VERSION_NAME} активен' in service_code, f"v{TARGET_VERSION_NAME} missing in PocketService start subtitle"
+    assert f'Версия: v{TARGET_VERSION_NAME}' in service_code, f"v{TARGET_VERSION_NAME} missing in PocketService diagnostic summary"
+    print(f"  -> Version bump v{TARGET_VERSION_NAME} verified across build.gradle.kts, MainActivity, and PocketService.")
 
     # 4. Storage & Persistence Checks
     print("\n--- 4. Persistent Storage Directory & Format Invariants ---")

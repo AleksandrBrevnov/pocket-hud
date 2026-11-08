@@ -116,6 +116,7 @@ class MainActivity : AppCompatActivity() {
     private var currentMicSource = MicSource.SMARTPHONE
     private var currentEngine = TranslationEngine.CASCADED_REST
     private var showOriginalText = true
+    private val restModelButtons = mutableMapOf<String, TextView>()
 
     companion object {
         private const val IT_PLACEHOLDER = "Слушаю итальянскую или английскую речь (собеседник, лекция)..."
@@ -157,10 +158,10 @@ class MainActivity : AppCompatActivity() {
         PocketService.selectedEngine = currentEngine
         updateEngineStyles()
 
-        val savedModel = prefs.getString(keyRestModel, "gemini-3.8-flash") ?: "gemini-3.8-flash"
-        val validModel = if (savedModel == "gemini-2.0-flash" || savedModel == "gemini-1.5-flash" || savedModel !in PocketService.REST_FLASH_MODELS) {
-            prefs.edit().putString(keyRestModel, "gemini-3.8-flash").apply()
-            "gemini-3.8-flash"
+        val savedModel = prefs.getString(keyRestModel, "gemini-3.5-flash-lite") ?: "gemini-3.5-flash-lite"
+        val validModel = if (savedModel == "gemini-2.0-flash" || savedModel == "gemini-1.5-flash" || savedModel == "gemini-2.5-flash" || savedModel !in PocketService.REST_FLASH_MODELS) {
+            prefs.edit().putString(keyRestModel, "gemini-3.5-flash-lite").apply()
+            "gemini-3.5-flash-lite"
         } else {
             savedModel
         }
@@ -270,6 +271,7 @@ class MainActivity : AppCompatActivity() {
         updateMuteButtonUi()
         updateMicSourceStyles()
         updateEngineStyles()
+        updateRestModelStyles()
 
         val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         val savedShowOriginal = prefs.getBoolean(keyShowOriginalText, true)
@@ -450,6 +452,28 @@ class MainActivity : AppCompatActivity() {
             "🌐 Включен синхронный режим (Gemini Live WebSocket)"
         }
         Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun setRestModel(model: String) {
+        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        prefs.edit().putString(keyRestModel, model).apply()
+        PocketService.selectedRestModel = model
+        updateRestModelStyles(model)
+        Toast.makeText(this, "Выбрана модель REST: $model", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun updateRestModelStyles(currentModel: String = PocketService.selectedRestModel) {
+        val activeBg = createRoundedDrawable(0xFF1E3A8A.toInt(), 0xFF3B82F6.toInt(), 1, 8f)
+        val inactiveBg = createRoundedDrawable(android.graphics.Color.TRANSPARENT, 0, 0, 8f)
+        for ((model, btn) in restModelButtons) {
+            if (model == currentModel) {
+                btn.background = activeBg
+                btn.setTextColor(0xFFFFFFFF.toInt())
+            } else {
+                btn.background = inactiveBg
+                btn.setTextColor(0xFF9AA0A6.toInt())
+            }
+        }
     }
 
     private fun updateTabStyles() {
@@ -733,6 +757,12 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 currentEngine = engine
                 updateEngineStyles()
+            }
+        }
+
+        PocketService.onRestModelChanged = { model ->
+            runOnUiThread {
+                updateRestModelStyles(model)
             }
         }
     }
@@ -1020,7 +1050,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.44"
+            text = "v1.0.45"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
@@ -1088,6 +1118,58 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
         }
         apiSettingsContainer.addView(apiHint)
+
+        val modelLabel = TextView(this).apply {
+            text = "⚡ Модель REST Flash (Каскадный режим):"
+            textSize = 11.5f
+            setTextColor(0xFF8AB4F8.toInt())
+            setTypeface(null, Typeface.BOLD)
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(dp(2), dp(10), 0, dp(4)) }
+            layoutParams = params
+        }
+        apiSettingsContainer.addView(modelLabel)
+
+        val modelSelectorBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = createRoundedDrawable(0xFF14171E.toInt(), 0xFF2B3240.toInt(), 1, 10f)
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(4)) }
+            layoutParams = params
+        }
+
+        val availableModels = listOf("gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest")
+        for (model in availableModels) {
+            val displayName = when (model) {
+                "gemini-3.5-flash-lite" -> "3.5-Lite"
+                "gemini-3.8-flash" -> "3.8-Flash"
+                "gemini-flash-latest" -> "Flash-Latest"
+                else -> model
+            }
+            val modelBtn = TextView(this).apply {
+                text = displayName
+                textSize = 11f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                setPadding(dp(4), dp(6), dp(4), dp(6))
+                val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                layoutParams = params
+                isClickable = true
+                setOnClickListener {
+                    setRestModel(model)
+                }
+            }
+            restModelButtons[model] = modelBtn
+            modelSelectorBar.addView(modelBtn)
+        }
+        apiSettingsContainer.addView(modelSelectorBar)
+        updateRestModelStyles(PocketService.selectedRestModel)
         root.addView(apiSettingsContainer)
 
         // ==========================================
