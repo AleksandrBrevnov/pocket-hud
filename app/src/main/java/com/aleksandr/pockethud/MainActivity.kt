@@ -158,7 +158,8 @@ class MainActivity : AppCompatActivity() {
         updateEngineStyles()
 
         val savedModel = prefs.getString(keyRestModel, "gemini-3.8-flash") ?: "gemini-3.8-flash"
-        val validModel = if (savedModel == "gemini-2.0-flash" || savedModel !in PocketService.REST_FLASH_MODELS) {
+        val validModel = if (savedModel == "gemini-2.0-flash" || savedModel == "gemini-1.5-flash" || savedModel !in PocketService.REST_FLASH_MODELS) {
+            prefs.edit().putString(keyRestModel, "gemini-3.8-flash").apply()
             "gemini-3.8-flash"
         } else {
             savedModel

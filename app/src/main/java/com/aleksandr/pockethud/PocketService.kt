@@ -3051,6 +3051,7 @@ class PocketService : Service() {
                         val respString = resp.body?.string() ?: ""
 
                         if (respCode == 200) {
+                            var parsedTranslation = ""
                             try {
                                 val root = JSONObject(respString)
                                 val candidates = root.optJSONArray("candidates")
@@ -3059,20 +3060,39 @@ class PocketService : Service() {
                                     val content = cand.optJSONObject("content")
                                     val parts = content?.optJSONArray("parts")
                                     if (parts != null && parts.length() > 0) {
-                                        val rawText = parts.getJSONObject(0).optString("text", "").trim()
-                                        val cleaned = sanitizeRestTranslation(rawText)
-                                        if (cleaned.isNotBlank()) {
-                                            activeRestModel = candidateModel
-                                            mainHandler.post {
-                                                deliverRestTranslation(cleaned, turnId)
+                                        val sb = StringBuilder()
+                                        for (i in 0 until parts.length()) {
+                                            val partObj = parts.optJSONObject(i) ?: continue
+                                            if (partObj.optBoolean("thought", false)) {
+                                                continue
                                             }
-                                            return
+                                            val partText = partObj.optString("text", "")
+                                            if (partText.isNotEmpty()) {
+                                                if (sb.isNotEmpty()) sb.append(" ")
+                                                sb.append(partText)
+                                            }
                                         }
+                                        var rawText = sb.toString().trim()
+                                        if (rawText.isBlank()) {
+                                            rawText = parts.getJSONObject(parts.length() - 1).optString("text", "").trim()
+                                        }
+                                        parsedTranslation = sanitizeRestTranslation(rawText)
                                     }
                                 }
-                                logEvent("REST_TRANSLATE_EMPTY_RESPONSE", "model=$candidateModel")
                             } catch (e: Exception) {
                                 Log.e(tag, "Ошибка парсинга ответа REST перевода: ${e.message}")
+                            }
+
+                            if (parsedTranslation.isNotBlank()) {
+                                activeRestModel = candidateModel
+                                mainHandler.post {
+                                    deliverRestTranslation(parsedTranslation, turnId)
+                                }
+                                return
+                            } else {
+                                logEvent("REST_TRANSLATE_EMPTY_RESPONSE", "model=$candidateModel")
+                                executeTranslationCall(modelIndex + 1)
+                                return
                             }
                         } else if (respCode == 404 || respCode == 400) {
                             Log.w(tag, "Модель $candidateModel вернула HTTP $respCode, fallback на следующую модель...")
@@ -3161,6 +3181,7 @@ class PocketService : Service() {
 
     fun sanitizeRestTranslation(raw: String): String {
         var text = raw.trim()
+        text = text.replace(Regex("<thought>[\\s\\S]*?</thought>", RegexOption.IGNORE_CASE), "").trim()
         text = text.removeSurrounding("\"").removeSurrounding("«", "»").trim()
         if (text.startsWith("Перевод:", ignoreCase = true)) {
             text = text.substring("Перевод:".length).trim()

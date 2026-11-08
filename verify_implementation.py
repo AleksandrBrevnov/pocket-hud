@@ -1343,9 +1343,14 @@ assert "engineLiveBtn" in main_code, "engineLiveBtn missing in MainActivity.kt"
 assert "EXTRA_TRANSLATION_ENGINE" in main_code, "EXTRA_TRANSLATION_ENGINE missing in MainActivity intent"
 assert "PocketService.onEngineChanged = null" in main_code, "onEngineChanged cleanup missing in MainActivity.onDestroy"
 
-# 9. Python Simulation of sanitizeRestTranslation & sanitizeTtsSpeech
+# 9. Python Simulation of sanitizeRestTranslation & sanitizeTtsSpeech & Gemini Thinking Response Parser
+assert 'partObj.optBoolean("thought", false)' in service_code, "optBoolean('thought', false) check missing in PocketService.kt"
+assert r'<thought>[\\s\\S]*?</thought>' in service_code, "Regex thought cleaner missing in PocketService.kt"
+
 def sim_sanitize_rest(raw: str) -> str:
+    import re
     text = raw.strip()
+    text = re.sub(r'(?i)<thought>[\s\S]*?</thought>', '', text).strip()
     text = text.strip('"\'«»').strip()
     if text.lower().startswith("перевод:"):
         text = text[len("перевод:"):].strip()
@@ -1357,6 +1362,59 @@ assert sim_sanitize_rest('"Привет, как дела?"') == "Привет, �
 assert sim_sanitize_rest('«Добрый день»') == "Добрый день"
 assert sim_sanitize_rest('Перевод: Я иду в магазин.') == "Я иду в магазин."
 assert sim_sanitize_rest('**Перевод:** Где находится вокзал?') == "Где находится вокзал?"
+assert sim_sanitize_rest('<thought>This is an internal reasoning note</thought>Привет!') == "Привет!"
+assert sim_sanitize_rest('<THOUGHT>multi-line\nreasoning\nstep</THOUGHT> **Перевод:** Добрый вечер.') == "Добрый вечер."
+
+def sim_parse_gemini_rest_response(resp_obj):
+    candidates = resp_obj.get("candidates")
+    if not candidates:
+        return ""
+    content = candidates[0].get("content")
+    if not content:
+        return ""
+    parts = content.get("parts")
+    if not parts:
+        return ""
+    res = []
+    for p in parts:
+        if p.get("thought", False):
+            continue
+        t = p.get("text", "")
+        if t:
+            res.append(t)
+    raw = " ".join(res).strip()
+    if not raw and parts:
+        raw = parts[-1].get("text", "").strip()
+    return sim_sanitize_rest(raw)
+
+# Scenario A: Gemini 3.8 Flash returns thought part + translation part
+resp_with_thoughts = {
+    "candidates": [{
+        "content": {
+            "parts": [
+                {"thought": True, "text": "The user wants to translate 'grazie mille' to Russian. In Russian, this is 'большое спасибо'."},
+                {"thought": False, "text": "Большое спасибо."}
+            ]
+        }
+    }]
+}
+assert sim_parse_gemini_rest_response(resp_with_thoughts) == "Большое спасибо."
+
+# Scenario B: Gemini returns inline thought tags in single part
+resp_with_inline_tags = {
+    "candidates": [{
+        "content": {
+            "parts": [
+                {"text": "<thought>Analyzing context</thought> Добро пожаловать!"}
+            ]
+        }
+    }]
+}
+assert sim_parse_gemini_rest_response(resp_with_inline_tags) == "Добро пожаловать!"
+
+# Scenario C: Safety block or empty candidates returns empty string (triggering fallback)
+assert sim_parse_gemini_rest_response({"candidates": []}) == ""
+assert sim_parse_gemini_rest_response({}) == ""
 
 def sim_sanitize_tts(raw: str) -> str:
     import re
