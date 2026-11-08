@@ -157,8 +157,12 @@ class MainActivity : AppCompatActivity() {
         PocketService.selectedEngine = currentEngine
         updateEngineStyles()
 
-        val savedModel = prefs.getString(keyRestModel, "gemini-2.0-flash") ?: "gemini-2.0-flash"
-        val validModel = if (savedModel !in PocketService.REST_FLASH_MODELS) "gemini-2.0-flash" else savedModel
+        val savedModel = prefs.getString(keyRestModel, "gemini-3.8-flash") ?: "gemini-3.8-flash"
+        val validModel = if (savedModel == "gemini-2.0-flash" || savedModel !in PocketService.REST_FLASH_MODELS) {
+            "gemini-3.8-flash"
+        } else {
+            savedModel
+        }
         PocketService.selectedRestModel = validModel
 
         val isMuted = prefs.getBoolean(keyAudioMuted, false)
@@ -1015,7 +1019,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.43"
+            text = "v1.0.44"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)

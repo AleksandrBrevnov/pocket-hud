@@ -299,7 +299,7 @@ class PocketService : Service() {
         }
     }
 
-    @Volatile private var activeRestModel: String = "gemini-2.0-flash"
+    @Volatile private var activeRestModel: String = "gemini-3.8-flash"
 
     private val restHttpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -329,6 +329,7 @@ class PocketService : Service() {
         const val ACTION_SWITCH_ENGINE = "com.aleksandr.pockethud.ACTION_SWITCH_ENGINE"
 
         val REST_FLASH_MODELS = listOf(
+            "gemini-3.8-flash",
             "gemini-2.0-flash",
             "gemini-1.5-flash"
         )
@@ -344,7 +345,7 @@ class PocketService : Service() {
             }
 
         @Volatile
-        var selectedRestModel: String = "gemini-2.0-flash"
+        var selectedRestModel: String = "gemini-3.8-flash"
             set(value) {
                 field = value
                 currentInstance?.applyRestModelChange(value)
@@ -477,7 +478,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.43\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nДвижок: $selectedEngine (REST модель: $selectedRestModel)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.44\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nДвижок: $selectedEngine (REST модель: $selectedRestModel)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -585,7 +586,7 @@ class PocketService : Service() {
         val validRestModel = if (!restModelExtra.isNullOrBlank() && restModelExtra in REST_FLASH_MODELS) {
             restModelExtra
         } else {
-            "gemini-2.0-flash"
+            "gemini-3.8-flash"
         }
         selectedRestModel = validRestModel
         activeRestModel = validRestModel
@@ -623,7 +624,7 @@ class PocketService : Service() {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
             updateOngoingNotification(
                 "⚡ Подключение...",
-                "PocketHUD v1.0.43 активен (Каскадный ASR + REST Flash). Слушаю итальянскую речь..."
+                "PocketHUD v1.0.44 активен (Каскадный ASR + REST Flash). Слушаю итальянскую речь..."
             )
             onStatusChanged?.invoke("⚡ Каскадный режим активен (ASR + REST Flash)")
             setupAudioRouting()
@@ -634,7 +635,7 @@ class PocketService : Service() {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
             updateOngoingNotification(
                 "🔵 Подключение...",
-                "PocketHUD v1.0.43 активен. Ожидание подключения к Gemini Live API..."
+                "PocketHUD v1.0.44 активен. Ожидание подключения к Gemini Live API..."
             )
             setupAudioRouting()
             onStatusChanged?.invoke("🔵 Подключение к Google Gemini Live API...")
@@ -1461,7 +1462,7 @@ class PocketService : Service() {
             .addAction(actions.stopAction)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.43")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.44")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1558,7 +1559,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.43")
+            appendLine("Версия: v1.0.44")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("--- ДВИЖОК ПЕРЕВОДА ---")
             appendLine("Активный движок: ${selectedEngine.name}")
@@ -2598,7 +2599,7 @@ class PocketService : Service() {
                 onStatusChanged?.invoke(statusMsg)
                 updateOngoingNotification(
                     "⚡ Каскадный ASR+REST",
-                    "PocketHUD v1.0.43: переключено на каскадный перевод (ASR + REST Flash)"
+                    "PocketHUD v1.0.44: переключено на каскадный перевод (ASR + REST Flash)"
                 )
             } else {
                 // Shut down Cascaded REST components
@@ -2622,7 +2623,7 @@ class PocketService : Service() {
                 onStatusChanged?.invoke(statusMsg)
                 updateOngoingNotification(
                     "🔵 Gemini Live WS",
-                    "PocketHUD v1.0.43: переключено на Gemini Live WebSocket..."
+                    "PocketHUD v1.0.44: переключено на Gemini Live WebSocket..."
                 )
                 connectWebSocket(activeApiKey)
             }
@@ -3025,6 +3026,11 @@ class PocketService : Service() {
                 put("generationConfig", JSONObject().apply {
                     put("temperature", 0.3)
                     put("maxOutputTokens", 256)
+                    if (candidateModel == "gemini-3.8-flash" || candidateModel.startsWith("gemini-3") || candidateModel.contains("thinking")) {
+                        put("thinkingConfig", JSONObject().apply {
+                            put("thinkingLevel", "low")
+                        })
+                    }
                 })
             }
 
