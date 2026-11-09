@@ -214,6 +214,9 @@ class PocketService : Service() {
     // Задача отложенного переподключения при ротации сессии (code=1000)
     private var sessionRotationRunnable: Runnable? = null
 
+    // Задача отложенного переподключения при сбое сети
+    private var reconnectRunnable: Runnable? = null
+
     // Флаг ожидания завершения фразы перед ротацией (Speech-Aware Graceful Rotation)
     @Volatile private var isRotationPending = false
 
@@ -1719,6 +1722,8 @@ class PocketService : Service() {
         }
         sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
         sessionRotationRunnable = null
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable = null
         lastAsrPhrase = null
         consecutiveAsrRepeatCount = 0
         connectionState = if (reconnectAttempts > 0) "RECONNECTING ($reconnectAttempts)" else "CONNECTING"
@@ -1735,7 +1740,10 @@ class PocketService : Service() {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
-                if (webSocket !== ws) return
+                if (webSocket !== ws || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
+                    try { ws.close(1000, "Engine is not LIVE_WEBSOCKET") } catch (e: Exception) {}
+                    return
+                }
                 Log.d(tag, "WebSocket открыт. Отправка Setup...")
                 isSetupComplete = false
                 connectionState = "OPEN (Sending Setup)"
@@ -1745,17 +1753,17 @@ class PocketService : Service() {
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
-                if (webSocket !== ws) return
+                if (webSocket !== ws || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) return
                 handleServerMessage(text)
             }
 
             override fun onMessage(ws: WebSocket, bytes: ByteString) {
-                if (webSocket !== ws) return
+                if (webSocket !== ws || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) return
                 handleServerMessage(bytes.utf8())
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                if (webSocket !== ws) {
+                if (webSocket !== ws || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
                     Log.d(tag, "Игнорирование onFailure для устаревшего сокета: ${t.message}")
                     return
                 }
@@ -1770,6 +1778,8 @@ class PocketService : Service() {
                 isRotationPending = false
                 sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
                 sessionRotationRunnable = null
+                reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+                reconnectRunnable = null
                 mainHandler.removeCallbacks(simulIdleRunnable)
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
@@ -1835,6 +1845,8 @@ class PocketService : Service() {
                 isRotationPending = false
                 sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
                 sessionRotationRunnable = null
+                reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+                reconnectRunnable = null
                 goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                 goAwayRunnable = null
                 mainHandler.removeCallbacks(simulIdleRunnable)
@@ -1860,7 +1872,7 @@ class PocketService : Service() {
                         onStatusChanged?.invoke("🔄 Ротация сессии Google (15 мин). Мгновенное возобновление...")
                         val rotationTask = Runnable {
                             sessionRotationRunnable = null
-                            if (isRunning && activeApiKey.isNotBlank()) {
+                            if (isRunning && activeApiKey.isNotBlank() && selectedEngine == TranslationEngine.LIVE_WEBSOCKET) {
                                 audioSendQueue.clear()
                                 connectWebSocket(activeApiKey)
                             }
@@ -1891,6 +1903,8 @@ class PocketService : Service() {
             setupWatchdogRunnable = null
             sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
             sessionRotationRunnable = null
+            reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+            reconnectRunnable = null
             goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
             goAwayRunnable = null
             mainHandler.removeCallbacks(simulIdleRunnable)
@@ -1908,6 +1922,8 @@ class PocketService : Service() {
         isRotationPending = false
         sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
         sessionRotationRunnable = null
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable = null
         mainHandler.removeCallbacks(simulIdleRunnable)
         goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
         goAwayRunnable = null
@@ -1922,15 +1938,19 @@ class PocketService : Service() {
             connectionState = "RECONNECTING ($reconnectAttempts/$maxReconnectAttempts in ${delaySec}s)"
             onStatusChanged?.invoke("🟠 Связь прервана ($reason). Авто-переподключение через ${delaySec}с ($reconnectAttempts/$maxReconnectAttempts)...")
 
-            mainHandler.postDelayed({
-                if (isRunning && activeApiKey.isNotBlank()) {
+            reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+            val reconTask = Runnable {
+                reconnectRunnable = null
+                if (isRunning && activeApiKey.isNotBlank() && selectedEngine == TranslationEngine.LIVE_WEBSOCKET) {
                     try {
                         webSocket?.cancel()
                     } catch (e: Exception) {}
                     webSocket = null
                     connectWebSocket(activeApiKey)
                 }
-            }, delaySec * 1000L)
+            }
+            reconnectRunnable = reconTask
+            mainHandler.postDelayed(reconTask, delaySec * 1000L)
         } else {
             connectionState = "FAILED (Max reconnects reached)"
             lastError = "Связь потеряна: $reason"
@@ -2002,6 +2022,10 @@ class PocketService : Service() {
     }
 
     private fun handleServerMessage(jsonText: String) {
+        if (selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
+            Log.d(TAG, "handleServerMessage skipped: engine is $selectedEngine")
+            return
+        }
         try {
             serverMessagesReceived++
             val root = JSONObject(jsonText)
@@ -2590,6 +2614,8 @@ class PocketService : Service() {
                     setupWatchdogRunnable = null
                     goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                     goAwayRunnable = null
+                    reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+                    reconnectRunnable = null
                     mainHandler.removeCallbacks(simulIdleRunnable)
                     webSocket?.close(1000, "Switching to Cascaded REST")
                 } catch (e: Exception) {
@@ -3024,8 +3050,18 @@ class PocketService : Service() {
 
         logEvent("REST_TRANSLATE_REQUEST", "model=$activeRestModel, turnId=$turnId, text=\"$italianText\"")
 
+        // Build candidate list prioritizing the currently active/selected model
+        val candidateModels = ArrayList<String>().apply {
+            add(activeRestModel)
+            for (m in REST_FLASH_MODELS) {
+                if (m != activeRestModel) {
+                    add(m)
+                }
+            }
+        }
+
         fun executeTranslationCall(modelIndex: Int, retryCount: Int = 0) {
-            if (modelIndex >= REST_FLASH_MODELS.size) {
+            if (modelIndex >= candidateModels.size) {
                 logEvent("REST_TRANSLATE_ALL_MODELS_FAILED", "turnId=$turnId, text=\"$italianText\"")
                 mainHandler.post {
                     synchronized(sessionDialogueTurns) {
@@ -3042,7 +3078,7 @@ class PocketService : Service() {
                 return
             }
 
-            val candidateModel = REST_FLASH_MODELS[modelIndex]
+            val candidateModel = candidateModels[modelIndex]
             val url = "https://generativelanguage.googleapis.com/v1beta/models/$candidateModel:generateContent?key=$activeApiKey"
 
             val promptText = "Translate the following Italian text to Russian. Return ONLY the translation, nothing else. No explanations.\n\n$italianText"
@@ -3077,7 +3113,8 @@ class PocketService : Service() {
                 override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                     Log.e(tag, "REST translation network error with model $candidateModel: ${e.message}")
                     logEvent("REST_TRANSLATE_FAIL", "model=$candidateModel, err=${e.message}")
-                    if (e is java.net.SocketTimeoutException && retryCount < 1) {
+                    val isTimeout = e is java.net.SocketTimeoutException || e.message?.contains("timeout", ignoreCase = true) == true
+                    if (isTimeout && retryCount < 1) {
                         Log.w(tag, "Timeout with model $candidateModel, retrying in 600ms (retry ${retryCount + 1}/1)...")
                         logEvent("REST_TRANSLATE_RETRY", "model=$candidateModel, reason=timeout")
                         mainHandler.postDelayed({
@@ -3127,7 +3164,12 @@ class PocketService : Service() {
                             }
 
                             if (parsedTranslation.isNotBlank()) {
-                                activeRestModel = candidateModel
+                                if (activeRestModel != candidateModel) {
+                                    activeRestModel = candidateModel
+                                    mainHandler.post {
+                                        onRestModelChanged?.invoke(candidateModel)
+                                    }
+                                }
                                 mainHandler.post {
                                     deliverRestTranslation(parsedTranslation, turnId)
                                 }
@@ -3160,8 +3202,7 @@ class PocketService : Service() {
             })
         }
 
-        val initialIdx = REST_FLASH_MODELS.indexOf(activeRestModel).coerceAtLeast(0)
-        executeTranslationCall(initialIdx, 0)
+        executeTranslationCall(0, 0)
     }
 
     private fun deliverRestTranslation(russianTranslation: String, turnId: Long) {
@@ -3298,6 +3339,8 @@ class PocketService : Service() {
         setupWatchdogRunnable = null
         sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
         sessionRotationRunnable = null
+        reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        reconnectRunnable = null
         isRotationPending = false
         mainHandler.removeCallbacks(simulIdleRunnable)
 

@@ -1144,7 +1144,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
         }
 
-        val availableModels = listOf("gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest")
+        val availableModels = PocketService.REST_FLASH_MODELS
         for (model in availableModels) {
             val displayName = when (model) {
                 "gemini-3.5-flash-lite" -> "3.5-Lite"

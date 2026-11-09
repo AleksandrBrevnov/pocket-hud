@@ -1305,11 +1305,14 @@ assert "executeTranslationCall(modelIndex + 1" in service_code, "Next candidate 
 assert "commitFinalizedSpeech" in service_code, "commitFinalizedSpeech method missing in PocketService.kt"
 assert "turnId" in service_code, "turnId parameter missing in requestRestTranslation / deliverRestTranslation"
 
-# Ghost Reconnect Guard: Check selectedEngine check in connectWebSocket, onClosed, handleConnectionDrop
+# Ghost Reconnect Guard: Check selectedEngine check in connectWebSocket, onClosed, handleConnectionDrop, handleServerMessage
 assert "selectedEngine != TranslationEngine.LIVE_WEBSOCKET" in service_code, "selectedEngine check missing in PocketService.kt"
 assert "connectWebSocket skipped" in service_code, "Ghost connectWebSocket guard missing"
 assert "onClosed skipped reconnect" in service_code, "Ghost onClosed guard missing"
 assert "handleConnectionDrop skipped stopSelf" in service_code, "Ghost handleConnectionDrop guard missing"
+assert "handleServerMessage skipped" in service_code, "Ghost handleServerMessage guard missing"
+assert "reconnectRunnable" in service_code, "reconnectRunnable tracking missing in PocketService.kt"
+assert "candidateModels" in service_code, "candidateModels priority ordering missing in PocketService.kt"
 
 # 4. Continuous Android SpeechRecognizer Contract
 assert "speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)" in service_code, "createSpeechRecognizer missing in PocketService.kt"
@@ -1446,11 +1449,41 @@ class FallbackClientSim:
             return self.call(models, idx + 1)
         return f"OK_{model}"
 
-# Scenario: Primary gemini-3.5-flash-lite fails (404/503), fallback to gemini-3.8-flash succeeds:
-sim_client = FallbackClientSim(failing_models=["gemini-3.5-flash-lite"])
-res = sim_client.call(["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"])
-assert res == "OK_gemini-3.8-flash"
-assert sim_client.called_models == ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+def build_candidate_models(active_model, all_models):
+    candidates = [active_model]
+    for m in all_models:
+        if m != active_model:
+            candidates.append(m)
+    return candidates
+
+all_flash_models = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"]
+
+# Scenario A: Default primary gemini-3.5-flash-lite fails, fallback to gemini-3.8-flash succeeds
+candidates_a = build_candidate_models("gemini-3.5-flash-lite", all_flash_models)
+sim_a = FallbackClientSim(failing_models=["gemini-3.5-flash-lite"])
+res_a = sim_a.call(candidates_a)
+assert res_a == "OK_gemini-3.8-flash"
+assert sim_a.called_models == ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+
+# Scenario B: User selected gemini-3.8-flash fails, fallback to gemini-3.5-flash-lite succeeds (prevents prior worker's index-skipping bug!)
+candidates_b = build_candidate_models("gemini-3.8-flash", all_flash_models)
+sim_b = FallbackClientSim(failing_models=["gemini-3.8-flash"])
+res_b = sim_b.call(candidates_b)
+assert res_b == "OK_gemini-3.5-flash-lite"
+assert sim_b.called_models == ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
+
+# Scenario C: User selected gemini-flash-latest fails, fallback to gemini-3.5-flash-lite succeeds
+candidates_c = build_candidate_models("gemini-flash-latest", all_flash_models)
+sim_c = FallbackClientSim(failing_models=["gemini-flash-latest"])
+res_c = sim_c.call(candidates_c)
+assert res_c == "OK_gemini-3.5-flash-lite"
+assert sim_c.called_models == ["gemini-flash-latest", "gemini-3.5-flash-lite"]
+
+# Scenario D: All models fail
+sim_d = FallbackClientSim(failing_models=all_flash_models)
+res_d = sim_d.call(candidates_a)
+assert res_d == "ALL_FAILED"
+assert sim_d.called_models == ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"]
 
 # 11. Speech Segment Real-World Verification from PocketHUD Session Log (12)
 log_12_path = os.path.join(BASE_DIR, "PocketHUD Session Log (12)")
