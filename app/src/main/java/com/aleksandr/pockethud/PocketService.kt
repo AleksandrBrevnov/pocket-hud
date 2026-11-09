@@ -289,8 +289,17 @@ class PocketService : Service() {
     private var speechRecognizer: SpeechRecognizer? = null
     private var recognizerIntent: Intent? = null
     @Volatile private var isRecognitionPaused = false
+    @Volatile private var isAsrStarting = false
+    @Volatile private var isAsrListening = false
     @Volatile private var consecutiveSpeechErrors = 0
     @Volatile private var lastSpeechRecognitionError = 0
+
+    // Debounce & Phrase Merging (Anti-Fragmentation)
+    private val speechDebounceHandler = Handler(Looper.getMainLooper())
+    private var pendingDebounceRunnable: Runnable? = null
+    private val pendingPhraseBuilder = StringBuilder()
+    private var pendingPhraseTurnId: Long? = null
+    private var lastSpeechArrivalTime = 0L
 
     private var tts: TextToSpeech? = null
     @Volatile private var isTtsInitialized = false
@@ -404,6 +413,15 @@ class PocketService : Service() {
             currentInstance?.clearActiveDialogueTurn()
         }
 
+        fun generateSessionAiSummary(context: Context, onResult: (Boolean, String) -> Unit) {
+            val inst = currentInstance
+            if (inst != null && isServiceActive) {
+                inst.generateSessionAiSummary(onResult)
+            } else {
+                onResult(false, "Сервис PocketHUD не запущен. Запустите сервис для формирования конспекта.")
+            }
+        }
+
         fun restoreDialogueTurns(turns: List<DialogueTurn>) {
             synchronized(sessionDialogueTurns) {
                 sessionDialogueTurns.clear()
@@ -483,7 +501,7 @@ class PocketService : Service() {
             if (lastDiagnosticSnapshot.isNotBlank()) {
                 return lastDiagnosticSnapshot
             }
-            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.45\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nДвижок: $selectedEngine (REST модель: $selectedRestModel)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
+            return "=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===\nВерсия: v1.0.46\nСтатус: СЕРВИС ОСТАНОВЛЕН (Сессия ещё не запускалась)\nДвижок: $selectedEngine (REST модель: $selectedRestModel)\nРежим микрофона: $selectedMicSource\nРежим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН" else "🔊 ВКЛЮЧЕН"}\n======================================"
         }
     }
 
@@ -629,7 +647,7 @@ class PocketService : Service() {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
             updateOngoingNotification(
                 "⚡ Подключение...",
-                "PocketHUD v1.0.45 активен (Каскадный ASR + REST Flash). Слушаю итальянскую речь..."
+                "PocketHUD v1.0.46 активен (Каскадный ASR + REST Flash). Слушаю итальянскую речь..."
             )
             onStatusChanged?.invoke("⚡ Каскадный режим активен (ASR + REST Flash)")
             setupAudioRouting()
@@ -640,7 +658,7 @@ class PocketService : Service() {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
             updateOngoingNotification(
                 "🔵 Подключение...",
-                "PocketHUD v1.0.45 активен. Ожидание подключения к Gemini Live API..."
+                "PocketHUD v1.0.46 активен. Ожидание подключения к Gemini Live API..."
             )
             setupAudioRouting()
             onStatusChanged?.invoke("🔵 Подключение к Google Gemini Live API...")
@@ -1467,7 +1485,7 @@ class PocketService : Service() {
             .addAction(actions.stopAction)
 
         return NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
-            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.45")
+            .setContentTitle("PocketHUD — Ушной суфлёр v1.0.46")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(pendingIntent)
@@ -1564,7 +1582,7 @@ class PocketService : Service() {
         val qBytes = queuedPlaybackBytes.get()
         return buildString {
             appendLine("=== POCKET HUD СВОДКА ДИАГНОСТИКИ ===")
-            appendLine("Версия: v1.0.45")
+            appendLine("Версия: v1.0.46")
             appendLine("Время работы: %02d:%02d".format(mm, ss))
             appendLine("--- ДВИЖОК ПЕРЕВОДА ---")
             appendLine("Активный движок: ${selectedEngine.name}")
@@ -2377,6 +2395,7 @@ class PocketService : Service() {
     private fun createAudioRecord(sampleRate: Int, bufferSize: Int): Pair<AudioRecord?, String> {
         val sources = if (selectedMicSource == MicSource.SMARTPHONE) {
             listOf(
+                Pair(MediaRecorder.AudioSource.CAMCORDER, "CAMCORDER (Направленный микрофон / Audio Zoom)"),
                 Pair(MediaRecorder.AudioSource.VOICE_RECOGNITION, "VOICE_RECOGNITION (Распознавание речи)"),
                 Pair(MediaRecorder.AudioSource.MIC, "MIC (Встроенный микрофон смартфона)"),
                 Pair(MediaRecorder.AudioSource.DEFAULT, "DEFAULT")
@@ -2384,6 +2403,7 @@ class PocketService : Service() {
         } else {
             listOf(
                 Pair(MediaRecorder.AudioSource.VOICE_COMMUNICATION, "VOICE_COMMUNICATION (Гарнитура/Bluetooth SCO)"),
+                Pair(MediaRecorder.AudioSource.CAMCORDER, "CAMCORDER (Направленный микрофон)"),
                 Pair(MediaRecorder.AudioSource.VOICE_RECOGNITION, "VOICE_RECOGNITION (Распознавание речи)"),
                 Pair(MediaRecorder.AudioSource.MIC, "MIC (Стандартный микрофон)"),
                 Pair(MediaRecorder.AudioSource.DEFAULT, "DEFAULT")
@@ -2401,15 +2421,25 @@ class PocketService : Service() {
                 )
                 if (record.state == AudioRecord.STATE_INITIALIZED) {
                     Log.d(tag, "AudioRecord инициализирован с источником: $name")
-                    if (selectedMicSource == MicSource.SMARTPHONE && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                         try {
                             val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
                             val inputDevices = audioManager?.getDevices(AudioManager.GET_DEVICES_INPUTS)
-                            val builtinMic = inputDevices?.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
-                            if (builtinMic != null) {
-                                val ok = record.setPreferredDevice(builtinMic)
-                                Log.d(tag, "AudioRecord.setPreferredDevice(TYPE_BUILTIN_MIC): $ok")
-                                logEvent("PREFERRED_MIC_DEVICE_SET", "device=${builtinMic.productName}, ok=$ok")
+                            val usbMic = inputDevices?.firstOrNull {
+                                it.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
+                                it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+                            }
+                            if (usbMic != null) {
+                                val ok = record.setPreferredDevice(usbMic)
+                                Log.d(tag, "AudioRecord.setPreferredDevice(USB_MIC): $ok (${usbMic.productName})")
+                                logEvent("USB_MIC_DEVICE_SET", "device=${usbMic.productName}, ok=$ok")
+                            } else if (selectedMicSource == MicSource.SMARTPHONE) {
+                                val builtinMic = inputDevices?.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+                                if (builtinMic != null) {
+                                    val ok = record.setPreferredDevice(builtinMic)
+                                    Log.d(tag, "AudioRecord.setPreferredDevice(TYPE_BUILTIN_MIC): $ok")
+                                    logEvent("PREFERRED_MIC_DEVICE_SET", "device=${builtinMic.productName}, ok=$ok")
+                                }
                             }
                         } catch (e: Exception) {
                             Log.w(tag, "Ошибка setPreferredDevice: ${e.message}")
@@ -2658,7 +2688,7 @@ class PocketService : Service() {
                 onStatusChanged?.invoke(statusMsg)
                 updateOngoingNotification(
                     "⚡ Каскадный ASR+REST",
-                    "PocketHUD v1.0.45: переключено на каскадный перевод (ASR + REST Flash)"
+                    "PocketHUD v1.0.46: переключено на каскадный перевод (ASR + REST Flash)"
                 )
             } else {
                 // Shut down Cascaded REST components
@@ -2682,7 +2712,7 @@ class PocketService : Service() {
                 onStatusChanged?.invoke(statusMsg)
                 updateOngoingNotification(
                     "🔵 Gemini Live WS",
-                    "PocketHUD v1.0.45: переключено на Gemini Live WebSocket..."
+                    "PocketHUD v1.0.46: переключено на Gemini Live WebSocket..."
                 )
                 connectWebSocket(activeApiKey)
             }
@@ -2815,11 +2845,14 @@ class PocketService : Service() {
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
             setRecognitionListener(object : RecognitionListener {
                 override fun onReadyForSpeech(params: Bundle?) {
+                    isAsrStarting = false
+                    isAsrListening = true
                     consecutiveSpeechErrors = 0
                     onStatusChanged?.invoke("⚡ Слушаю итальянскую речь (Каскадный ASR)...")
                 }
 
                 override fun onBeginningOfSpeech() {
+                    isAsrListening = true
                     logEvent("ASR_SPEECH_START")
                 }
 
@@ -2832,10 +2865,13 @@ class PocketService : Service() {
                 override fun onBufferReceived(buffer: ByteArray?) {}
 
                 override fun onEndOfSpeech() {
+                    isAsrListening = false
                     logEvent("ASR_SPEECH_END")
                 }
 
                 override fun onError(error: Int) {
+                    isAsrStarting = false
+                    isAsrListening = false
                     lastSpeechRecognitionError = error
                     val errName = when (error) {
                         SpeechRecognizer.ERROR_AUDIO -> "ERROR_AUDIO"
@@ -2856,6 +2892,9 @@ class PocketService : Service() {
                     }
                     logEvent("ASR_ERROR", "code=$error, name=$errName, repeats=$consecutiveSpeechErrors")
 
+                    // Flush any pending phrase so words are not lost on error
+                    flushPendingPhrase()
+
                     if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
                         val delayMs = when {
                             consecutiveSpeechErrors > 5 -> 1000L
@@ -2869,13 +2908,14 @@ class PocketService : Service() {
                 }
 
                 override fun onResults(results: Bundle?) {
+                    isAsrStarting = false
+                    isAsrListening = false
                     consecutiveSpeechErrors = 0
                     val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val finalText = matches?.firstOrNull()?.trim()
-                    if (!finalText.isNullOrBlank()) {
-                        logEvent("ASR_FINAL_SPEECH", "\"$finalText\"")
-                        val turnId = commitFinalizedSpeech(finalText)
-                        requestRestTranslation(finalText, turnId)
+                    val rawText = matches?.firstOrNull()?.trim()
+                    if (!rawText.isNullOrBlank()) {
+                        logEvent("ASR_FINAL_SPEECH", "\"$rawText\"")
+                        handleSpeechResultWithDebounce(rawText)
                     }
                     if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
                         mainHandler.postDelayed({
@@ -2888,7 +2928,12 @@ class PocketService : Service() {
                     val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                     val partialText = matches?.firstOrNull()?.trim()
                     if (!partialText.isNullOrBlank()) {
-                        updateInterimSpeech(partialText)
+                        val displayPartial = if (pendingPhraseBuilder.isNotEmpty()) {
+                            "${pendingPhraseBuilder.toString().trim()} $partialText"
+                        } else {
+                            partialText
+                        }
+                        updateInterimSpeech(displayPartial)
                     }
                 }
 
@@ -2897,11 +2942,101 @@ class PocketService : Service() {
         }
     }
 
+    private fun handleSpeechResultWithDebounce(newChunk: String) {
+        val now = System.currentTimeMillis()
+        val isFirst = pendingPhraseBuilder.isEmpty()
+        val timeSinceLast = now - lastSpeechArrivalTime
+        lastSpeechArrivalTime = now
+
+        // If pause since last speech is large (> 2500 ms), flush previous phrase first
+        if (!isFirst && timeSinceLast > 2500L) {
+            flushPendingPhrase()
+        }
+
+        if (pendingPhraseBuilder.isEmpty()) {
+            pendingPhraseBuilder.append(newChunk)
+            val turnId = commitFinalizedSpeech(newChunk)
+            pendingPhraseTurnId = turnId
+        } else {
+            pendingPhraseBuilder.append(" ").append(newChunk)
+            val mergedText = pendingPhraseBuilder.toString()
+            pendingPhraseTurnId?.let { tid ->
+                updateCommittedSpeech(tid, mergedText)
+            }
+        }
+
+        // Cancel previous pending flush
+        pendingDebounceRunnable?.let { speechDebounceHandler.removeCallbacks(it) }
+
+        val currentMerged = pendingPhraseBuilder.toString().trim()
+        val endsWithSentenceStop = currentMerged.endsWith(".") ||
+                                   currentMerged.endsWith("?") ||
+                                   currentMerged.endsWith("!") ||
+                                   currentMerged.endsWith("...")
+        val wordCount = currentMerged.split(Regex("\\s+")).size
+
+        // If strong punctuation or complete phrase (>= 10 words), flush immediately
+        if (endsWithSentenceStop || wordCount >= 10) {
+            flushPendingPhrase()
+        } else {
+            // Otherwise wait 1200 ms for continuing clauses before translating
+            val runnable = Runnable {
+                flushPendingPhrase()
+            }
+            pendingDebounceRunnable = runnable
+            speechDebounceHandler.postDelayed(runnable, 1200L)
+        }
+    }
+
+    private fun flushPendingPhrase() {
+        pendingDebounceRunnable?.let { speechDebounceHandler.removeCallbacks(it) }
+        pendingDebounceRunnable = null
+        val fullPhrase = pendingPhraseBuilder.toString().trim()
+        val turnId = pendingPhraseTurnId
+        pendingPhraseBuilder.clear()
+        pendingPhraseTurnId = null
+
+        if (fullPhrase.isNotBlank() && turnId != null) {
+            logEvent("ASR_PHRASE_FLUSHED", "turnId=$turnId, phrase=\"$fullPhrase\"")
+            requestRestTranslation(fullPhrase, turnId)
+        }
+    }
+
+    private fun updateCommittedSpeech(turnId: Long, updatedItalianText: String) {
+        lastRecognizedInput = updatedItalianText
+        onInputTextReceived?.invoke(updatedItalianText)
+        synchronized(sessionDialogueTurns) {
+            val turn = sessionDialogueTurns.find { it.id == turnId }
+            if (turn != null) {
+                turn.italianText = updatedItalianText
+                turn.lastActivityTime = System.currentTimeMillis()
+                val idx = sessionDialogueTurns.indexOf(turn)
+                if (idx != -1) {
+                    onDialogueTurnUpdated?.invoke(idx, turn.copy(), false)
+                }
+            }
+            try {
+                DialogueHistoryManager.saveCurrentSessionCache(this@PocketService, sessionDialogueTurns)
+            } catch (e: Exception) {}
+        }
+        scheduleNotificationUpdate(
+            "🗣️ $updatedItalianText",
+            if (lastPostedSubtitleHistory.isNotBlank()) lastPostedSubtitleHistory else updatedItalianText
+        )
+    }
+
     private fun startListeningSafe() {
         if (!isRunning || selectedEngine != TranslationEngine.CASCADED_REST || isTtsSpeaking || isRecognitionPaused) {
             return
         }
         mainHandler.post {
+            if (!isRunning || selectedEngine != TranslationEngine.CASCADED_REST || isTtsSpeaking || isRecognitionPaused) {
+                return@post
+            }
+            if (isAsrStarting || isAsrListening) {
+                return@post
+            }
+            isAsrStarting = true
             try {
                 if (speechRecognizer == null) {
                     initSpeechRecognizer()
@@ -2910,19 +3045,22 @@ class PocketService : Service() {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE, "it-IT")
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
+                    putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1000L)
                 }
-                speechRecognizer?.cancel()
                 speechRecognizer?.startListening(intent)
                 logEvent("ASR_LISTENING_START", "lang=it-IT")
             } catch (e: Exception) {
+                isAsrStarting = false
+                isAsrListening = false
                 Log.w(tag, "Ошибка startListening: ${e.message}")
                 logEvent("ASR_START_EXCEPTION", "${e.message}")
                 mainHandler.postDelayed({
                     if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
                         try {
                             speechRecognizer?.cancel()
-                            speechRecognizer?.startListening(recognizerIntent)
                         } catch (ex: Exception) {}
+                        startListeningSafe()
                     }
                 }, 400L)
             }
@@ -2932,6 +3070,8 @@ class PocketService : Service() {
     private fun pauseRecognition() {
         isRecognitionPaused = true
         mainHandler.post {
+            isAsrStarting = false
+            isAsrListening = false
             try {
                 speechRecognizer?.stopListening()
                 logEvent("ASR_PAUSED")
@@ -2951,6 +3091,8 @@ class PocketService : Service() {
 
     private fun restartSpeechRecognizer() {
         mainHandler.post {
+            isAsrStarting = false
+            isAsrListening = false
             try {
                 speechRecognizer?.cancel()
                 speechRecognizer?.destroy()
@@ -3081,7 +3223,20 @@ class PocketService : Service() {
             val candidateModel = candidateModels[modelIndex]
             val url = "https://generativelanguage.googleapis.com/v1beta/models/$candidateModel:generateContent?key=$activeApiKey"
 
-            val promptText = "Translate the following Italian text to Russian. Return ONLY the translation, nothing else. No explanations.\n\n$italianText"
+            // Build sliding context window from previous finalized turns (excluding current turn)
+            val contextTurns = synchronized(sessionDialogueTurns) {
+                sessionDialogueTurns.filter { it.isFinalized && it.italianText.isNotBlank() && it.id != turnId }
+                    .takeLast(2)
+            }
+
+            val promptText = if (contextTurns.isNotEmpty()) {
+                val contextStr = contextTurns.joinToString("\n") { turn ->
+                    "IT: ${turn.italianText} -> RU: ${turn.russianText}"
+                }
+                "Context of ongoing conversation in Italy:\n$contextStr\n\nTranslate the following Italian speech to Russian accurately in the given conversational context. Return ONLY the Russian translation, nothing else. No explanations.\n\n$italianText"
+            } else {
+                "Translate the following Italian text to Russian. Return ONLY the translation, nothing else. No explanations.\n\n$italianText"
+            }
 
             val jsonPayload = JSONObject().apply {
                 put("contents", JSONArray().apply {
@@ -3281,6 +3436,139 @@ class PocketService : Service() {
             text = text.substring("**Перевод:**".length).trim()
         }
         return text.trim()
+    }
+
+    /**
+     * Сформировать двуязычный структурированный AI-конспект встречи через Gemini 3.8 Flash (€0.00)
+     */
+    fun generateSessionAiSummary(onResult: (Boolean, String) -> Unit) {
+        if (activeApiKey.isBlank()) {
+            onResult(false, "API-ключ не задан в настройках")
+            return
+        }
+
+        val turnsSnapshot = synchronized(sessionDialogueTurns) {
+            sessionDialogueTurns.filter { it.italianText.isNotBlank() || it.russianText.isNotBlank() }
+        }
+
+        if (turnsSnapshot.isEmpty()) {
+            onResult(false, "История текущей сессии пуста. Нечего конспектировать.")
+            return
+        }
+
+        val dateStr = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault()).format(Date())
+        val dialogueText = turnsSnapshot.joinToString("\n") { turn ->
+            val timeStr = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(turn.timestamp))
+            "[$timeStr] IT: ${turn.italianText}\nRU: ${turn.russianText}"
+        }
+
+        val promptText = """
+        Ты — личный исполнительный ассистент и аналитик встреч в Италии (AI-Секретарь).
+        Проанализируй стенограмму разговора и составь структурированный двуязычный протокол встречи строго по схеме:
+
+        # 📋 Конспект встречи: $dateStr
+
+        ## 📌 1. Краткая суть встречи (Executive Summary)
+        - [Кратко в 2-4 предложениях: тема беседы, участники, контекст, общее настроение]
+
+        ## ⚡ 2. Ключевые договорённости, решения и действия (Action Items)
+        - [ ] [Конкретные действия, сроки, требуемые документы (SPID, CAF, Permesso и т.д.)]
+        - [ ] [Финансовые обязательства: суммы в евро (€), условия оплаты]
+
+        ## 💬 3. Двуязычная ключевая стенограмма (IT ➔ RU)
+        [Хронологический список самых важных фраз диалога с точным русским переводом]
+
+        Стенограмма диалога:
+        $dialogueText
+        """.trimIndent()
+
+        logEvent("AI_SUMMARY_REQUEST", "turns=${turnsSnapshot.size}")
+
+        val candidateModels = listOf("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-flash-latest")
+
+        fun executeSummaryCall(modelIndex: Int) {
+            if (modelIndex >= candidateModels.size) {
+                logEvent("AI_SUMMARY_ALL_MODELS_FAILED")
+                mainHandler.post {
+                    onResult(false, "Ошибка: Все модели Gemini отклонили запрос конспекта.")
+                }
+                return
+            }
+
+            val model = candidateModels[modelIndex]
+            val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$activeApiKey"
+
+            val jsonPayload = JSONObject().apply {
+                put("contents", JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", promptText)
+                            })
+                        })
+                    })
+                })
+                put("generationConfig", JSONObject().apply {
+                    put("temperature", 0.2)
+                    put("maxOutputTokens", 2048)
+                    if (model == "gemini-3.8-flash" || model.contains("thinking")) {
+                        put("thinkingConfig", JSONObject().apply {
+                            put("thinkingLevel", "low")
+                            put("includeThoughts", false)
+                        })
+                    }
+                })
+            }
+
+            val mediaType = "application/json; charset=utf-8".toMediaType()
+            val body = jsonPayload.toString().toRequestBody(mediaType)
+            val req = Request.Builder().url(url).post(body).build()
+
+            restHttpClient.newCall(req).enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    Log.e(tag, "AI Summary network error with model $model: ${e.message}")
+                    executeSummaryCall(modelIndex + 1)
+                }
+
+                override fun onResponse(call: okhttp3.Call, response: Response) {
+                    response.use { resp ->
+                        val respCode = resp.code
+                        val respString = resp.body?.string() ?: ""
+                        if (respCode == 200) {
+                            try {
+                                val root = JSONObject(respString)
+                                val candidates = root.optJSONArray("candidates")
+                                val firstCand = candidates?.optJSONObject(0)
+                                val parts = firstCand?.optJSONObject("content")?.optJSONArray("parts")
+                                val sb = StringBuilder()
+                                if (parts != null) {
+                                    for (i in 0 until parts.length()) {
+                                        val p = parts.getJSONObject(i)
+                                        if (p.optBoolean("thought", false)) continue
+                                        val t = p.optString("text")
+                                        if (t.isNotBlank()) sb.append(t)
+                                    }
+                                }
+                                val resultSummary = sb.toString().trim()
+                                if (resultSummary.isNotBlank()) {
+                                    logEvent("AI_SUMMARY_SUCCESS", "model=$model, len=${resultSummary.length}")
+                                    DialogueHistoryManager.saveSessionSummary(this@PocketService, resultSummary)
+                                    mainHandler.post {
+                                        onResult(true, resultSummary)
+                                    }
+                                    return
+                                }
+                            } catch (e: Exception) {
+                                Log.e(tag, "Error parsing AI Summary response: ${e.message}")
+                            }
+                        }
+                        executeSummaryCall(modelIndex + 1)
+                    }
+                }
+            })
+        }
+
+        executeSummaryCall(0)
     }
 
     override fun onDestroy() {

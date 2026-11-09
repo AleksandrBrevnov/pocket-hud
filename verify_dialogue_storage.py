@@ -133,8 +133,8 @@ def main():
         gradle_code = f.read()
 
     # 3. Version bump checks
-    TARGET_VERSION_NAME = "1.0.45"
-    TARGET_VERSION_CODE = 49
+    TARGET_VERSION_NAME = "1.0.46"
+    TARGET_VERSION_CODE = 50
     print(f"\n--- 3. Version Bump v{TARGET_VERSION_NAME} Verification ---")
     assert f"versionCode = {TARGET_VERSION_CODE}" in gradle_code, f"versionCode must be {TARGET_VERSION_CODE} in app/build.gradle.kts"
     assert f'versionName = "{TARGET_VERSION_NAME}"' in gradle_code, f'versionName must be "{TARGET_VERSION_NAME}" in app/build.gradle.kts'

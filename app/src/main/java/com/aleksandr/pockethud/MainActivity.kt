@@ -64,6 +64,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var copyDialogueBtn: TextView
     private lateinit var shareDialogueBtn: TextView
     private lateinit var historyDialogueBtn: TextView
+    private lateinit var aiSummaryBtn: TextView
     private lateinit var clearDialogueBtn: TextView
     private lateinit var showOriginalCheckBox: MaterialCheckBox
     private lateinit var showOriginalBadge: TextView
@@ -704,6 +705,114 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun requestAiSummary() {
+        val turns = PocketService.getSessionDialogueTurns()
+        if (turns.isEmpty()) {
+            Toast.makeText(this, "История диалога пуста. Запустите сервис и проведите диалог!", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        Toast.makeText(this, "⚡ Формирование AI-конспекта встречи через Gemini 3.8 Flash...", Toast.LENGTH_LONG).show()
+
+        PocketService.generateSessionAiSummary(this) { success, result ->
+            runOnUiThread {
+                if (success) {
+                    showAiSummaryDialog(result)
+                } else {
+                    Toast.makeText(this@MainActivity, result, Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun showAiSummaryDialog(summaryMarkdown: String) {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.setContentView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFF131722.toInt())
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+
+            addView(TextView(context).apply {
+                text = "⚡ AI-Конспект встречи (Gemini 3.8 Flash)"
+                textSize = 16f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(0xFFFFFFFF.toInt())
+            })
+
+            val sv = ScrollView(context).apply {
+                val p = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(360)
+                ).apply { setMargins(0, dp(12), 0, dp(12)) }
+                layoutParams = p
+            }
+            val contentTv = TextView(context).apply {
+                text = summaryMarkdown
+                textSize = 13f
+                setTextColor(0xFFE2E8F0.toInt())
+                setLineSpacing(dp(3).toFloat(), 1.0f)
+                setTextIsSelectable(true)
+            }
+            sv.addView(contentTv)
+            addView(sv)
+
+            val btnBar = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.END
+            }
+
+            val copyBtn = Button(context).apply {
+                text = "📋 Копировать"
+                textSize = 12f
+                setTextColor(0xFFFFFFFF.toInt())
+                background = createRoundedDrawable(0xFF10B981.toInt(), cornerRadiusDp = 8f)
+                setOnClickListener {
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("PocketHUD AI Summary", summaryMarkdown))
+                    Toast.makeText(context, "Конспект скопирован в буфер обмена!", Toast.LENGTH_SHORT).show()
+                }
+            }
+            btnBar.addView(copyBtn)
+
+            val shareBtn = Button(context).apply {
+                text = "📤 Отправить"
+                textSize = 12f
+                setTextColor(0xFFFFFFFF.toInt())
+                background = createRoundedDrawable(0xFF3B82F6.toInt(), cornerRadiusDp = 8f)
+                val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(dp(8), 0, 0, 0)
+                }
+                layoutParams = lp
+                setOnClickListener {
+                    val sendIntent = Intent().apply {
+                        action = Intent.ACTION_SEND
+                        putExtra(Intent.EXTRA_TEXT, summaryMarkdown)
+                        type = "text/plain"
+                    }
+                    startActivity(Intent.createChooser(sendIntent, "Поделиться AI-конспектом"))
+                }
+            }
+            btnBar.addView(shareBtn)
+
+            val closeBtn = Button(context).apply {
+                text = "Закрыть"
+                textSize = 12f
+                setTextColor(0xFFCCCCCC.toInt())
+                background = createRoundedDrawable(0xFF374151.toInt(), cornerRadiusDp = 8f)
+                val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(dp(8), 0, 0, 0)
+                }
+                layoutParams = lp
+                setOnClickListener { dialog.dismiss() }
+            }
+            btnBar.addView(closeBtn)
+
+            addView(btnBar)
+        })
+        dialog.show()
+    }
+
     private fun setupServiceCallbacks() {
         PocketService.onStatusChanged = { status ->
             runOnUiThread {
@@ -1050,7 +1159,7 @@ class MainActivity : AppCompatActivity() {
         topBar.addView(appTitle)
 
         val versionBadge = TextView(this).apply {
-            text = "v1.0.45"
+            text = "v1.0.46"
             textSize = 10.5f
             setTextColor(0xFF9AA0A6.toInt())
             background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
@@ -1489,6 +1598,24 @@ class MainActivity : AppCompatActivity() {
             }
         }
         dialogueHeader.addView(historyDialogueBtn)
+
+        aiSummaryBtn = TextView(this).apply {
+            text = "⚡ Конспект"
+            textSize = 11f
+            setTextColor(0xFF34D399.toInt())
+            background = createRoundedDrawable(0xFF133E32.toInt(), cornerRadiusDp = 6f)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(dp(6), 0, 0, 0) }
+            layoutParams = params
+            isClickable = true
+            setOnClickListener {
+                requestAiSummary()
+            }
+        }
+        dialogueHeader.addView(aiSummaryBtn)
 
         clearDialogueBtn = TextView(this).apply {
             text = "🗑️ Очистить"
@@ -1971,6 +2098,27 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
         }
         header.addView(title)
+
+        val latestSummary = DialogueHistoryManager.loadLatestSummary(this)
+        if (latestSummary != null) {
+            val summaryBadge = TextView(this).apply {
+                text = "⚡ Конспект"
+                textSize = 11f
+                setTextColor(0xFF34D399.toInt())
+                background = createRoundedDrawable(0xFF133E32.toInt(), cornerRadiusDp = 6f)
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                val params = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins(0, 0, dp(8), 0) }
+                layoutParams = params
+                isClickable = true
+                setOnClickListener {
+                    showAiSummaryDialog(latestSummary.first)
+                }
+            }
+            header.addView(summaryBadge)
+        }
 
         val closeBtn = TextView(this).apply {
             text = "✕"

@@ -128,8 +128,8 @@ with open(build_gradle_path, "r", encoding="utf-8") as f:
 with open(setup_and_push_path, "r", encoding="utf-8") as f:
     setup_code = f.read()
 
-TARGET_VERSION_NAME = "1.0.45"
-TARGET_VERSION_CODE = 49
+TARGET_VERSION_NAME = "1.0.46"
+TARGET_VERSION_CODE = 50
 
 print(f"\n--- 1. Verification of v{TARGET_VERSION_NAME} (code {TARGET_VERSION_CODE}) Version Bumps & Fixed Keystore ---")
 assert f'versionCode = {TARGET_VERSION_CODE}' in gradle_code, f"versionCode {TARGET_VERSION_CODE} missing in app/build.gradle.kts"
@@ -218,13 +218,13 @@ assert "releaseHardwareEffects" in service_code, "releaseHardwareEffects method 
 assert "applyDynamicSoftKneeAgc" in service_code, "Dynamic soft-knee AGC missing"
 assert "USAGE_MEDIA" in service_code, "USAGE_MEDIA missing in audio routing"
 
-# Verify VOICE_RECOGNITION priority in SMARTPHONE sources
+# Verify CAMCORDER priority in SMARTPHONE sources (v1.0.46 Audio Zoom enhancement)
 smartphone_sources_match = re.search(r'selectedMicSource\s*==\s*MicSource\.SMARTPHONE\)\s*\{\s*listOf\((.*?)\)\s*\}\s*else', service_code, re.DOTALL)
 assert smartphone_sources_match, "Could not find SMARTPHONE sources list in PocketService.kt"
 smartphone_sources = smartphone_sources_match.group(1)
 first_source = re.search(r'Pair\(MediaRecorder\.AudioSource\.(\w+)', smartphone_sources)
-assert first_source and first_source.group(1) == "VOICE_RECOGNITION", f"Expected VOICE_RECOGNITION as first source, got {first_source.group(1) if first_source else None}"
-print("  -> Split audio routing & hardware DSP OK (VOICE_RECOGNITION priority verified).")
+assert first_source and first_source.group(1) == "CAMCORDER", f"Expected CAMCORDER as first source, got {first_source.group(1) if first_source else None}"
+print("  -> Split audio routing & hardware DSP OK (CAMCORDER Audio Zoom priority verified).")
 
 print("\n--- 5. Verification of Streaming Tag Cleaner ---")
 assert "class StreamingTagCleaner" in service_code, "StreamingTagCleaner class missing"
@@ -1506,6 +1506,39 @@ if os.path.exists(log_12_path):
     print(f"  -> Successfully verified {len(speech_segments)} real speech segments from PocketHUD Session Log (12).")
 
 print("  -> Option A Cascaded REST, SpeechRecognizer contract, REST multi-model fallback & TTS verified perfectly.")
+
+print("\n--- 15. Verification of v1.0.46 Dual-Track Architecture (CAMCORDER, Debounce, Context Window, AI Summary) ---")
+with open(pocket_service_path, "r", encoding="utf-8") as f:
+    ps_code = f.read()
+with open(main_activity_path, "r", encoding="utf-8") as f:
+    ma_code = f.read()
+with open(history_manager_path, "r", encoding="utf-8") as f:
+    dh_code = f.read()
+
+# 1. CAMCORDER Audio Source
+assert "MediaRecorder.AudioSource.CAMCORDER" in ps_code, "CAMCORDER source missing in PocketService.kt"
+assert "CAMCORDER (Направленный микрофон" in ps_code, "CAMCORDER description missing"
+print("  -> CAMCORDER directional mic & Audio Zoom verified.")
+
+# 2. Debounce and Phrase Merging
+assert "handleSpeechResultWithDebounce" in ps_code, "handleSpeechResultWithDebounce missing in PocketService.kt"
+assert "flushPendingPhrase" in ps_code, "flushPendingPhrase missing in PocketService.kt"
+assert "pendingPhraseBuilder" in ps_code, "pendingPhraseBuilder missing in PocketService.kt"
+print("  -> Speech debounce & anti-fragmentation phrase merger verified.")
+
+# 3. Sliding Context Window in REST Prompt
+assert "Context of ongoing conversation in Italy" in ps_code, "Sliding context window prompt missing in PocketService.kt"
+assert "takeLast(2)" in ps_code, "takeLast(2) context extraction missing"
+print("  -> Sliding Context Window (2-turn history) in REST Flash prompt verified.")
+
+# 4. AI-Summary Generator
+assert "fun generateSessionAiSummary" in ps_code, "generateSessionAiSummary missing in PocketService.kt"
+assert "Executive Summary" in ps_code, "Executive Summary section missing in summary prompt"
+assert "Action Items" in ps_code, "Action Items section missing in summary prompt"
+assert "aiSummaryBtn" in ma_code, "aiSummaryBtn missing in MainActivity.kt"
+assert "showAiSummaryDialog" in ma_code, "showAiSummaryDialog missing in MainActivity.kt"
+assert "saveSessionSummary" in dh_code, "saveSessionSummary missing in DialogueHistoryManager.kt"
+print("  -> Dual-Track AI Summary generator (Executive Summary + Action Items + Transcript) verified.")
 
 print("\n=======================================================")
 print(f"🎉 ALL V{TARGET_VERSION_NAME} ARCHITECTURAL TESTS PASSED PERFECTLY! 🎉")

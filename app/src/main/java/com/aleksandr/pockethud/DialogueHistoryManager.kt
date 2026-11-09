@@ -242,6 +242,47 @@ object DialogueHistoryManager {
     }
 
     /**
+     * Сохранить сгенерированный AI-конспект встречи в Markdown (.md)
+     */
+    @Synchronized
+    fun saveSessionSummary(context: Context, summaryMarkdown: String, sessionTimestamp: Long = System.currentTimeMillis()): File? {
+        try {
+            val dir = getHistoryDir(context)
+            val timeStr = fileDateFormat.format(Date(sessionTimestamp))
+            val summaryFile = File(dir, "summary_$timeStr.md")
+            val tmp = File(dir, "summary_$timeStr.md.tmp")
+            FileOutputStream(tmp).use { fos ->
+                fos.write(summaryMarkdown.toByteArray(Charsets.UTF_8))
+            }
+            tmp.renameTo(summaryFile)
+            Log.d(TAG, "AI-Конспект сохранен: ${summaryFile.name}")
+            return summaryFile
+        } catch (e: Exception) {
+            Log.e(TAG, "Ошибка сохранения AI-конспекта: ${e.message}", e)
+            return null
+        }
+    }
+
+    /**
+     * Загрузить последний сохраненный AI-конспект (если есть)
+     */
+    @Synchronized
+    fun loadLatestSummary(context: Context): Pair<String, String>? {
+        val dir = getHistoryDir(context)
+        val files = dir.listFiles { f -> f.name.startsWith("summary_") && f.extension == "md" }
+            ?.sortedByDescending { it.lastModified() }
+        val latest = files?.firstOrNull() ?: return null
+        return try {
+            val text = latest.readText(Charsets.UTF_8)
+            val ts = latest.lastModified()
+            val formatted = dateFormat.format(Date(ts))
+            Pair(text, formatted)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
      * Загрузить реплики из выбранного файла сессии (поддерживает .json)
      */
     @Synchronized
