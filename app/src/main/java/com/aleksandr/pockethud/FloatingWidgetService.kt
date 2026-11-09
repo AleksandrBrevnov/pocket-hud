@@ -133,11 +133,13 @@ class FloatingWidgetService : Service() {
     override fun onCreate() {
         super.onCreate()
         currentInstance = this
-        isOverlayActive = true
+        isOverlayActive = false
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
         initOverlayView()
-        setupListeners()
+        if (isOverlayActive) {
+            setupListeners()
+        }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -292,6 +294,7 @@ class FloatingWidgetService : Service() {
         // Добавление во WindowManager
         try {
             windowManager.addView(overlayView, params)
+            isOverlayActive = true
         } catch (e: Exception) {
             Log.e(TAG, "Ошибка вызова WindowManager.addView: ${e.message}")
             isOverlayActive = false
@@ -371,6 +374,8 @@ class FloatingWidgetService : Service() {
                 Toast.makeText(this, "PocketHUD: Запущен перевод в 1 тап", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
                 Log.e(TAG, "Не удалось запустить Foreground Service (Android 14 FGS): ${e.message}")
+                PocketService.isServiceActive = false
+                updateUiState(false, "⏹️ Суфлёр остановлен")
                 try {
                     val actIntent = Intent(this, MainActivity::class.java).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)

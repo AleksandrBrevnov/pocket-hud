@@ -716,7 +716,16 @@ class PocketService : Service() {
         } catch (e: Exception) {
             Log.e(tag, "Ошибка запуска startForeground (Android 14 FGS restriction): ${e.message}", e)
             logEvent("START_FOREGROUND_EXCEPTION", "${e.message}")
+            isServiceActive = false
             notifyStatusChanged("🔴 Ошибка запуска в фоне (Android 14). Откройте экран приложения.")
+            try {
+                val actIntent = Intent(this, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+                startActivity(actIntent)
+            } catch (actEx: Exception) {
+                Log.e(tag, "Не удалось открыть MainActivity при ошибке FGS: ${actEx.message}")
+            }
             stopSelf()
             return START_NOT_STICKY
         }

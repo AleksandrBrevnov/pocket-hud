@@ -61,6 +61,7 @@ class AudioRecordingManager {
         }
 
         var activeRecorder: MediaRecorder? = null
+        var targetFile: File? = null
         return try {
             val dir = getRecordsDir(context)
             val cleanSessionId = sessionId.trim().ifEmpty {
@@ -71,7 +72,8 @@ class AudioRecordingManager {
             } else {
                 "record_${cleanSessionId}.m4a"
             }
-            val targetFile = File(dir, fileName)
+            val file = File(dir, fileName)
+            targetFile = file
 
             val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 MediaRecorder(context)
@@ -87,21 +89,27 @@ class AudioRecordingManager {
             recorder.setAudioSamplingRate(44100)
             recorder.setAudioEncodingBitRate(64000)
             recorder.setAudioChannels(1)
-            recorder.setOutputFile(targetFile.absolutePath)
+            recorder.setOutputFile(file.absolutePath)
             recorder.prepare()
             recorder.start()
 
             mediaRecorder = recorder
-            currentFile = targetFile
+            currentFile = file
             isRecordingActive = true
-            Log.i(TAG, "AudioRecordingManager: Started recording to ${targetFile.absolutePath}")
-            targetFile
+            Log.i(TAG, "AudioRecordingManager: Started recording to ${file.absolutePath}")
+            file
         } catch (e: Throwable) {
             Log.e(TAG, "AudioRecordingManager: Failed to start recording: ${e.message}", e)
             try {
                 activeRecorder?.release()
                 mediaRecorder?.release()
             } catch (ignored: Exception) {}
+            if (targetFile != null && targetFile.exists() && targetFile.length() < 1024L) {
+                try {
+                    java.nio.file.Files.deleteIfExists(targetFile.toPath())
+                    Log.i(TAG, "AudioRecordingManager: Cleaned up 0-byte orphan recording file from failed start")
+                } catch (ignored: Exception) {}
+            }
             mediaRecorder = null
             isRecordingActive = false
             currentFile = null

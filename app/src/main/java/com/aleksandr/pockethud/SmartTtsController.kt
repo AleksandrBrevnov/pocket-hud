@@ -99,7 +99,7 @@ class SmartTtsController {
                 return contentWords.take(4).joinToString(" ")
             }
             // Если все слова оказались стоп-словами, оставляем первые 2-3 слова исходной фразы
-            val fallback = tokens.filter { it.length > 1 || it.all { c -> c.isDigit() } }.take(3)
+            val fallback = tokens.filter { it.length > 1 || it.all { c -> c.isDigit() } || (it.length == 1 && it.all { c -> c.isLetter() }) }.take(3)
             return if (fallback.isNotEmpty()) fallback.joinToString(" ") else tokens.take(2).joinToString(" ")
         }
     }
@@ -172,7 +172,7 @@ class SmartTtsController {
             TtsMode.MUTED -> return
         }
 
-        val cleanSpeech = speechText.replace(Regex("[«»\"'*\\[\\]{}()]"), " ")
+        val cleanSpeech = speechText.replace(Regex("""[«»"'\*,\.\[\]{}()!?:;—–\-]"""), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
         if (cleanSpeech.isBlank()) return
