@@ -308,7 +308,9 @@ class PocketService : Service() {
         if (isTtsSpeaking) {
             Log.w(tag, "TTS Watchdog: сброс зависшего флага isTtsSpeaking")
             isTtsSpeaking = false
-            resumeRecognition()
+            if (isRecognitionPaused) {
+                resumeRecognition()
+            }
         }
     }
 
@@ -334,6 +336,7 @@ class PocketService : Service() {
         const val EXTRA_MIC_SOURCE = "extra_mic_source"
         const val EXTRA_TRANSLATION_ENGINE = "extra_translation_engine"
         const val EXTRA_REST_MODEL = "extra_rest_model"
+        const val EXTRA_TTS_MODE = "extra_tts_mode"
 
         // Wear OS / Xiaomi Watch 2 Companion Control Actions
         const val ACTION_TOGGLE_MUTE = "com.aleksandr.pockethud.ACTION_TOGGLE_MUTE"
@@ -341,6 +344,7 @@ class PocketService : Service() {
         const val ACTION_CLEAR_SUBTITLES = "com.aleksandr.pockethud.ACTION_CLEAR_SUBTITLES"
         const val ACTION_STOP_SERVICE = "com.aleksandr.pockethud.ACTION_STOP_SERVICE"
         const val ACTION_SWITCH_ENGINE = "com.aleksandr.pockethud.ACTION_SWITCH_ENGINE"
+        const val ACTION_SWITCH_TTS_MODE = "com.aleksandr.pockethud.ACTION_SWITCH_TTS_MODE"
 
         val REST_FLASH_MODELS = listOf(
             "gemini-3.5-flash-lite",
@@ -379,6 +383,13 @@ class PocketService : Service() {
                 currentInstance?.applyMicSourceChange(value)
             }
 
+        @Volatile
+        var selectedTtsMode: TtsMode = TtsMode.GIST_ONLY
+            set(value) {
+                field = value
+                currentInstance?.applyTtsModeChange(value)
+            }
+
         // Коллбэки в UI (Volatile для потокобезопасности: устанавливаются в UI-потоке, вызываются из OkHttp)
         @Volatile var onStatusChanged: ((String) -> Unit)? = null
         @Volatile var onTextReceived: ((String) -> Unit)? = null
@@ -389,6 +400,7 @@ class PocketService : Service() {
         @Volatile var onMicSourceChanged: ((MicSource) -> Unit)? = null
         @Volatile var onEngineChanged: ((TranslationEngine) -> Unit)? = null
         @Volatile var onRestModelChanged: ((String) -> Unit)? = null
+        @Volatile var onTtsModeChanged: ((TtsMode) -> Unit)? = null
 
         // Диалог текущей сессии (Google Translate Conversation Mode)
         private val sessionDialogueTurns = ArrayList<DialogueTurn>()
@@ -549,6 +561,18 @@ class PocketService : Service() {
                     onEngineChanged?.invoke(nextEngine)
                     return START_STICKY
                 }
+                ACTION_SWITCH_TTS_MODE -> {
+                    val nextMode = when (selectedTtsMode) {
+                        TtsMode.GIST_ONLY -> TtsMode.FULL_PHRASE
+                        TtsMode.FULL_PHRASE -> TtsMode.MUTED
+                        TtsMode.MUTED -> TtsMode.GIST_ONLY
+                    }
+                    triggerWearHapticFeedback()
+                    logEvent("WEAR_ACTION_SWITCH_TTS_MODE", "(nextMode=$nextMode)")
+                    selectedTtsMode = nextMode
+                    onTtsModeChanged?.invoke(nextMode)
+                    return START_STICKY
+                }
                 ACTION_CLEAR_SUBTITLES -> {
                     triggerWearHapticFeedback()
                     logEvent("WEAR_ACTION_CLEAR_SUBTITLES")
@@ -614,6 +638,15 @@ class PocketService : Service() {
         selectedRestModel = validRestModel
         activeRestModel = validRestModel
 
+        val ttsModeExtra = intent?.getStringExtra(EXTRA_TTS_MODE)
+        if (ttsModeExtra != null) {
+            selectedTtsMode = try {
+                TtsMode.valueOf(ttsModeExtra)
+            } catch (e: Exception) {
+                TtsMode.GIST_ONLY
+            }
+        }
+
         activeApiKey = apiKey
         reconnectAttempts = 0
         currentInstance = this
@@ -642,6 +675,15 @@ class PocketService : Service() {
 
         isRunning = true
         isServiceActive = true
+
+        // Dual-Track: запуск фоновой сквозной аудиозаписи диалога (M4A/AAC, R08, R12i)
+        try {
+            val sessionId = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(serviceStartTime))
+            val recordFile = AudioRecordingManager.startRecording(this, sessionId)
+            logEvent("DUAL_TRACK_AUDIO_START", "file=${recordFile?.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(tag, "Ошибка запуска фоновой аудиозаписи AudioRecordingManager: ${e.message}", e)
+        }
 
         if (selectedEngine == TranslationEngine.CASCADED_REST) {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
@@ -2726,6 +2768,15 @@ class PocketService : Service() {
         onRestModelChanged?.invoke(newModel)
     }
 
+    fun applyTtsModeChange(newMode: TtsMode) {
+        logEvent("TTS_MODE_CHANGED", "newMode=$newMode")
+        onTtsModeChanged?.invoke(newMode)
+    }
+
+    fun isEarphoneConnected(): Boolean {
+        return SmartTtsController.isEarphoneConnected(this)
+    }
+
     private fun initTts() {
         if (tts != null) return
         try {
@@ -2758,7 +2809,7 @@ class PocketService : Service() {
                     isTtsSpeaking = false
                     mainHandler.removeCallbacks(ttsWatchdogRunnable)
                     mainHandler.postDelayed({
-                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
+                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking && isRecognitionPaused) {
                             resumeRecognition()
                         }
                     }, 150L)
@@ -2769,7 +2820,7 @@ class PocketService : Service() {
                     isTtsSpeaking = false
                     mainHandler.removeCallbacks(ttsWatchdogRunnable)
                     mainHandler.post {
-                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST) {
+                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && isRecognitionPaused) {
                             resumeRecognition()
                         }
                     }
@@ -2779,7 +2830,7 @@ class PocketService : Service() {
                     isTtsSpeaking = false
                     mainHandler.removeCallbacks(ttsWatchdogRunnable)
                     mainHandler.post {
-                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST) {
+                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && isRecognitionPaused) {
                             resumeRecognition()
                         }
                     }
@@ -2792,24 +2843,42 @@ class PocketService : Service() {
     }
 
     private fun speakTts(russianText: String) {
-        if (isAudioMuted || !isTtsInitialized || tts == null || russianText.isBlank()) return
-        val cleanSpeech = sanitizeTtsSpeech(russianText)
+        if (isAudioMuted || selectedTtsMode == TtsMode.MUTED || !isTtsInitialized || tts == null || russianText.isBlank()) return
+
+        val earphoneConnected = isEarphoneConnected()
+        val speechText = if (selectedTtsMode == TtsMode.GIST_ONLY) {
+            SmartTtsController.extractGist(russianText)
+        } else {
+            russianText
+        }
+
+        val cleanSpeech = sanitizeTtsSpeech(speechText)
         if (cleanSpeech.isBlank()) return
 
         isTtsSpeaking = true
-        pauseRecognition()
+
+        // Устранение ослепления микрофона (R01, G01):
+        // Если звук идет в наушники (earphoneConnected), НЕ вызываем pauseRecognition()!
+        // SpeechRecognizer продолжает непрерывно слушать речь собеседника во время озвучки.
+        if (!earphoneConnected) {
+            pauseRecognition()
+        } else {
+            logEvent("TTS_SPEAK_CONTINUOUS_MIC", "Наушники подключены: микрофон НЕ глушится")
+        }
 
         val utteranceId = "pockethud_tts_${System.currentTimeMillis()}"
         val params = Bundle().apply {
             putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_MUSIC)
         }
         val result = tts?.speak(cleanSpeech, TextToSpeech.QUEUE_FLUSH, params, utteranceId)
-        logEvent("TTS_SPEAK", "utteranceId=$utteranceId, res=$result, text=\"$cleanSpeech\"")
+        logEvent("TTS_SPEAK", "utteranceId=$utteranceId, res=$result, earphone=$earphoneConnected, mode=$selectedTtsMode, text=\"$cleanSpeech\"")
         if (result != TextToSpeech.SUCCESS) {
             Log.w(tag, "tts.speak вернул код ошибки: $result, сброс состояния")
             isTtsSpeaking = false
             mainHandler.removeCallbacks(ttsWatchdogRunnable)
-            resumeRecognition()
+            if (!earphoneConnected) {
+                resumeRecognition()
+            }
         }
     }
 
@@ -3607,6 +3676,14 @@ class PocketService : Service() {
             DialogueHistoryManager.saveSession(this, sessionDialogueTurns)
         } catch (e: Exception) {
             Log.e(tag, "Ошибка архивации диалога при остановке сервиса: ${e.message}", e)
+        }
+
+        // Dual-Track: Остановка фоновой аудиозаписи диалога (R08, R10)
+        try {
+            val recordFile = AudioRecordingManager.stopRecording()
+            logEvent("DUAL_TRACK_AUDIO_STOP", "file=${recordFile?.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(tag, "Ошибка остановки фоновой аудиозаписи AudioRecordingManager: ${e.message}", e)
         }
 
         restoreAudioRouting()
