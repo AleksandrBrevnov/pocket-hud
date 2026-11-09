@@ -60,6 +60,7 @@ class AudioRecordingManager {
             stopRecording()
         }
 
+        var activeRecorder: MediaRecorder? = null
         return try {
             val dir = getRecordsDir(context)
             val cleanSessionId = sessionId.trim().ifEmpty {
@@ -78,6 +79,7 @@ class AudioRecordingManager {
                 @Suppress("DEPRECATION")
                 MediaRecorder()
             }
+            activeRecorder = recorder
 
             recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
             recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
@@ -97,6 +99,7 @@ class AudioRecordingManager {
         } catch (e: Throwable) {
             Log.e(TAG, "AudioRecordingManager: Failed to start recording: ${e.message}", e)
             try {
+                activeRecorder?.release()
                 mediaRecorder?.release()
             } catch (ignored: Exception) {}
             mediaRecorder = null
@@ -119,6 +122,12 @@ class AudioRecordingManager {
                     it.stop()
                 } catch (e: Exception) {
                     Log.w(TAG, "AudioRecordingManager: Error stopping MediaRecorder: ${e.message}")
+                    if (file != null && file.exists() && file.length() < 1024L) {
+                        try {
+                            java.nio.file.Files.deleteIfExists(file.toPath())
+                            Log.i(TAG, "AudioRecordingManager: Cleaned up corrupted short recording (< 1KB)")
+                        } catch (ignored: Exception) {}
+                    }
                 }
                 it.release()
             }
@@ -129,7 +138,7 @@ class AudioRecordingManager {
             mediaRecorder = null
             isRecordingActive = false
         }
-        return file
+        return if (file != null && file.exists()) file else null
     }
 
     fun isRecording(): Boolean = isRecordingActive

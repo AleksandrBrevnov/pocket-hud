@@ -308,8 +308,12 @@ class PocketService : Service() {
         if (isTtsSpeaking) {
             Log.w(tag, "TTS Watchdog: сброс зависшего флага isTtsSpeaking")
             isTtsSpeaking = false
-            if (isRecognitionPaused) {
-                resumeRecognition()
+            if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST) {
+                if (isRecognitionPaused) {
+                    resumeRecognition()
+                } else if (!isAsrListening && !isAsrStarting) {
+                    startListeningSafe()
+                }
             }
         }
     }
@@ -389,6 +393,46 @@ class PocketService : Service() {
                 field = value
                 currentInstance?.applyTtsModeChange(value)
             }
+
+        // Потокобезопасный реестр слушателей PocketService
+        interface PocketServiceListener {
+            fun onStatusChanged(status: String) {}
+            fun onTextReceived(text: String) {}
+        }
+
+        private val listeners = java.util.concurrent.CopyOnWriteArrayList<PocketServiceListener>()
+
+        fun addListener(listener: PocketServiceListener) {
+            if (!listeners.contains(listener)) {
+                listeners.add(listener)
+            }
+        }
+
+        fun removeListener(listener: PocketServiceListener) {
+            listeners.remove(listener)
+        }
+
+        fun notifyStatusChanged(status: String) {
+            onStatusChanged?.invoke(status)
+            for (listener in listeners) {
+                try {
+                    listener.onStatusChanged(status)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Error in listener onStatusChanged: ${e.message}")
+                }
+            }
+        }
+
+        fun notifyTextReceived(text: String) {
+            onTextReceived?.invoke(text)
+            for (listener in listeners) {
+                try {
+                    listener.onTextReceived(text)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Error in listener onTextReceived: ${e.message}")
+                }
+            }
+        }
 
         // Коллбэки в UI (Volatile для потокобезопасности: устанавливаются в UI-потоке, вызываются из OkHttp)
         @Volatile var onStatusChanged: ((String) -> Unit)? = null
@@ -603,7 +647,7 @@ class PocketService : Service() {
             if (isRunning) {
                 return START_STICKY
             }
-            onStatusChanged?.invoke("🔴 Ошибка: API ключ пуст")
+            notifyStatusChanged("🔴 Ошибка: API ключ пуст")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -657,15 +701,23 @@ class PocketService : Service() {
         logEvent("SERVICE_START", "(engine=$selectedEngine, mic=$selectedMicSource, isAudioMuted=$isAudioMuted)")
 
         val notification = buildNotification("Карманный суфлёр активен (экран можно выключить)")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            Log.e(tag, "Ошибка запуска startForeground (Android 14 FGS restriction): ${e.message}", e)
+            logEvent("START_FOREGROUND_EXCEPTION", "${e.message}")
+            notifyStatusChanged("🔴 Ошибка запуска в фоне (Android 14). Откройте экран приложения.")
+            stopSelf()
+            return START_NOT_STICKY
         }
 
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -691,7 +743,7 @@ class PocketService : Service() {
                 "⚡ Подключение...",
                 "PocketHUD v1.0.46 активен (Каскадный ASR + REST Flash). Слушаю итальянскую речь..."
             )
-            onStatusChanged?.invoke("⚡ Каскадный режим активен (ASR + REST Flash)")
+            notifyStatusChanged("⚡ Каскадный режим активен (ASR + REST Flash)")
             setupAudioRouting()
             initTts()
             initSpeechRecognizer()
@@ -703,7 +755,7 @@ class PocketService : Service() {
                 "PocketHUD v1.0.46 активен. Ожидание подключения к Gemini Live API..."
             )
             setupAudioRouting()
-            onStatusChanged?.invoke("🔵 Подключение к Google Gemini Live API...")
+            notifyStatusChanged("🔵 Подключение к Google Gemini Live API...")
             initAudioOutput()
             connectWebSocket(apiKey)
         }
@@ -854,7 +906,7 @@ class PocketService : Service() {
                 } else {
                     val err = "🔴 Ошибка переключения микрофона ($newSource)"
                     lastError = err
-                    onStatusChanged?.invoke(err)
+                    notifyStatusChanged(err)
                     logEvent("MIC_SOURCE_INIT_FAILED")
                 }
             }
@@ -1328,7 +1380,7 @@ class PocketService : Service() {
         }
 
         appendToSessionBuilder(sessionRussianBuilder, cleanedText)
-        onTextReceived?.invoke(cleanedText)
+        notifyTextReceived(cleanedText)
         try {
             DialogueHistoryManager.saveCurrentSessionCache(this@PocketService, sessionDialogueTurns)
         } catch (e: Exception) {
@@ -1808,7 +1860,7 @@ class PocketService : Service() {
                 isSetupComplete = false
                 connectionState = "OPEN (Sending Setup)"
                 logEvent("WEBSOCKET_OPEN")
-                onStatusChanged?.invoke("🔵 WebSocket соединён. Инициализация Gemini Live Translate...")
+                notifyStatusChanged("🔵 WebSocket соединён. Инициализация Gemini Live Translate...")
                 sendSetup(ws)
             }
 
@@ -1857,7 +1909,7 @@ class PocketService : Service() {
                     connectionState = "FATAL_ERROR ($httpCode)"
                     lastError = "Фатальная ошибка HTTP $httpCode: ${t.message}"
                     logEvent("HTTP_ERROR_FATAL", "code=$httpCode, msg=${t.message}")
-                    onStatusChanged?.invoke("🔴 $errorLabel")
+                    notifyStatusChanged("🔴 $errorLabel")
                     isRunning = false
                     isServiceActive = false
                     try {
@@ -1929,7 +1981,7 @@ class PocketService : Service() {
                         webSocket = null
                         audioSendQueue.clear()
                         logEvent("SESSION_ROTATION_RECONNECT", "code=$code, reason=$reason")
-                        onStatusChanged?.invoke("🔄 Ротация сессии Google (15 мин). Мгновенное возобновление...")
+                        notifyStatusChanged("🔄 Ротация сессии Google (15 мин). Мгновенное возобновление...")
                         val rotationTask = Runnable {
                             sessionRotationRunnable = null
                             if (isRunning && activeApiKey.isNotBlank() && selectedEngine == TranslationEngine.LIVE_WEBSOCKET) {
@@ -1946,7 +1998,7 @@ class PocketService : Service() {
                 } else {
                     connectionState = "CLOSED ($code: $reason)"
                     logEvent("WEBSOCKET_CLOSED", "code=$code, reason=$reason")
-                    onStatusChanged?.invoke("⚪ Суфлёр остановлен.")
+                    notifyStatusChanged("⚪ Суфлёр остановлен.")
                     stopSelf()
                 }
             }
@@ -1996,7 +2048,7 @@ class PocketService : Service() {
             reconnectAttempts++
             val delaySec = minOf(reconnectAttempts * 2, 8)
             connectionState = "RECONNECTING ($reconnectAttempts/$maxReconnectAttempts in ${delaySec}s)"
-            onStatusChanged?.invoke("🟠 Связь прервана ($reason). Авто-переподключение через ${delaySec}с ($reconnectAttempts/$maxReconnectAttempts)...")
+            notifyStatusChanged("🟠 Связь прервана ($reason). Авто-переподключение через ${delaySec}с ($reconnectAttempts/$maxReconnectAttempts)...")
 
             reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
             val reconTask = Runnable {
@@ -2015,7 +2067,7 @@ class PocketService : Service() {
             connectionState = "FAILED (Max reconnects reached)"
             lastError = "Связь потеряна: $reason"
             logEvent("RECONNECT_FAILED_FINAL")
-            onStatusChanged?.invoke("🔴 Соединение разорвано: $reason")
+            notifyStatusChanged("🔴 Соединение разорвано: $reason")
             stopSelf()
         }
     }
@@ -2134,7 +2186,7 @@ class PocketService : Service() {
                     reconnectAttempts = 0
                 }
                 logEvent("SETUP_COMPLETE", "(model=gemini-3.5-live-translate-preview, mic=$activeAudioSource)")
-                onStatusChanged?.invoke("🟢 Соединение активно! Слушаю итальянскую и английскую речь...")
+                notifyStatusChanged("🟢 Соединение активно! Слушаю итальянскую и английскую речь...")
                 updateOngoingNotification(
                     "🟢 Слушаю речь вокруг...",
                     "PocketHUD готов к переводу. Слушаю итальянскую и английскую речь..."
@@ -2155,7 +2207,7 @@ class PocketService : Service() {
                 isSetupComplete = false
                 mainHandler.removeCallbacks(simulIdleRunnable)
                 logEvent("SERVER_ERROR", "code=$code, message=$msg")
-                onStatusChanged?.invoke("🔴 $errText")
+                notifyStatusChanged("🔴 $errText")
                 Log.e(tag, errText)
                 triggerFailureHaptic()
                 try {
@@ -2582,7 +2634,7 @@ class PocketService : Service() {
             val err = "🔴 Ошибка: микрофон недоступен ни в одном режиме"
             lastError = err
             logEvent("MIC_INIT_FAILED")
-            onStatusChanged?.invoke(err)
+            notifyStatusChanged(err)
             stopSelf()
             return
         }
@@ -2597,7 +2649,7 @@ class PocketService : Service() {
             val err = "🔴 Ошибка старта микрофона: ${e.message}"
             lastError = err
             logEvent("MIC_START_ERROR", "${e.message}")
-            onStatusChanged?.invoke(err)
+            notifyStatusChanged(err)
             stopSelf()
             return
         }
@@ -2727,7 +2779,7 @@ class PocketService : Service() {
                 initSpeechRecognizer()
                 startListeningSafe()
                 val statusMsg = "⚡ Каскадный режим активен (ASR + REST Flash)"
-                onStatusChanged?.invoke(statusMsg)
+                notifyStatusChanged(statusMsg)
                 updateOngoingNotification(
                     "⚡ Каскадный ASR+REST",
                     "PocketHUD v1.0.46: переключено на каскадный перевод (ASR + REST Flash)"
@@ -2751,7 +2803,7 @@ class PocketService : Service() {
                 setupAudioRouting()
                 initAudioOutput()
                 val statusMsg = "🔵 Подключение к Google Gemini Live API..."
-                onStatusChanged?.invoke(statusMsg)
+                notifyStatusChanged(statusMsg)
                 updateOngoingNotification(
                     "🔵 Gemini Live WS",
                     "PocketHUD v1.0.46: переключено на Gemini Live WebSocket..."
@@ -2809,8 +2861,12 @@ class PocketService : Service() {
                     isTtsSpeaking = false
                     mainHandler.removeCallbacks(ttsWatchdogRunnable)
                     mainHandler.postDelayed({
-                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking && isRecognitionPaused) {
-                            resumeRecognition()
+                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && !isTtsSpeaking) {
+                            if (isRecognitionPaused) {
+                                resumeRecognition()
+                            } else if (!isAsrListening && !isAsrStarting) {
+                                startListeningSafe()
+                            }
                         }
                     }, 150L)
                 }
@@ -2820,8 +2876,12 @@ class PocketService : Service() {
                     isTtsSpeaking = false
                     mainHandler.removeCallbacks(ttsWatchdogRunnable)
                     mainHandler.post {
-                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && isRecognitionPaused) {
-                            resumeRecognition()
+                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST) {
+                            if (isRecognitionPaused) {
+                                resumeRecognition()
+                            } else if (!isAsrListening && !isAsrStarting) {
+                                startListeningSafe()
+                            }
                         }
                     }
                 }
@@ -2830,8 +2890,12 @@ class PocketService : Service() {
                     isTtsSpeaking = false
                     mainHandler.removeCallbacks(ttsWatchdogRunnable)
                     mainHandler.post {
-                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST && isRecognitionPaused) {
-                            resumeRecognition()
+                        if (isRunning && selectedEngine == TranslationEngine.CASCADED_REST) {
+                            if (isRecognitionPaused) {
+                                resumeRecognition()
+                            } else if (!isAsrListening && !isAsrStarting) {
+                                startListeningSafe()
+                            }
                         }
                     }
                 }
@@ -2878,6 +2942,8 @@ class PocketService : Service() {
             mainHandler.removeCallbacks(ttsWatchdogRunnable)
             if (!earphoneConnected) {
                 resumeRecognition()
+            } else if (!isAsrListening && !isAsrStarting) {
+                startListeningSafe()
             }
         }
     }
@@ -2892,7 +2958,7 @@ class PocketService : Service() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             val err = "🔴 Ошибка: SpeechRecognizer недоступен на данном устройстве"
             logEvent("SPEECH_RECOGNIZER_UNAVAILABLE")
-            onStatusChanged?.invoke(err)
+            notifyStatusChanged(err)
             return
         }
 
@@ -2917,7 +2983,7 @@ class PocketService : Service() {
                     isAsrStarting = false
                     isAsrListening = true
                     consecutiveSpeechErrors = 0
-                    onStatusChanged?.invoke("⚡ Слушаю итальянскую речь (Каскадный ASR)...")
+                    notifyStatusChanged("⚡ Слушаю итальянскую речь (Каскадный ASR)...")
                 }
 
                 override fun onBeginningOfSpeech() {
@@ -3485,7 +3551,7 @@ class PocketService : Service() {
             }
         }
         appendToSessionBuilder(sessionRussianBuilder, russianTranslation)
-        onTextReceived?.invoke(russianTranslation)
+        notifyTextReceived(russianTranslation)
 
         scheduleNotificationUpdate(russianTranslation, recentTranslations.toString().trim())
 
@@ -3751,7 +3817,7 @@ class PocketService : Service() {
             stopForeground(true)
         }
 
-        onStatusChanged?.invoke("⚪ Суфлёр остановлен.")
+        notifyStatusChanged("⚪ Суфлёр остановлен.")
         currentInstance = null
         super.onDestroy()
     }

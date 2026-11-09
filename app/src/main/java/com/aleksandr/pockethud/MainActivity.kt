@@ -899,8 +899,8 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun setupServiceCallbacks() {
-        PocketService.onStatusChanged = { status ->
+    private val serviceListener = object : PocketService.PocketServiceListener {
+        override fun onStatusChanged(status: String) {
             runOnUiThread {
                 statusBadgeText.text = status
                 if (status.contains("🟢") || status.contains("🔵") || status.contains("⚡")) {
@@ -913,6 +913,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        override fun onTextReceived(text: String) {
+            runOnUiThread {
+                appendRussianText(text)
+            }
+        }
+    }
+
+    private fun setupServiceCallbacks() {
+        PocketService.addListener(serviceListener)
+
         PocketService.onTelemetryUpdated = { micAmp, chunks, responses ->
             runOnUiThread {
                 telemetryBadgeText.text = "🎙️ $micAmp% | 📦 $chunks | ⚡ $responses"
@@ -922,12 +932,6 @@ class MainActivity : AppCompatActivity() {
         PocketService.onInputTextReceived = { text ->
             runOnUiThread {
                 appendItalianText(text)
-            }
-        }
-
-        PocketService.onTextReceived = { text ->
-            runOnUiThread {
-                appendRussianText(text)
             }
         }
 
@@ -2455,10 +2459,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        PocketService.onStatusChanged = null
+        PocketService.removeListener(serviceListener)
         PocketService.onTelemetryUpdated = null
         PocketService.onInputTextReceived = null
-        PocketService.onTextReceived = null
         PocketService.onDialogueTurnUpdated = null
         PocketService.onMuteStateChanged = null
         PocketService.onMicSourceChanged = null

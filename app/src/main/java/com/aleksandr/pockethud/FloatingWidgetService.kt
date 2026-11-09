@@ -110,6 +110,26 @@ class FloatingWidgetService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_SHOW -> {
+                if (!isOverlayActive && ::overlayView.isInitialized) {
+                    try {
+                        windowManager.addView(overlayView, params)
+                        isOverlayActive = true
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Ошибка вызова WindowManager.addView в onStartCommand: ${e.message}")
+                        stopSelf()
+                    }
+                }
+            }
+            ACTION_HIDE -> {
+                stopSelf()
+            }
+        }
+        return START_NOT_STICKY
+    }
+
     override fun onCreate() {
         super.onCreate()
         currentInstance = this
@@ -274,6 +294,10 @@ class FloatingWidgetService : Service() {
             windowManager.addView(overlayView, params)
         } catch (e: Exception) {
             Log.e(TAG, "Ошибка вызова WindowManager.addView: ${e.message}")
+            isOverlayActive = false
+            currentInstance = null
+            stopSelf()
+            return
         }
     }
 
@@ -346,30 +370,39 @@ class FloatingWidgetService : Service() {
                 updateUiState(true, "🟢 Слушаю...")
                 Toast.makeText(this, "PocketHUD: Запущен перевод в 1 тап", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
-                Log.e(TAG, "Не удалось запустить Foreground Service: ${e.message}")
+                Log.e(TAG, "Не удалось запустить Foreground Service (Android 14 FGS): ${e.message}")
+                try {
+                    val actIntent = Intent(this, MainActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    }
+                    startActivity(actIntent)
+                    Toast.makeText(this, "Откройте PocketHUD для запуска (Android 14)", Toast.LENGTH_SHORT).show()
+                } catch (actEx: Exception) {
+                    Log.e(TAG, "Не удалось открыть MainActivity: ${actEx.message}")
+                }
             }
         }
     }
 
-    private fun setupListeners() {
-        // Подключаемся к речевому сервису для динамического обновления виджета
-        val oldStatusCb = PocketService.onStatusChanged
-        PocketService.onStatusChanged = { status ->
-            oldStatusCb?.invoke(status)
+    private val serviceListener = object : PocketService.PocketServiceListener {
+        override fun onStatusChanged(status: String) {
             mainHandler.post {
                 val isActive = PocketService.isServiceActive
                 updateUiState(isActive, status)
             }
         }
 
-        val oldTextCb = PocketService.onTextReceived
-        PocketService.onTextReceived = { text ->
-            oldTextCb?.invoke(text)
+        override fun onTextReceived(text: String) {
             mainHandler.post {
                 previewText.text = text
                 previewText.setTextColor(0xFF81C995.toInt())
             }
         }
+    }
+
+    private fun setupListeners() {
+        // Подключаемся к реестру слушателей PocketService без взаимного затирания
+        PocketService.addListener(serviceListener)
 
         val oldTurnCb = PocketService.onDialogueTurnUpdated
         PocketService.onDialogueTurnUpdated = { idx, turn, isNew ->
@@ -413,6 +446,7 @@ class FloatingWidgetService : Service() {
     }
 
     override fun onDestroy() {
+        PocketService.removeListener(serviceListener)
         isOverlayActive = false
         currentInstance = null
         if (::overlayView.isInitialized) {

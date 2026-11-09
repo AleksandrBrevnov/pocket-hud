@@ -76,7 +76,7 @@ class SmartTtsController {
          */
         fun extractGist(text: String): String {
             if (text.isBlank()) return ""
-            val clean = text.replace(Regex("[«»\"'*,\\[\\]{}()!?:;]"), " ")
+            val clean = text.replace(Regex("""[«»"'\*,\.\[\]{}()!?:;—–\-]"""), " ")
                 .replace(Regex("\\s+"), " ")
                 .trim()
             val tokens = clean.split(" ").filter { it.isNotBlank() }
@@ -84,10 +84,10 @@ class SmartTtsController {
                 return tokens.joinToString(" ")
             }
 
-            // Фильтрация стоп-слов
+            // Фильтрация стоп-слов с сохранением одиночных цифр и буквенных маркеров (терминалы, номера)
             val contentWords = tokens.filter { word ->
                 val lower = word.lowercase(Locale.ROOT)
-                lower !in STOP_WORDS && lower.length > 1
+                lower !in STOP_WORDS && (lower.length > 1 || lower.all { it.isDigit() } || (lower.length == 1 && word.all { it.isLetter() }))
             }
 
             // Если осталось 2-4 слова — возвращаем их
@@ -99,15 +99,16 @@ class SmartTtsController {
                 return contentWords.take(4).joinToString(" ")
             }
             // Если все слова оказались стоп-словами, оставляем первые 2-3 слова исходной фразы
-            val fallback = tokens.filter { it.length > 1 }.take(3)
+            val fallback = tokens.filter { it.length > 1 || it.all { c -> c.isDigit() } }.take(3)
             return if (fallback.isNotEmpty()) fallback.joinToString(" ") else tokens.take(2).joinToString(" ")
         }
     }
 
-    private var textToSpeech: TextToSpeech? = null
+    @Volatile private var textToSpeech: TextToSpeech? = null
     @Volatile private var isTtsReady = false
     @Volatile private var isSpeakingNow = false
 
+    @Synchronized
     fun initialize(context: Context, onReady: (Boolean) -> Unit = {}) {
         if (textToSpeech != null && isTtsReady) {
             onReady(true)
@@ -159,6 +160,7 @@ class SmartTtsController {
         }
     }
 
+    @Synchronized
     fun speak(text: String, mode: TtsMode = TtsMode.GIST_ONLY, isEarphoneConnected: Boolean = true) {
         if (mode == TtsMode.MUTED || text.isBlank() || !isTtsReady || textToSpeech == null) {
             return
@@ -210,6 +212,7 @@ class SmartTtsController {
         }
     }
 
+    @Synchronized
     fun stop() {
         try {
             textToSpeech?.stop()
@@ -220,6 +223,7 @@ class SmartTtsController {
         }
     }
 
+    @Synchronized
     fun shutdown() {
         try {
             textToSpeech?.stop()
