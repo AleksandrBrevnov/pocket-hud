@@ -13,6 +13,7 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.text.TextUtils
 import android.util.Log
 import android.view.Gravity
@@ -103,6 +104,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var engineSelectorBar: LinearLayout
     private lateinit var engineCascadedBtn: TextView
     private lateinit var engineLiveBtn: TextView
+    private lateinit var overlayToggleBtn: Button
+    private lateinit var ttsModeBtn: Button
 
     private val prefsName = "pocket_hud_prefs"
     private val keyApiKey = "api_key"
@@ -112,6 +115,7 @@ class MainActivity : AppCompatActivity() {
     private val keyShowOriginalText = "show_original_text"
     private val keyTranslationEngine = "translation_engine"
     private val keyRestModel = "rest_flash_model"
+    private val keyTtsMode = "tts_mode"
 
     private var currentMode = ScreenMode.DIALOGUE
     private var currentMicSource = MicSource.SMARTPHONE
@@ -171,6 +175,16 @@ class MainActivity : AppCompatActivity() {
         val isMuted = prefs.getBoolean(keyAudioMuted, false)
         PocketService.isAudioMuted = isMuted
         updateMuteButtonUi()
+
+        val savedTtsModeStr = prefs.getString(keyTtsMode, TtsMode.GIST_ONLY.name) ?: TtsMode.GIST_ONLY.name
+        val savedTtsMode = try {
+            TtsMode.valueOf(savedTtsModeStr)
+        } catch (e: Exception) {
+            TtsMode.GIST_ONLY
+        }
+        PocketService.selectedTtsMode = savedTtsMode
+        updateTtsModeButtonUi()
+        updateOverlayButtonUi()
 
         showOriginalText = prefs.getBoolean(keyShowOriginalText, true)
         showOriginalCheckBox.isChecked = showOriginalText
@@ -273,6 +287,8 @@ class MainActivity : AppCompatActivity() {
         updateMicSourceStyles()
         updateEngineStyles()
         updateRestModelStyles()
+        updateTtsModeButtonUi()
+        updateOverlayButtonUi()
 
         val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         val savedShowOriginal = prefs.getBoolean(keyShowOriginalText, true)
@@ -557,6 +573,76 @@ class MainActivity : AppCompatActivity() {
             muteBtn.text = "🔊 ЗВУК: ВКЛ"
             muteBtn.background = createButtonDrawable(0xFF1976D2.toInt(), 14f)
         }
+    }
+
+    private fun updateTtsModeButtonUi() {
+        if (!::ttsModeBtn.isInitialized) return
+        when (PocketService.selectedTtsMode) {
+            TtsMode.GIST_ONLY -> {
+                ttsModeBtn.text = "💡 TTS: СУТЬ (Gist)"
+                ttsModeBtn.background = createButtonDrawable(0xFF0F766E.toInt(), 14f)
+            }
+            TtsMode.FULL_PHRASE -> {
+                ttsModeBtn.text = "🗣️ TTS: ПОЛНАЯ"
+                ttsModeBtn.background = createButtonDrawable(0xFF6D28D9.toInt(), 14f)
+            }
+            TtsMode.MUTED -> {
+                ttsModeBtn.text = "🔇 TTS: ВЫКЛ"
+                ttsModeBtn.background = createButtonDrawable(0xFF78350F.toInt(), 14f)
+            }
+        }
+    }
+
+    private fun updateOverlayButtonUi() {
+        if (!::overlayToggleBtn.isInitialized) return
+        if (FloatingWidgetService.isOverlayActive) {
+            overlayToggleBtn.text = "🪟 ОВЕРЛЕЙ: ВКЛ"
+            overlayToggleBtn.background = createButtonDrawable(0xFF15803D.toInt(), 14f)
+        } else {
+            overlayToggleBtn.text = "🪟 ОВЕРЛЕЙ: ВЫКЛ"
+            overlayToggleBtn.background = createButtonDrawable(0xFF334155.toInt(), 14f)
+        }
+    }
+
+    private fun toggleFloatingOverlay() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!Settings.canDrawOverlays(this)) {
+                Toast.makeText(this, "Предоставьте разрешение на отображение поверх других окон", Toast.LENGTH_LONG).show()
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
+                return
+            }
+        }
+
+        if (FloatingWidgetService.isOverlayActive) {
+            FloatingWidgetService.hideOverlay(this)
+            Toast.makeText(this, "Плавающий оверлей скрыт", Toast.LENGTH_SHORT).show()
+        } else {
+            FloatingWidgetService.showOverlay(this)
+            Toast.makeText(this, "Плавающий оверлей запущен", Toast.LENGTH_SHORT).show()
+        }
+        updateOverlayButtonUi()
+    }
+
+    private fun toggleTtsMode() {
+        val nextMode = when (PocketService.selectedTtsMode) {
+            TtsMode.GIST_ONLY -> TtsMode.FULL_PHRASE
+            TtsMode.FULL_PHRASE -> TtsMode.GIST_ONLY
+            TtsMode.MUTED -> TtsMode.GIST_ONLY
+        }
+        PocketService.selectedTtsMode = nextMode
+        val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+        prefs.edit().putString(keyTtsMode, nextMode.name).apply()
+        updateTtsModeButtonUi()
+        val msg = if (nextMode == TtsMode.GIST_ONLY) {
+            "💡 Включен режим Gist-Only (шепот 2-4 опорных слова в паузе)"
+        } else {
+            "🗣️ Включен режим полной фразы (озвучивание предложения целиком)"
+        }
+        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
     }
 
     private fun copyToClipboard(label: String, text: String) {
@@ -872,6 +958,12 @@ class MainActivity : AppCompatActivity() {
         PocketService.onRestModelChanged = { model ->
             runOnUiThread {
                 updateRestModelStyles(model)
+            }
+        }
+
+        PocketService.onTtsModeChanged = { mode ->
+            runOnUiThread {
+                updateTtsModeButtonUi()
             }
         }
     }
@@ -1977,6 +2069,50 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
         }
 
+        val quickControlsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(8)) }
+            layoutParams = lp
+        }
+
+        overlayToggleBtn = Button(this).apply {
+            text = "🪟 ОВЕРЛЕЙ"
+            setTextColor(0xFFFFFFFF.toInt())
+            background = createButtonDrawable(0xFF334155.toInt(), 14f)
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(6), dp(10), dp(6), dp(10))
+            setOnClickListener {
+                toggleFloatingOverlay()
+            }
+        }
+        val overlayLp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            setMargins(0, 0, dp(6), 0)
+        }
+        quickControlsRow.addView(overlayToggleBtn, overlayLp)
+
+        ttsModeBtn = Button(this).apply {
+            text = "💡 TTS: СУТЬ"
+            setTextColor(0xFFFFFFFF.toInt())
+            background = createButtonDrawable(0xFF0F766E.toInt(), 14f)
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(6), dp(10), dp(6), dp(10))
+            setOnClickListener {
+                toggleTtsMode()
+            }
+        }
+        val ttsLp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        quickControlsRow.addView(ttsModeBtn, ttsLp)
+
+        dockLayout.addView(quickControlsRow)
+        updateOverlayButtonUi()
+        updateTtsModeButtonUi()
+
         // Главная крупная кнопка запуска / остановки суфлёра
         toggleBtn = Button(this).apply {
             text = "🎙️ ЗАПУСТИТЬ СУФЛЁР"
@@ -2328,6 +2464,7 @@ class MainActivity : AppCompatActivity() {
         PocketService.onMicSourceChanged = null
         PocketService.onEngineChanged = null
         PocketService.onRestModelChanged = null
+        PocketService.onTtsModeChanged = null
         super.onDestroy()
     }
 }
