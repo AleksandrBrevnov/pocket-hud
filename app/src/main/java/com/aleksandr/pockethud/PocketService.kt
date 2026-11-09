@@ -193,6 +193,12 @@ class StreamingTagCleaner {
 
 class PocketService : Service() {
 
+    // Потокобезопасный интерфейс слушателей PocketService
+    interface PocketServiceListener {
+        fun onStatusChanged(status: String) {}
+        fun onTextReceived(text: String) {}
+    }
+
     private val tag = "PocketHUD"
     private val TAG = "PocketHUD"
     @Volatile private var isRunning = false
@@ -395,11 +401,6 @@ class PocketService : Service() {
             }
 
         // Потокобезопасный реестр слушателей PocketService
-        interface PocketServiceListener {
-            fun onStatusChanged(status: String) {}
-            fun onTextReceived(text: String) {}
-        }
-
         private val listeners = java.util.concurrent.CopyOnWriteArrayList<PocketServiceListener>()
 
         fun addListener(listener: PocketServiceListener) {
