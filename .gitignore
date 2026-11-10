@@ -67,3 +67,5 @@ Screenshot*
 *.keystore
 *.jks
 !app/debug.keystore
+
+build_artifacts/

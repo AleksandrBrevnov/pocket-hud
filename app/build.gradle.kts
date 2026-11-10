@@ -11,8 +11,8 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 52
-        versionName = "1.0.48"
+        versionCode = 53
+        versionName = "1.0.49"
     }
 
     signingConfigs {
@@ -50,4 +50,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.google.mlkit:translate:17.0.3")
 }

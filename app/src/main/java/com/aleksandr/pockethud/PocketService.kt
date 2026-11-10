@@ -324,7 +324,8 @@ class PocketService : Service() {
         }
     }
 
-    @Volatile private var activeRestModel: String = "gemini-3.5-flash-lite"
+    @Volatile private var activeRestModel: String = "gemini-3.8-flash"
+    private val spokenTurnIds = java.util.Collections.synchronizedSet(HashSet<Long>())
 
     private val restHttpClient = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
@@ -357,8 +358,8 @@ class PocketService : Service() {
         const val ACTION_SWITCH_TTS_MODE = "com.aleksandr.pockethud.ACTION_SWITCH_TTS_MODE"
 
         val REST_FLASH_MODELS = listOf(
-            "gemini-3.5-flash-lite",
             "gemini-3.8-flash",
+            "gemini-3.5-flash-lite",
             "gemini-flash-latest"
         )
 
@@ -569,6 +570,11 @@ class PocketService : Service() {
         currentInstance = this
         createNotificationChannels()
         logEvent("SERVICE_CREATE")
+        try {
+            LocalTranslateManager.initialize(this)
+        } catch (e: Exception) {
+            Log.w(tag, "Ошибка инициализации LocalTranslateManager: ${e.message}")
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -678,7 +684,7 @@ class PocketService : Service() {
         val validRestModel = if (!restModelExtra.isNullOrBlank() && restModelExtra in REST_FLASH_MODELS) {
             restModelExtra
         } else {
-            "gemini-3.5-flash-lite"
+            "gemini-3.8-flash"
         }
         selectedRestModel = validRestModel
         activeRestModel = validRestModel
@@ -3143,6 +3149,21 @@ class PocketService : Service() {
 
         if (fullPhrase.isNotBlank() && turnId != null) {
             logEvent("ASR_PHRASE_FLUSHED", "turnId=$turnId, phrase=\"$fullPhrase\"")
+
+            // Track 1 (Edge ML Kit On-Device <80ms): мгновенный шепот сути в ухо и драфт на экран
+            LocalTranslateManager.translate(
+                fullPhrase,
+                onResult = { draft ->
+                    mainHandler.post {
+                        deliverEdgeDraftTranslation(draft, turnId)
+                    }
+                },
+                onError = { err ->
+                    Log.w(tag, "Локальный ML Kit перевод не удался: ${err.message}")
+                }
+            )
+
+            // Track 2 (Cloud Gemini REST ~450ms): контекстная полировка текста
             requestRestTranslation(fullPhrase, turnId)
         }
     }
@@ -3374,13 +3395,21 @@ class PocketService : Service() {
                     .takeLast(2)
             }
 
+            val rules = "Translate Italian speech to natural Russian.\n" +
+                "Rules:\n" +
+                "1. Return ONLY the Russian translation. No quotes, no preamble, no explanations.\n" +
+                "2. Keep everyday spoken conversational tone (Rome context).\n" +
+                "3. Format prices and numbers naturally (e.g. 'due e cinquanta' -> 'два пятьдесят (2.50€)').\n" +
+                "4. Understand Roman conversational markers ('allora', 'prego', 'senta', 'dica')."
+
             val promptText = if (contextTurns.isNotEmpty()) {
                 val contextStr = contextTurns.joinToString("\n") { turn ->
-                    "IT: ${turn.italianText} -> RU: ${turn.russianText}"
+                    val cleanRu = turn.russianText.replace(Regex("^\\[(⚡|✨)\\]\\s*"), "")
+                    "IT: ${turn.italianText} -> RU: $cleanRu"
                 }
-                "Context of ongoing conversation in Italy:\n$contextStr\n\nTranslate the following Italian speech to Russian accurately in the given conversational context. Return ONLY the Russian translation, nothing else. No explanations.\n\n$italianText"
+                "$rules\n\nRecent dialogue context:\n$contextStr\n\nTranslate:\n$italianText"
             } else {
-                "Translate the following Italian text to Russian. Return ONLY the translation, nothing else. No explanations.\n\n$italianText"
+                "$rules\n\nTranslate:\n$italianText"
             }
 
             val jsonPayload = JSONObject().apply {
@@ -3505,20 +3534,64 @@ class PocketService : Service() {
         executeTranslationCall(0, 0)
     }
 
+    private fun deliverEdgeDraftTranslation(russianDraft: String, turnId: Long) {
+        if (russianDraft.isBlank()) return
+        Log.d(tag, "Доставлен Edge ML Kit перевод: $russianDraft (turnId=$turnId)")
+        val draftWithBadge = "[⚡] $russianDraft"
+
+        synchronized(sessionDialogueTurns) {
+            val targetTurn = sessionDialogueTurns.find { it.id == turnId }
+            if (targetTurn != null) {
+                if (!targetTurn.isFinalized) {
+                    targetTurn.russianText = draftWithBadge
+                    targetTurn.lastActivityTime = System.currentTimeMillis()
+                    val idx = sessionDialogueTurns.indexOf(targetTurn)
+                    if (idx != -1) {
+                        onDialogueTurnUpdated?.invoke(idx, targetTurn.copy(), false)
+                    }
+                }
+            } else {
+                val newTurn = DialogueTurn(
+                    id = turnId,
+                    italianText = lastRecognizedInput,
+                    russianText = draftWithBadge,
+                    timestamp = System.currentTimeMillis(),
+                    lastActivityTime = System.currentTimeMillis(),
+                    isFinalized = false
+                )
+                sessionDialogueTurns.add(newTurn)
+                if (sessionDialogueTurns.size > 200) {
+                    sessionDialogueTurns.removeAt(0)
+                }
+                val idx = sessionDialogueTurns.size - 1
+                onDialogueTurnUpdated?.invoke(idx, newTurn.copy(), true)
+            }
+        }
+
+        notifyTextReceived(draftWithBadge)
+        scheduleNotificationUpdate(draftWithBadge, recentTranslations.toString().trim())
+
+        spokenTurnIds.add(turnId)
+        if (!isAudioMuted && isTtsInitialized && russianDraft.isNotBlank()) {
+            speakTts(russianDraft)
+        }
+    }
+
     private fun deliverRestTranslation(russianTranslation: String, turnId: Long) {
         Log.d(tag, "Доставлен REST перевод: $russianTranslation (turnId=$turnId)")
         serverTextChunksReceived++
         lastServerText = russianTranslation
 
+        val formattedTranslation = "[✨] $russianTranslation"
         val origItalian: String
         synchronized(sessionDialogueTurns) {
             var targetTurn = sessionDialogueTurns.find { it.id == turnId }
             if (targetTurn == null) {
-                targetTurn = sessionDialogueTurns.findLast { it.russianText.isBlank() }
+                targetTurn = sessionDialogueTurns.findLast { it.russianText.isBlank() || it.russianText.startsWith("[⚡]") }
             }
 
             if (targetTurn != null) {
-                targetTurn.russianText = russianTranslation
+                targetTurn.russianText = formattedTranslation
                 targetTurn.isFinalized = true
                 targetTurn.lastActivityTime = System.currentTimeMillis()
                 origItalian = targetTurn.italianText.ifBlank { lastRecognizedInput }
@@ -3529,8 +3602,9 @@ class PocketService : Service() {
             } else {
                 origItalian = lastRecognizedInput
                 val newTurn = DialogueTurn(
+                    id = turnId,
                     italianText = origItalian,
-                    russianText = russianTranslation,
+                    russianText = formattedTranslation,
                     timestamp = System.currentTimeMillis(),
                     lastActivityTime = System.currentTimeMillis(),
                     isFinalized = true
@@ -3561,11 +3635,12 @@ class PocketService : Service() {
             }
         }
         appendToSessionBuilder(sessionRussianBuilder, russianTranslation)
-        notifyTextReceived(russianTranslation)
+        notifyTextReceived(formattedTranslation)
 
-        scheduleNotificationUpdate(russianTranslation, recentTranslations.toString().trim())
+        scheduleNotificationUpdate(formattedTranslation, recentTranslations.toString().trim())
 
-        if (!isAudioMuted && isTtsInitialized && russianTranslation.isNotBlank()) {
+        val alreadySpokenInGist = spokenTurnIds.contains(turnId) && selectedTtsMode == TtsMode.GIST_ONLY
+        if (!isAudioMuted && isTtsInitialized && russianTranslation.isNotBlank() && !alreadySpokenInGist) {
             speakTts(russianTranslation)
         }
     }
@@ -3604,7 +3679,8 @@ class PocketService : Service() {
         val dateStr = SimpleDateFormat("dd.MM.yyyy HH:mm", Locale.getDefault()).format(Date())
         val dialogueText = turnsSnapshot.joinToString("\n") { turn ->
             val timeStr = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(turn.timestamp))
-            "[$timeStr] IT: ${turn.italianText}\nRU: ${turn.russianText}"
+            val cleanRu = turn.russianText.replace(Regex("^\\[(⚡|✨)\\]\\s*"), "")
+            "[$timeStr] IT: ${turn.italianText}\nRU: $cleanRu"
         }
 
         val promptText = """
@@ -3827,6 +3903,9 @@ class PocketService : Service() {
             stopForeground(true)
         }
 
+        try {
+            LocalTranslateManager.close()
+        } catch (e: Exception) {}
         notifyStatusChanged("⚪ Суфлёр остановлен.")
         currentInstance = null
         super.onDestroy()

@@ -71,6 +71,9 @@ class SmartTtsController {
             "пожалуйста", "спасибо", "здравствуйте", "привет", "ладно", "хорошо"
         )
 
+        // Однобуквенные служебные предлоги и союзы, которые не могут быть кодами залов/окон
+        private val SINGLE_LETTER_STOPWORDS = setOf("в", "с", "к", "о", "у", "и", "а")
+
         /**
          * Алгоритм извлечения сути: 2-4 ключевых опорных слова фразы перевода.
          */
@@ -84,18 +87,26 @@ class SmartTtsController {
                 return tokens.joinToString(" ")
             }
 
-            // Фильтрация стоп-слов с сохранением одиночных цифр и буквенных маркеров (терминалы, номера)
+            // Фильтрация стоп-слов с гарантированным сохранением одиночных литер (залы, терминалы, окна) и цифр
             val contentWords = tokens.filter { word ->
                 val lower = word.lowercase(Locale.ROOT)
-                lower !in STOP_WORDS && (lower.length > 1 || lower.all { it.isDigit() } || (lower.length == 1 && word.all { it.isLetter() }))
+                if (word.length == 1) {
+                    lower !in SINGLE_LETTER_STOPWORDS && (word[0].isLetter() || word[0].isDigit())
+                } else {
+                    lower !in STOP_WORDS
+                }
             }
 
             // Если осталось 2-4 слова — возвращаем их
             if (contentWords.size in 2..4) {
                 return contentWords.joinToString(" ")
             }
-            // Если больше 4 — берем первые 4 опорных слова
+            // Если больше 4 — берем первые 4 опорных слова (с сохранением буквенного кода зала в конце)
             if (contentWords.size > 4) {
+                val lastWord = contentWords.last()
+                if (lastWord.length == 1 && (lastWord[0].isLetter() || lastWord[0].isDigit())) {
+                    return (contentWords.take(3) + lastWord).joinToString(" ")
+                }
                 return contentWords.take(4).joinToString(" ")
             }
             // Если все слова оказались стоп-словами, оставляем первые 2-3 слова исходной фразы
