@@ -3566,6 +3566,10 @@ class PocketService : Service() {
                 val idx = sessionDialogueTurns.size - 1
                 onDialogueTurnUpdated?.invoke(idx, newTurn.copy(), true)
             }
+            try {
+                DialogueHistoryManager.saveCurrentSessionCache(this@PocketService, sessionDialogueTurns)
+            } catch (e: Exception) {}
+            Unit
         }
 
         notifyTextReceived(draftWithBadge)
