@@ -324,7 +324,7 @@ class PocketService : Service() {
         }
     }
 
-    @Volatile private var activeRestModel: String = "gemini-3.8-flash"
+    @Volatile private var activeRestModel: String = "gemini-3.5-flash-lite"
     private val spokenTurnIds = java.util.Collections.synchronizedSet(HashSet<Long>())
 
     private val restHttpClient = OkHttpClient.Builder()
@@ -358,8 +358,8 @@ class PocketService : Service() {
         const val ACTION_SWITCH_TTS_MODE = "com.aleksandr.pockethud.ACTION_SWITCH_TTS_MODE"
 
         val REST_FLASH_MODELS = listOf(
-            "gemini-3.8-flash",
             "gemini-3.5-flash-lite",
+            "gemini-3.8-flash",
             "gemini-flash-latest"
         )
 
@@ -684,7 +684,7 @@ class PocketService : Service() {
         val validRestModel = if (!restModelExtra.isNullOrBlank() && restModelExtra in REST_FLASH_MODELS) {
             restModelExtra
         } else {
-            "gemini-3.8-flash"
+            "gemini-3.5-flash-lite"
         }
         selectedRestModel = validRestModel
         activeRestModel = validRestModel
@@ -2987,6 +2987,7 @@ class PocketService : Service() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "it-IT")
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "it-IT")
             putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, "it-IT")
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1500L)
@@ -3736,7 +3737,7 @@ class PocketService : Service() {
                 put("generationConfig", JSONObject().apply {
                     put("temperature", 0.2)
                     put("maxOutputTokens", 2048)
-                    if (model == "gemini-3.8-flash" || model.contains("thinking")) {
+                    if (model == "gemini-3.5-flash-lite" || model == "gemini-3.8-flash" || model.startsWith("gemini-3") || model.contains("thinking")) {
                         put("thinkingConfig", JSONObject().apply {
                             put("thinkingLevel", "low")
                             put("includeThoughts", false)

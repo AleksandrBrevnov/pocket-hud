@@ -22,6 +22,8 @@ import android.view.ViewGroup
 import android.view.Window
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -106,6 +108,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var engineLiveBtn: TextView
     private lateinit var overlayToggleBtn: Button
     private lateinit var ttsModeBtn: Button
+    private lateinit var mlKitStatusBadge: TextView
 
     private val prefsName = "pocket_hud_prefs"
     private val keyApiKey = "api_key"
@@ -286,9 +289,9 @@ class MainActivity : AppCompatActivity() {
         updateMuteButtonUi()
         updateMicSourceStyles()
         updateEngineStyles()
-        updateRestModelStyles()
         updateTtsModeButtonUi()
         updateOverlayButtonUi()
+        updateMlKitStatusBadge(LocalTranslateManager.isModelReady(), LocalTranslateManager.isDownloadingModel())
 
         val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
         val savedShowOriginal = prefs.getBoolean(keyShowOriginalText, true)
@@ -463,6 +466,7 @@ class MainActivity : AppCompatActivity() {
         prefs.edit().putString(keyTranslationEngine, engine.name).apply()
         PocketService.selectedEngine = engine
         updateEngineStyles()
+        updateTtsModeButtonUi()
         val msg = if (engine == TranslationEngine.CASCADED_REST) {
             "⚡ Включен каскадный режим (ASR it-IT + Flash REST + TTS)"
         } else {
@@ -577,6 +581,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateTtsModeButtonUi() {
         if (!::ttsModeBtn.isInitialized) return
+        if (currentEngine == TranslationEngine.LIVE_WEBSOCKET) {
+            ttsModeBtn.text = "⚡ TTS: Gemini Live (нейро)"
+            ttsModeBtn.background = createButtonDrawable(0xFF1E293B.toInt(), 14f)
+            ttsModeBtn.alpha = 0.85f
+            return
+        }
+        ttsModeBtn.alpha = 1.0f
         when (PocketService.selectedTtsMode) {
             TtsMode.GIST_ONLY -> {
                 ttsModeBtn.text = "💡 TTS: СУТЬ (Gist)"
@@ -589,6 +600,29 @@ class MainActivity : AppCompatActivity() {
             TtsMode.MUTED -> {
                 ttsModeBtn.text = "🔇 TTS: ВЫКЛ"
                 ttsModeBtn.background = createButtonDrawable(0xFF78350F.toInt(), 14f)
+            }
+        }
+    }
+
+    private fun updateMlKitStatusBadge(isReady: Boolean, isDownloading: Boolean) {
+        if (!::mlKitStatusBadge.isInitialized) return
+        runOnUiThread {
+            when {
+                isReady -> {
+                    mlKitStatusBadge.text = "⚡ ML Kit: Готов"
+                    mlKitStatusBadge.setTextColor(0xFF34D399.toInt())
+                    mlKitStatusBadge.background = createRoundedDrawable(0xFF133E32.toInt(), 0xFF10B981.toInt(), 1, 6f)
+                }
+                isDownloading -> {
+                    mlKitStatusBadge.text = "⏳ ML Kit: Загрузка..."
+                    mlKitStatusBadge.setTextColor(0xFFFBBF24.toInt())
+                    mlKitStatusBadge.background = createRoundedDrawable(0xFF382D13.toInt(), 0xFFF59E0B.toInt(), 1, 6f)
+                }
+                else -> {
+                    mlKitStatusBadge.text = "ML Kit: Ожидание"
+                    mlKitStatusBadge.setTextColor(0xFF9CA3AF.toInt())
+                    mlKitStatusBadge.background = createRoundedDrawable(0xFF1F2937.toInt(), 0xFF374151.toInt(), 1, 6f)
+                }
             }
         }
     }
@@ -628,6 +662,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toggleTtsMode() {
+        if (currentEngine == TranslationEngine.LIVE_WEBSOCKET) {
+            Toast.makeText(this, "В режиме Gemini Live озвучка синтезируется напрямую нейросетью Google (PCM 24 кГц)", Toast.LENGTH_SHORT).show()
+            return
+        }
         val nextMode = when (PocketService.selectedTtsMode) {
             TtsMode.GIST_ONLY -> TtsMode.FULL_PHRASE
             TtsMode.FULL_PHRASE -> TtsMode.GIST_ONLY
@@ -922,6 +960,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun setupServiceCallbacks() {
         PocketService.addListener(serviceListener)
+
+        LocalTranslateManager.onStatusChanged = { isReady, isDownloading ->
+            updateMlKitStatusBadge(isReady, isDownloading)
+        }
 
         PocketService.onTelemetryUpdated = { micAmp, chunks, responses ->
             runOnUiThread {
@@ -1324,57 +1366,6 @@ class MainActivity : AppCompatActivity() {
         }
         apiSettingsContainer.addView(apiHint)
 
-        val modelLabel = TextView(this).apply {
-            text = "⚡ Модель REST Flash (Каскадный режим):"
-            textSize = 11.5f
-            setTextColor(0xFF8AB4F8.toInt())
-            setTypeface(null, Typeface.BOLD)
-            val params = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(dp(2), dp(10), 0, dp(4)) }
-            layoutParams = params
-        }
-        apiSettingsContainer.addView(modelLabel)
-
-        val modelSelectorBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = createRoundedDrawable(0xFF14171E.toInt(), 0xFF2B3240.toInt(), 1, 10f)
-            setPadding(dp(2), dp(2), dp(2), dp(2))
-            val params = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(0, 0, 0, dp(4)) }
-            layoutParams = params
-        }
-
-        val availableModels = PocketService.REST_FLASH_MODELS
-        for (model in availableModels) {
-            val displayName = when (model) {
-                "gemini-3.5-flash-lite" -> "3.5-Lite"
-                "gemini-3.8-flash" -> "3.8-Flash"
-                "gemini-flash-latest" -> "Flash-Latest"
-                else -> model
-            }
-            val modelBtn = TextView(this).apply {
-                text = displayName
-                textSize = 11f
-                setTypeface(null, Typeface.BOLD)
-                gravity = Gravity.CENTER
-                setPadding(dp(4), dp(6), dp(4), dp(6))
-                val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                layoutParams = params
-                isClickable = true
-                setOnClickListener {
-                    setRestModel(model)
-                }
-            }
-            restModelButtons[model] = modelBtn
-            modelSelectorBar.addView(modelBtn)
-        }
-        apiSettingsContainer.addView(modelSelectorBar)
-        updateRestModelStyles(PocketService.selectedRestModel)
         root.addView(apiSettingsContainer)
 
         // ==========================================
@@ -1614,13 +1605,23 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
         }
 
+        // Двухуровневый тулбар диалога: Уровень 1 - заголовок и ML Kit статус; Уровень 2 - HorizontalScrollView кнопок
         val dialogueHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, dp(8)) }
+            layoutParams = params
+        }
+
+        val dialogueHeaderTopRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(0, 0, 0, dp(8)) }
+            ).apply { setMargins(0, 0, 0, dp(6)) }
             layoutParams = params
         }
 
@@ -1632,12 +1633,42 @@ class MainActivity : AppCompatActivity() {
             background = createRoundedDrawable(0xFF20283C.toInt(), 0xFF313F5E.toInt(), 1, 8f)
             setPadding(dp(10), dp(4), dp(10), dp(4))
         }
-        dialogueHeader.addView(dialogueTitleText)
+        dialogueHeaderTopRow.addView(dialogueTitleText)
 
         val dialogueHeaderSpacer = View(this).apply {
             layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
         }
-        dialogueHeader.addView(dialogueHeaderSpacer)
+        dialogueHeaderTopRow.addView(dialogueHeaderSpacer)
+
+        mlKitStatusBadge = TextView(this).apply {
+            textSize = 10f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+        }
+        updateMlKitStatusBadge(LocalTranslateManager.isModelReady(), LocalTranslateManager.isDownloadingModel())
+        dialogueHeaderTopRow.addView(mlKitStatusBadge)
+
+        dialogueHeader.addView(dialogueHeaderTopRow)
+
+        val dialogueActionsScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            layoutParams = params
+        }
+
+        val dialogueActionsRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            val params = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+            layoutParams = params
+        }
 
         copyDialogueBtn = TextView(this).apply {
             text = "📋 Копировать"
@@ -1657,7 +1688,7 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this@MainActivity, if (showOriginalText) "История диалога скопирована" else "Русский перевод диалога скопирован", Toast.LENGTH_SHORT).show()
             }
         }
-        dialogueHeader.addView(copyDialogueBtn)
+        dialogueActionsRow.addView(copyDialogueBtn)
 
         shareDialogueBtn = TextView(this).apply {
             text = "📤 Поделиться"
@@ -1675,7 +1706,7 @@ class MainActivity : AppCompatActivity() {
                 shareDialogue()
             }
         }
-        dialogueHeader.addView(shareDialogueBtn)
+        dialogueActionsRow.addView(shareDialogueBtn)
 
         historyDialogueBtn = TextView(this).apply {
             text = "📁 История"
@@ -1693,7 +1724,7 @@ class MainActivity : AppCompatActivity() {
                 showSavedDialoguesDialog()
             }
         }
-        dialogueHeader.addView(historyDialogueBtn)
+        dialogueActionsRow.addView(historyDialogueBtn)
 
         aiSummaryBtn = TextView(this).apply {
             text = "⚡ Конспект"
@@ -1711,7 +1742,7 @@ class MainActivity : AppCompatActivity() {
                 requestAiSummary()
             }
         }
-        dialogueHeader.addView(aiSummaryBtn)
+        dialogueActionsRow.addView(aiSummaryBtn)
 
         clearDialogueBtn = TextView(this).apply {
             text = "🗑️ Очистить"
@@ -1734,7 +1765,9 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this@MainActivity, "Диалог сохранён в историю и очищен с экрана", Toast.LENGTH_SHORT).show()
             }
         }
-        dialogueHeader.addView(clearDialogueBtn)
+        dialogueActionsRow.addView(clearDialogueBtn)
+        dialogueActionsScroll.addView(dialogueActionsRow)
+        dialogueHeader.addView(dialogueActionsScroll)
         dialogueCard.addView(dialogueHeader)
 
         // Подпанель настроек диалога (Google Translate Conversation Mode: чекбокс скрытия оригинала)

@@ -25,6 +25,9 @@ object LocalTranslateManager {
     @Volatile
     private var isDownloading: Boolean = false
 
+    @Volatile
+    var onStatusChanged: ((isReady: Boolean, isDownloading: Boolean) -> Unit)? = null
+
     /**
      * Инициализирует локальный переводчик Italian -> Russian.
      * Загружает модель в память или инициирует фоновое скачивание языкового пакета (~30 МБ).
@@ -33,6 +36,7 @@ object LocalTranslateManager {
     fun initialize(context: Context, onReadyCallback: (Boolean) -> Unit = {}) {
         if (translator != null && isReady) {
             onReadyCallback(true)
+            onStatusChanged?.invoke(true, false)
             return
         }
 
@@ -47,6 +51,7 @@ object LocalTranslateManager {
 
             val conditions = DownloadConditions.Builder().build()
             isDownloading = true
+            onStatusChanged?.invoke(false, true)
             Log.i(TAG, "Проверка/скачивание локальной модели Italian-Russian ML Kit...")
 
             client.downloadModelIfNeeded(conditions)
@@ -54,17 +59,21 @@ object LocalTranslateManager {
                     isReady = true
                     isDownloading = false
                     Log.i(TAG, "Локальная модель Italian-Russian ML Kit готова к работе (On-Device RAM)")
+                    onStatusChanged?.invoke(true, false)
                     onReadyCallback(true)
                 }
                 .addOnFailureListener { exception ->
                     isReady = false
                     isDownloading = false
                     Log.w(TAG, "Не удалось загрузить локальную модель ML Kit: ${exception.message}")
+                    onStatusChanged?.invoke(false, false)
                     onReadyCallback(false)
                 }
         } catch (e: Exception) {
             Log.e(TAG, "Ошибка инициализации LocalTranslateManager: ${e.message}", e)
             isReady = false
+            isDownloading = false
+            onStatusChanged?.invoke(false, false)
             onReadyCallback(false)
         }
     }
@@ -73,6 +82,11 @@ object LocalTranslateManager {
      * Проверяет готовность локального инференса.
      */
     fun isModelReady(): Boolean = isReady
+
+    /**
+     * Проверяет процесс загрузки языкового пакета.
+     */
+    fun isDownloadingModel(): Boolean = isDownloading
 
     /**
      * Выполняет мгновенный локальный перевод итальянского текста на русский.
