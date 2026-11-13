@@ -753,8 +753,7 @@ class PocketService : Service() {
         isRunning = true
         isServiceActive = true
 
-        // Diagnostic build: isolate SpeechRecognizer from the independent MIC recorder.
-        // Keep ASR, routing and translation unchanged for this A/B test.
+        // Only Live archives its existing PCM stream; no independent microphone recorder.
         logEvent("AUDIO_ARCHIVE_POLICY", "live=shared_pcm_wav, cascaded=not_recorded")
 
         if (selectedEngine == TranslationEngine.CASCADED_REST) {
@@ -872,7 +871,13 @@ class PocketService : Service() {
             return
         }
 
-        Thread {
+        mainHandler.post {
+            if (!isRunning || selectedEngine != TranslationEngine.LIVE_WEBSOCKET || selectedMicSource != newSource) return@post
+            if (audioRecord == null) {
+                setupAudioRouting()
+                logEvent("MIC_SOURCE_PENDING", "source=$newSource, waiting_for_setup=true")
+                return@post
+            }
             synchronized(micSwitchLock) {
                 try {
                     recordThread?.interrupt()
@@ -930,7 +935,7 @@ class PocketService : Service() {
                     logEvent("MIC_SOURCE_INIT_FAILED")
                 }
             }
-        }.start()
+        }
     }
 
     private fun triggerFailureHaptic() {
@@ -1847,6 +1852,10 @@ class PocketService : Service() {
     }
 
     private fun connectWebSocket(apiKey: String) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { connectWebSocket(apiKey) }
+            return
+        }
         if (!isRunning) return
         if (selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
             Log.d(TAG, "connectWebSocket skipped: engine is $selectedEngine")
@@ -1874,22 +1883,24 @@ class PocketService : Service() {
         isSetupComplete = false
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
-                if (!isRunning || selectedEngine != TranslationEngine.LIVE_WEBSOCKET ||
-                    !liveSocketGate.bind(generation, ws)) {
-                    try { ws.close(1000, "Engine is not LIVE_WEBSOCKET") } catch (e: Exception) {}
-                    return
+                mainHandler.post {
+                    if (!isRunning || selectedEngine != TranslationEngine.LIVE_WEBSOCKET ||
+                        !liveSocketGate.bind(generation, ws)) {
+                        try { ws.close(1000, "Engine is not LIVE_WEBSOCKET") } catch (e: Exception) {}
+                        return@post
+                    }
+                    Log.d(tag, "WebSocket открыт. Отправка Setup...")
+                    isSetupComplete = false
+                    connectionState = "OPEN (Sending Setup)"
+                    logEvent("WEBSOCKET_OPEN")
+                    notifyStatusChanged("🔵 WebSocket соединён. Инициализация Gemini Live Translate...")
+                    sendSetup(ws)
                 }
-                Log.d(tag, "WebSocket открыт. Отправка Setup...")
-                isSetupComplete = false
-                connectionState = "OPEN (Sending Setup)"
-                logEvent("WEBSOCKET_OPEN")
-                notifyStatusChanged("🔵 WebSocket соединён. Инициализация Gemini Live Translate...")
-                sendSetup(ws)
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
-                synchronized(liveSocketGate) {
-                    if (!liveSocketGate.isCurrent(generation, ws) || !isRunning || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) return
+                mainHandler.post {
+                    if (!liveSocketGate.isCurrent(generation, ws) || !isRunning || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) return@post
                     handleServerMessage(text, generation, ws)
                 }
             }
@@ -1899,131 +1910,137 @@ class PocketService : Service() {
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                if (!liveSocketGate.isGeneration(generation) || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
-                    Log.d(tag, "Игнорирование onFailure для устаревшего сокета: ${t.message}")
-                    return
-                }
-                isSetupComplete = false
-                setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
-                setupWatchdogRunnable = null
-                hasPendingTranslation = false
-                currentTurnInputSpeech = null
-                activeTranslationTurnId = null
-                lastAsrPhrase = null
-                consecutiveAsrRepeatCount = 0
-                isRotationPending = false
-                sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
-                sessionRotationRunnable = null
-                reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
-                reconnectRunnable = null
-                mainHandler.removeCallbacks(simulIdleRunnable)
-                goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
-                goAwayRunnable = null
-                val httpCode = response?.code ?: run {
-                    val msg = t.message ?: ""
-                    val m = Regex("""\b(400|401|403)\b""").find(msg)
-                    m?.value?.toIntOrNull()
-                }
-                if (httpCode == 400 || httpCode == 401 || httpCode == 403) {
-                    val errorLabel = if (httpCode == 400) {
-                        "Некорректный запрос (HTTP 400)"
-                    } else {
-                        "Ошибка авторизации (HTTP $httpCode): проверьте API ключ"
+                mainHandler.post {
+                    if (!liveSocketGate.isGeneration(generation) || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
+                        Log.d(tag, "Игнорирование onFailure для устаревшего сокета: ${t.message}")
+                        return@post
                     }
-                    connectionState = "FATAL_ERROR ($httpCode)"
-                    lastError = "Фатальная ошибка HTTP $httpCode: ${t.message}"
-                    logEvent("HTTP_ERROR_FATAL", "code=$httpCode, msg=${t.message}")
-                    notifyStatusChanged("🔴 $errorLabel")
-                    isRunning = false
-                    isServiceActive = false
-                    try {
-                        audioRecord?.stop()
-                    } catch (e: Exception) {
-                        Log.w(tag, "Ошибка остановки audioRecord: ${e.message}")
+                    isSetupComplete = false
+                    setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+                    setupWatchdogRunnable = null
+                    hasPendingTranslation = false
+                    currentTurnInputSpeech = null
+                    activeTranslationTurnId = null
+                    lastAsrPhrase = null
+                    consecutiveAsrRepeatCount = 0
+                    isRotationPending = false
+                    sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
+                    sessionRotationRunnable = null
+                    reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+                    reconnectRunnable = null
+                    mainHandler.removeCallbacks(simulIdleRunnable)
+                    goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+                    goAwayRunnable = null
+                    val httpCode = response?.code ?: run {
+                        val msg = t.message ?: ""
+                        val m = Regex("""\b(400|401|403)\b""").find(msg)
+                        m?.value?.toIntOrNull()
                     }
-                    triggerFailureHaptic()
-                    try {
-                        val nm = getSystemService(NotificationManager::class.java)
-                        val fatalFg = buildNotification("🔴 $errorLabel")
-                        nm?.notify(NOTIFICATION_ID, fatalFg)
-                    } catch (e: Exception) {
-                        Log.w(tag, "Ошибка обновления уведомления: ${e.message}")
+                    if (httpCode == 400 || httpCode == 401 || httpCode == 403) {
+                        val errorLabel = if (httpCode == 400) {
+                            "Некорректный запрос (HTTP 400)"
+                        } else {
+                            "Ошибка авторизации (HTTP $httpCode): проверьте API ключ"
+                        }
+                        connectionState = "FATAL_ERROR ($httpCode)"
+                        lastError = "Фатальная ошибка HTTP $httpCode: ${t.message}"
+                        logEvent("HTTP_ERROR_FATAL", "code=$httpCode, msg=${t.message}")
+                        notifyStatusChanged("🔴 $errorLabel")
+                        isRunning = false
+                        isServiceActive = false
+                        try {
+                            audioRecord?.stop()
+                        } catch (e: Exception) {
+                            Log.w(tag, "Ошибка остановки audioRecord: ${e.message}")
+                        }
+                        triggerFailureHaptic()
+                        try {
+                            val nm = getSystemService(NotificationManager::class.java)
+                            val fatalFg = buildNotification("🔴 $errorLabel")
+                            nm?.notify(NOTIFICATION_ID, fatalFg)
+                        } catch (e: Exception) {
+                            Log.w(tag, "Ошибка обновления уведомления: ${e.message}")
+                        }
+                        stopSelf()
+                        return@post
                     }
-                    stopSelf()
-                    return
+                    handleConnectionDrop("Сбой сети: ${t.message}")
                 }
-                handleConnectionDrop("Сбой сети: ${t.message}")
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
-                if (!liveSocketGate.isCurrent(generation, ws)) return
-                Log.d(tag, "WebSocket закрывается ($code: $reason)")
-                isSetupComplete = false
-                setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
-                setupWatchdogRunnable = null
-                try {
-                    ws.close(code, reason)
-                } catch (e: Exception) {}
+                mainHandler.post {
+                    if (!liveSocketGate.isCurrent(generation, ws)) return@post
+                    Log.d(tag, "WebSocket закрывается ($code: $reason)")
+                    isSetupComplete = false
+                    setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+                    setupWatchdogRunnable = null
+                    try {
+                        ws.close(code, reason)
+                    } catch (e: Exception) {}
+                }
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                if (!liveSocketGate.isCurrent(generation, ws)) {
-                    Log.d(tag, "Игнорирование onClosed для устаревшего сокета ($code: $reason)")
-                    return
-                }
-                Log.d(tag, "WebSocket закрыт ($code: $reason)")
-                isSetupComplete = false
-                setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
-                setupWatchdogRunnable = null
-                hasPendingTranslation = false
-                currentTurnInputSpeech = null
-                activeTranslationTurnId = null
-                isRotationPending = false
-                sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
-                sessionRotationRunnable = null
-                reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
-                reconnectRunnable = null
-                goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
-                goAwayRunnable = null
-                mainHandler.removeCallbacks(simulIdleRunnable)
-                lastAsrPhrase = null
-                consecutiveAsrRepeatCount = 0
-
-                // Ghost Reconnect Guard: If selected engine is not LIVE_WEBSOCKET, DO NOT schedule websocket reconnection
-                if (selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
-                    Log.d(TAG, "onClosed skipped reconnect: engine is $selectedEngine")
-                    connectionState = "CLOSED ($code: $reason)"
-                    webSocket = null
-                    return
-                }
-
-                if (isRunning) {
-                    if (code == 1000) {
-                        // Google 10-15 min Session Rotation: DO NOT call stopSelf()!
-                        connectionState = "RECONNECTING (Rotation)"
-                        activeTranslationTurnId = null
-                        webSocket = null
-                        audioSendQueue.clear()
-                        logEvent("SESSION_ROTATION_RECONNECT", "code=$code, reason=$reason")
-                        notifyStatusChanged("🔄 Ротация сессии Google (15 мин). Мгновенное возобновление...")
-                        val rotationTask = Runnable {
-                            sessionRotationRunnable = null
-                            if (isRunning && activeApiKey.isNotBlank() && selectedEngine == TranslationEngine.LIVE_WEBSOCKET) {
-                                audioSendQueue.clear()
-                                connectWebSocket(activeApiKey)
-                            }
-                        }
-                        sessionRotationRunnable = rotationTask
-                        // Выдерживаем паузу 1.5с для освобождения сессии и квоты бэкендом Google Live
-                        mainHandler.postDelayed(rotationTask, 1500L)
-                    } else {
-                        handleConnectionDrop("Сервер закрыл сокет ($code: $reason)")
+                mainHandler.post {
+                    if (!liveSocketGate.isCurrent(generation, ws)) {
+                        Log.d(tag, "Игнорирование onClosed для устаревшего сокета ($code: $reason)")
+                        return@post
                     }
-                } else {
-                    connectionState = "CLOSED ($code: $reason)"
-                    logEvent("WEBSOCKET_CLOSED", "code=$code, reason=$reason")
-                    notifyStatusChanged("⚪ Суфлёр остановлен.")
-                    stopSelf()
+                    Log.d(tag, "WebSocket закрыт ($code: $reason)")
+                    isSetupComplete = false
+                    setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+                    setupWatchdogRunnable = null
+                    hasPendingTranslation = false
+                    currentTurnInputSpeech = null
+                    activeTranslationTurnId = null
+                    isRotationPending = false
+                    sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
+                    sessionRotationRunnable = null
+                    reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+                    reconnectRunnable = null
+                    goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
+                    goAwayRunnable = null
+                    mainHandler.removeCallbacks(simulIdleRunnable)
+                    lastAsrPhrase = null
+                    consecutiveAsrRepeatCount = 0
+
+                    // Ghost Reconnect Guard: If selected engine is not LIVE_WEBSOCKET, DO NOT schedule websocket reconnection
+                    if (selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
+                        Log.d(TAG, "onClosed skipped reconnect: engine is $selectedEngine")
+                        connectionState = "CLOSED ($code: $reason)"
+                        webSocket = null
+                        return@post
+                    }
+
+                    if (isRunning) {
+                        if (code == 1000) {
+                            // Google 10-15 min Session Rotation: DO NOT call stopSelf()!
+                            connectionState = "RECONNECTING (Rotation)"
+                            activeTranslationTurnId = null
+                            webSocket = null
+                            audioSendQueue.clear()
+                            logEvent("SESSION_ROTATION_RECONNECT", "code=$code, reason=$reason")
+                            notifyStatusChanged("🔄 Ротация сессии Google (15 мин). Мгновенное возобновление...")
+                            val rotationTask = Runnable {
+                                sessionRotationRunnable = null
+                                if (isRunning && activeApiKey.isNotBlank() && selectedEngine == TranslationEngine.LIVE_WEBSOCKET) {
+                                    audioSendQueue.clear()
+                                    connectWebSocket(activeApiKey)
+                                }
+                            }
+                            sessionRotationRunnable = rotationTask
+                            // Выдерживаем паузу 1.5с для освобождения сессии и квоты бэкендом Google Live
+                            mainHandler.postDelayed(rotationTask, 1500L)
+                        } else {
+                            handleConnectionDrop("Сервер закрыл сокет ($code: $reason)")
+                        }
+                    } else {
+                        connectionState = "CLOSED ($code: $reason)"
+                        logEvent("WEBSOCKET_CLOSED", "code=$code, reason=$reason")
+                        notifyStatusChanged("⚪ Суфлёр остановлен.")
+                        stopSelf()
+                    }
                 }
             }
         })
@@ -2658,6 +2675,8 @@ class PocketService : Service() {
                             audioReadErrors++
                             lastError = "AudioRecord.read ошибка: $read"
                             logEvent("MIC_READ_ERROR", "readResult=$read")
+                            liveArchive?.markIncomplete("Microphone read failed: $read")
+                            break
                         }
                         try {
                             Thread.sleep(20)
@@ -2671,6 +2690,9 @@ class PocketService : Service() {
                     Log.e(tag, "Ошибка в потоке записи: ${e.message}")
                     lastError = "Поток записи: ${e.message}"
                     logEvent("RECORD_THREAD_ERROR", "${e.message}")
+                    if (isRunning && !Thread.currentThread().isInterrupted) {
+                        liveArchive?.markIncomplete("Microphone capture failed: ${e.message}")
+                    }
                     break
                 }
             }
@@ -2796,6 +2818,7 @@ class PocketService : Service() {
         if (!isRunning) return
 
         mainHandler.post {
+            if (!isRunning || selectedEngine != newEngine) return@post
             liveSocketGate.begin()
             if (newEngine == TranslationEngine.CASCADED_REST) {
                 // Shut down WebSocket Live components

@@ -79,6 +79,57 @@ class LiveAudioPipelineTest {
         } finally { release.countDown(); dir.deleteRecursively() }
     }
 
+    @Test fun diskFailureDoesNotProduceACompletedRecording() {
+        val dir = Files.createTempDirectory("pcm-io-error").toFile()
+        try {
+            val archive = PcmArchive(dir, "session", beforeWrite = { throw java.io.IOException("disk failure") })
+            assertTrue(archive.offer(byteArrayOf(1, 2)))
+            assertTrue(archive.close())
+            assertEquals("disk failure", archive.failure)
+            assertFalse(dir.listFiles()!!.any { it.extension == "wav" })
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun blockedStorageCloseDoesNotClaimFinalization() {
+        val dir = Files.createTempDirectory("pcm-close").toFile()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        try {
+            val archive = PcmArchive(dir, "session", beforeWrite = {
+                entered.countDown()
+                check(release.await(8, TimeUnit.SECONDS))
+            })
+            archive.offer(byteArrayOf(1, 2))
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            assertFalse(archive.close())
+            release.countDown()
+            assertTrue(archive.close())
+            assertWav(dir.listFiles()!!.single(), byteArrayOf(1, 2))
+        } finally { release.countDown(); dir.deleteRecursively() }
+    }
+
+    @Test fun reconnectDoesNotInterruptLocalArchive() {
+        val dir = Files.createTempDirectory("pcm-reconnect").toFile()
+        try {
+            val archive = PcmArchive(dir, "session")
+            val gate = LiveSocketGate<String>()
+            val first = gate.begin()
+            gate.bind(first, "first")
+            gate.markReady(first, "first")
+            archive.offer(byteArrayOf(1, 2))
+            assertTrue(gate.send { true })
+            val next = gate.begin()
+            archive.offer(byteArrayOf(3, 4))
+            assertFalse(gate.send { true })
+            gate.bind(next, "next")
+            gate.markReady(next, "next")
+            archive.offer(byteArrayOf(5, 6))
+            assertTrue(gate.send { true })
+            assertTrue(archive.close())
+            assertWav(dir.listFiles()!!.single(), byteArrayOf(1, 2, 3, 4, 5, 6))
+        } finally { dir.deleteRecursively() }
+    }
+
     private fun assertWav(file: File, pcm: ByteArray) {
         val bytes = file.readBytes()
         assertEquals("RIFF", String(bytes, 0, 4, Charsets.US_ASCII))

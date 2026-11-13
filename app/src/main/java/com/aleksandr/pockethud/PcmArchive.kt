@@ -1,6 +1,5 @@
 package com.aleksandr.pockethud
 
-import java.io.Closeable
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
@@ -43,8 +42,8 @@ class PcmArchive(
         synchronized(stateLock) {
             if (!accepting) return false
             if (queue.offer(pcm.copyOf())) return true
-            accepting = false
             failure = "Archive queue full; recording is incomplete"
+            accepting = false
             overflow = true
         }
         if (overflow) onFailure(failure!!)
@@ -56,6 +55,15 @@ class PcmArchive(
         synchronized(stateLock) { accepting = false }
         worker.join(2000)
         return !worker.isAlive
+    }
+
+    fun markIncomplete(reason: String) {
+        synchronized(stateLock) {
+            if (failure != null) return
+            failure = reason
+            accepting = false
+        }
+        onFailure(reason)
     }
 
     private fun writeLoop() {
@@ -105,8 +113,8 @@ class PcmArchive(
             finalizePart()
         } catch (e: Exception) {
             synchronized(stateLock) {
-                accepting = false
                 failure = e.message ?: e.javaClass.simpleName
+                accepting = false
             }
             onFailure(failure!!)
         } finally {
