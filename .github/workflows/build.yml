@@ -42,7 +42,7 @@ jobs:
       - name: Build Debug APK
         run: |
           chmod +x ./gradlew
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK to Artifacts
         uses: actions/upload-artifact@v4
@@ -50,6 +50,16 @@ jobs:
           name: PocketHUD-debug-apk
           path: app/build/outputs/apk/**/*.apk
           if-no-files-found: error
+          overwrite: true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PocketHUD-test-results
+          path: app/build/test-results/testDebugUnitTest/*.xml
+          if-no-files-found: warn
+          overwrite: true
 
       - name: Create Release and Upload APK
         uses: softprops/action-gh-release@v2
