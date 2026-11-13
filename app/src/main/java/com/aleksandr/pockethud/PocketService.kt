@@ -744,14 +744,9 @@ class PocketService : Service() {
         isRunning = true
         isServiceActive = true
 
-        // Dual-Track: запуск фоновой сквозной аудиозаписи диалога (M4A/AAC, R08, R12i)
-        try {
-            val sessionId = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(serviceStartTime))
-            val recordFile = AudioRecordingManager.startRecording(this, sessionId)
-            logEvent("DUAL_TRACK_AUDIO_START", "file=${recordFile?.absolutePath}")
-        } catch (e: Exception) {
-            Log.e(tag, "Ошибка запуска фоновой аудиозаписи AudioRecordingManager: ${e.message}", e)
-        }
+        // Diagnostic build: isolate SpeechRecognizer from the independent MIC recorder.
+        // Keep ASR, routing and translation unchanged for this A/B test.
+        logEvent("DUAL_TRACK_AUDIO_DISABLED", "diagnostic=asr_without_background_recording")
 
         if (selectedEngine == TranslationEngine.CASCADED_REST) {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
