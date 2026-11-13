@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -29,6 +30,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AlertDialog
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -38,6 +40,7 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
+    private var recordingPlayer: MediaPlayer? = null
 
     enum class ScreenMode {
         DIALOGUE,
@@ -827,6 +830,66 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Ошибка отправки диалога: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
+    }
+
+    private fun showAudioRecordings() {
+        if (PocketService.isServiceActive) {
+            Toast.makeText(this, "Останови перевод перед прослушиванием записи", Toast.LENGTH_LONG).show()
+            return
+        }
+        val files = AudioRecordingManager.getAllAudioRecords(this)
+        val unfinished = AudioRecordingManager.getRecordsDir(this).listFiles()?.count {
+            it.name.endsWith(".part") || it.name.endsWith(".incomplete")
+        } ?: 0
+        if (files.isEmpty()) {
+            AlertDialog.Builder(this).setTitle("Аудиозаписи")
+                .setMessage("Готовых записей нет. Запись сохраняется в режиме Gemini Live после остановки. Каскад пока не записывается. Незавершённых файлов: $unfinished.")
+                .setPositiveButton("Закрыть", null).show()
+            return
+        }
+        val labels = files.map { "${it.name}\n${it.length() / 1024} КБ" }.toTypedArray()
+        AlertDialog.Builder(this).setTitle("Записи Live (неполных: $unfinished)")
+            .setItems(labels) { _, index ->
+                val file = files[index]
+                AlertDialog.Builder(this).setTitle(file.name)
+                    .setItems(arrayOf("Прослушать", "Поделиться аудио")) { _, action ->
+                        if (action == 0) {
+                            recordingPlayer?.release()
+                            val player = MediaPlayer()
+                            recordingPlayer = player
+                            val dialog = AlertDialog.Builder(this).setTitle("Прослушивание")
+                                .setMessage(file.name).setPositiveButton("Стоп", null).create()
+                            dialog.setOnDismissListener {
+                                if (recordingPlayer === player) recordingPlayer = null
+                                player.release()
+                            }
+                            player.setOnPreparedListener { if (dialog.isShowing) it.start() }
+                            player.setOnCompletionListener { dialog.dismiss() }
+                            player.setOnErrorListener { _, _, _ ->
+                                Toast.makeText(this, "Не удалось воспроизвести запись", Toast.LENGTH_LONG).show()
+                                dialog.dismiss()
+                                true
+                            }
+                            dialog.show()
+                            try {
+                                player.setDataSource(file.absolutePath)
+                                player.prepareAsync()
+                            } catch (e: Exception) {
+                                Log.e("PocketHUD", "Audio playback failed", e)
+                                dialog.dismiss()
+                            }
+                        } else {
+                            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                            val share = Intent(Intent.ACTION_SEND).apply {
+                                type = if (file.extension == "wav") "audio/wav" else "audio/mp4"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                clipData = ClipData.newRawUri("audio", uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                            startActivity(Intent.createChooser(share, "Поделиться записью"))
+                        }
+                    }.show()
+            }.setNegativeButton("Закрыть", null).show()
     }
 
     private fun requestAiSummary() {
@@ -1744,6 +1807,14 @@ class MainActivity : AppCompatActivity() {
         }
         dialogueActionsRow.addView(aiSummaryBtn)
 
+        dialogueActionsRow.addView(TextView(this).apply {
+            text = "🎙 Записи"
+            textSize = 11f
+            setTextColor(0xFF8AB4F8.toInt())
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            setOnClickListener { showAudioRecordings() }
+        })
+
         clearDialogueBtn = TextView(this).apply {
             text = "🗑️ Очистить"
             textSize = 11f
@@ -2492,6 +2563,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        recordingPlayer?.release()
+        recordingPlayer = null
         PocketService.removeListener(serviceListener)
         PocketService.onTelemetryUpdated = null
         PocketService.onInputTextReceived = null

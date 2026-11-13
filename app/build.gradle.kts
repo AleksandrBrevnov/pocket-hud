@@ -11,8 +11,8 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 55
-        versionName = "1.0.51-asr-test"
+        versionCode = 56
+        versionName = "1.0.52-live-recording"
     }
 
     signingConfigs {

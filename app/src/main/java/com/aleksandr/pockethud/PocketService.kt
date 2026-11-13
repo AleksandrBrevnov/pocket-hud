@@ -212,7 +212,14 @@ class PocketService : Service() {
     private var hwNs: NoiseSuppressor? = null
 
     // Флаг готовности WebSocket сессии к приему аудио (защита от отправки до setupComplete)
+    private val liveSocketGate = LiveSocketGate<WebSocket>()
     @Volatile private var isSetupComplete = false
+        set(value) {
+            field = value
+            if (!value) liveSocketGate.pause()
+        }
+    @Volatile private var liveArchive: PcmArchive? = null
+    private var archiveSegment = 0
 
     // Таймер Watchdog для ожидания setupComplete от Google Live (защита от зависания сессии)
     private var setupWatchdogRunnable: Runnable? = null
@@ -369,6 +376,7 @@ class PocketService : Service() {
         @Volatile
         var selectedEngine: TranslationEngine = TranslationEngine.CASCADED_REST
             set(value) {
+                if (field == value) return
                 field = value
                 currentInstance?.applyEngineChange(value)
             }
@@ -390,6 +398,7 @@ class PocketService : Service() {
         @Volatile
         var selectedMicSource: MicSource = MicSource.SMARTPHONE
             set(value) {
+                if (field == value) return
                 field = value
                 currentInstance?.applyMicSourceChange(value)
             }
@@ -746,7 +755,7 @@ class PocketService : Service() {
 
         // Diagnostic build: isolate SpeechRecognizer from the independent MIC recorder.
         // Keep ASR, routing and translation unchanged for this A/B test.
-        logEvent("DUAL_TRACK_AUDIO_DISABLED", "diagnostic=asr_without_background_recording")
+        logEvent("AUDIO_ARCHIVE_POLICY", "live=shared_pcm_wav, cascaded=not_recorded")
 
         if (selectedEngine == TranslationEngine.CASCADED_REST) {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
@@ -1861,9 +1870,12 @@ class PocketService : Service() {
         val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=$apiKey"
         val request = Request.Builder().url(url).build()
 
+        val generation = liveSocketGate.begin()
+        isSetupComplete = false
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
-                if (webSocket !== ws || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
+                if (!isRunning || selectedEngine != TranslationEngine.LIVE_WEBSOCKET ||
+                    !liveSocketGate.bind(generation, ws)) {
                     try { ws.close(1000, "Engine is not LIVE_WEBSOCKET") } catch (e: Exception) {}
                     return
                 }
@@ -1876,17 +1888,18 @@ class PocketService : Service() {
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
-                if (webSocket !== ws || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) return
-                handleServerMessage(text)
+                synchronized(liveSocketGate) {
+                    if (!liveSocketGate.isCurrent(generation, ws) || !isRunning || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) return
+                    handleServerMessage(text, generation, ws)
+                }
             }
 
             override fun onMessage(ws: WebSocket, bytes: ByteString) {
-                if (webSocket !== ws || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) return
-                handleServerMessage(bytes.utf8())
+                onMessage(ws, bytes.utf8())
             }
 
             override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                if (webSocket !== ws || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
+                if (!liveSocketGate.isGeneration(generation) || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
                     Log.d(tag, "Игнорирование onFailure для устаревшего сокета: ${t.message}")
                     return
                 }
@@ -1943,7 +1956,7 @@ class PocketService : Service() {
             }
 
             override fun onClosing(ws: WebSocket, code: Int, reason: String) {
-                if (webSocket !== ws) return
+                if (!liveSocketGate.isCurrent(generation, ws)) return
                 Log.d(tag, "WebSocket закрывается ($code: $reason)")
                 isSetupComplete = false
                 setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
@@ -1954,7 +1967,7 @@ class PocketService : Service() {
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
-                if (webSocket !== ws && code != 1000) {
+                if (!liveSocketGate.isCurrent(generation, ws)) {
                     Log.d(tag, "Игнорирование onClosed для устаревшего сокета ($code: $reason)")
                     return
                 }
@@ -2144,7 +2157,7 @@ class PocketService : Service() {
         mainHandler.postDelayed(watchdog, 5000L)
     }
 
-    private fun handleServerMessage(jsonText: String) {
+    private fun handleServerMessage(jsonText: String, generation: Long, source: WebSocket) {
         if (selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
             Log.d(TAG, "handleServerMessage skipped: engine is $selectedEngine")
             return
@@ -2187,6 +2200,7 @@ class PocketService : Service() {
 
             // 3. Подтверждение готовности setupComplete
             if (root.has("setupComplete")) {
+                if (!liveSocketGate.markReady(generation, source)) return
                 setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
                 setupWatchdogRunnable = null
                 isSetupComplete = true
@@ -2563,18 +2577,53 @@ class PocketService : Service() {
         return Pair(null, "FAILED")
     }
 
+    private fun startLiveArchive() {
+        if (liveArchive != null) return
+        try {
+            archiveSegment++
+            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val id = "${timestamp}_${archiveSegment}_${java.util.UUID.randomUUID().toString().take(8)}"
+            liveArchive = PcmArchive(AudioRecordingManager.getRecordsDir(this), id, onFailure = { reason ->
+                mainHandler.post {
+                    logEvent("PCM_ARCHIVE_ERROR", reason)
+                    notifyStatusChanged("⚠️ Запись аудио неполная: $reason")
+                }
+            })
+            logEvent("PCM_ARCHIVE_START", "session=$id, format=wav_pcm16_16000_mono, source=shared_live_mic")
+        } catch (e: Exception) {
+            logEvent("PCM_ARCHIVE_ERROR", "${e.message}")
+            notifyStatusChanged("⚠️ Не удалось начать запись аудио: ${e.message}")
+        }
+    }
+
+    private fun stopLiveArchive() {
+        val archive = liveArchive ?: return
+        liveArchive = null
+        val finalized = archive.close()
+        logEvent("PCM_ARCHIVE_STOP", "finalized=$finalized, bytes=${archive.bytesWritten}, file=${archive.currentFile?.absolutePath}, error=${archive.failure}")
+    }
+
     private fun startRecordThread() {
+        val capture = audioRecord ?: return
         recordThread = Thread {
             // Чанк 100 мс при 16 кГц Mono 16-бит = 1600 сэмплов (Shorts) = 3200 байт
             val shortBuffer = ShortArray(1600)
 
-            while (isRunning && !Thread.currentThread().isInterrupted) {
+            while (isRunning && audioRecord === capture && !Thread.currentThread().isInterrupted) {
                 try {
-                    val read = audioRecord?.read(shortBuffer, 0, shortBuffer.size) ?: 0
+                    val read = capture.read(shortBuffer, 0, shortBuffer.size)
                     if (Thread.currentThread().isInterrupted) break
                     lastAudioReadResult = read
 
                     if (read > 0) {
+                        // Archive the unamplified PCM from this same microphone read.
+                        val originalPcm = ByteArray(read * 2)
+                        for (i in 0 until read) {
+                            val sample = shortBuffer[i].toInt()
+                            originalPcm[i * 2] = (sample and 0xff).toByte()
+                            originalPcm[i * 2 + 1] = ((sample shr 8) and 0xff).toByte()
+                        }
+                        liveArchive?.offer(originalPcm)
                         // Если выбран микрофон смартфона, применяем динамический soft-knee AGC/лимитер (+14 дБ для тихой речи с мягким насыщением)
                         if (selectedMicSource == MicSource.SMARTPHONE) {
                             applyDynamicSoftKneeAgc(shortBuffer, read)
@@ -2630,6 +2679,7 @@ class PocketService : Service() {
     }
 
     private fun startRecording() {
+        startLiveArchive()
         val sampleRate = 16000
         val minBufferSize = AudioRecord.getMinBufferSize(
             sampleRate,
@@ -2688,11 +2738,7 @@ class PocketService : Service() {
 
                     val chunk = audioSendQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
 
-                    val ws = webSocket
-                    if (ws != null) {
-                        chunksSent++
-                        bytesSent += chunk.size
-
+                    liveSocketGate.send { ws ->
                         val base64Data = Base64.encodeToString(chunk, Base64.NO_WRAP)
                         val chunkJson = JSONObject().apply {
                             put("realtimeInput", JSONObject().apply {
@@ -2702,7 +2748,17 @@ class PocketService : Service() {
                                 })
                             })
                         }
-                        ws.send(chunkJson.toString())
+                        val accepted = ws.send(chunkJson.toString())
+                        if (accepted) {
+                            chunksSent++
+                            bytesSent += chunk.size
+                        } else {
+                            isSetupComplete = false
+                            mainHandler.post {
+                                if (webSocket === ws && isRunning) handleConnectionDrop("Отправка аудио отклонена сокетом")
+                            }
+                        }
+                        accepted
                     }
 
                     val now = System.currentTimeMillis()
@@ -2740,6 +2796,7 @@ class PocketService : Service() {
         if (!isRunning) return
 
         mainHandler.post {
+            liveSocketGate.begin()
             if (newEngine == TranslationEngine.CASCADED_REST) {
                 // Shut down WebSocket Live components
                 try {
@@ -2763,6 +2820,7 @@ class PocketService : Service() {
                 try {
                     recordThread?.interrupt()
                     audioRecord?.stop()
+                    recordThread?.join(1000)
                 } catch (e: Exception) {}
                 recordThread = null
 
@@ -2776,6 +2834,7 @@ class PocketService : Service() {
                     audioRecord?.release()
                 } catch (e: Exception) {}
                 audioRecord = null
+                stopLiveArchive()
                 audioSendQueue.clear()
 
                 try {
@@ -3796,6 +3855,7 @@ class PocketService : Service() {
         isRunning = false
         isServiceActive = false
         isSetupComplete = false
+        liveSocketGate.begin()
         connectionState = "STOPPED"
 
         val uptimeSec = if (serviceStartTime > 0) (System.currentTimeMillis() - serviceStartTime) / 1000 else 0
@@ -3830,14 +3890,6 @@ class PocketService : Service() {
             Log.e(tag, "Ошибка архивации диалога при остановке сервиса: ${e.message}", e)
         }
 
-        // Dual-Track: Остановка фоновой аудиозаписи диалога (R08, R10)
-        try {
-            val recordFile = AudioRecordingManager.stopRecording()
-            logEvent("DUAL_TRACK_AUDIO_STOP", "file=${recordFile?.absolutePath}")
-        } catch (e: Exception) {
-            Log.e(tag, "Ошибка остановки фоновой аудиозаписи AudioRecordingManager: ${e.message}", e)
-        }
-
         restoreAudioRouting()
         releaseHardwareEffects()
 
@@ -3870,13 +3922,15 @@ class PocketService : Service() {
         sendThread = null
 
         recordThread?.interrupt()
-        recordThread = null
 
         try {
             audioRecord?.stop()
+            recordThread?.join(1000)
             audioRecord?.release()
             audioRecord = null
         } catch (e: Exception) {}
+        recordThread = null
+        stopLiveArchive()
 
         try {
             audioTrack?.stop()

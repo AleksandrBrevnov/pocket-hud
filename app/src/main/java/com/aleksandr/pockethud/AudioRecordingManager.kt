@@ -169,6 +169,8 @@ class AudioRecordingManager {
             File(dir, clean),
             File(dir, "$clean.m4a"),
             File(dir, "record_$clean.m4a"),
+            File(dir, "$clean.wav"),
+            File(dir, "record_$clean.wav"),
             File(dir, "record_$clean")
         )
         for (f in candidates) {
@@ -179,7 +181,7 @@ class AudioRecordingManager {
 
     fun getAllAudioRecords(context: Context): List<File> {
         val dir = getRecordsDir(context)
-        return dir.listFiles { _, name -> name.endsWith(".m4a", ignoreCase = true) }
+        return dir.listFiles { _, name -> name.endsWith(".m4a", ignoreCase = true) || name.endsWith(".wav", ignoreCase = true) }
             ?.sortedByDescending { it.lastModified() }
             ?: emptyList()
     }
