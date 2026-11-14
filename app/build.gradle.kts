@@ -11,8 +11,8 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 57
-        versionName = "1.0.53-audio-summary"
+        versionCode = 58
+        versionName = "1.0.54-live-reference"
     }
 
     signingConfigs {

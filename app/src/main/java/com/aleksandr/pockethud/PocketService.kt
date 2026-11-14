@@ -55,7 +55,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 enum class MicSource {
-    SMARTPHONE, // 📱 Встроенный микрофон смартфона (AudioSource.VOICE_RECOGNITION, Hardware AGC, Soft-knee DSP)
+    SMARTPHONE, // 📱 Встроенный микрофон смартфона (AudioSource.VOICE_RECOGNITION, Hardware AGC)
     BLUETOOTH   // 🎧 Микрофон гарнитуры (VOICE_COMMUNICATION, Bluetooth SCO)
 }
 
@@ -277,9 +277,6 @@ class PocketService : Service() {
     @Volatile private var connectionState = "DISCONNECTED"
     @Volatile private var activeAudioSource = "NONE"
     @Volatile private var serviceStartTime = 0L
-    // Attention Sink Watchdog: детекция галлюцинаторного зацикливания ASR в тишине
-    @Volatile private var lastAsrPhrase: String? = null
-    @Volatile private var consecutiveAsrRepeatCount = 0
     private val recentTranslations = StringBuilder()
 
     // Состояние переподключения и троттлинга
@@ -1167,32 +1164,6 @@ class PocketService : Service() {
     }
 
     private fun recordInputSpeech(cleanedInput: String) {
-        val trimmedInput = cleanedInput.trim()
-        if (trimmedInput.isNotEmpty()) {
-            if (trimmedInput.equals(lastAsrPhrase, ignoreCase = true) && micPeakAmplitude <= 1) {
-                consecutiveAsrRepeatCount++
-                if (consecutiveAsrRepeatCount >= 3) {
-                    Log.w(tag, "Attention Sink Watchdog: фраза '$trimmedInput' повторилась $consecutiveAsrRepeatCount раз подряд при micPeakAmplitude <= 1%. Запуск ротации сессии...")
-                    logEvent("ATTENTION_SINK_WATCHDOG", "phrase=\"$trimmedInput\", count=$consecutiveAsrRepeatCount, mic_peak=$micPeakAmplitude%")
-                    consecutiveAsrRepeatCount = 0
-                    lastAsrPhrase = null
-                    val currentWs = webSocket
-                    if (isRunning && currentWs != null) {
-                        try {
-                            isSetupComplete = false
-                            currentWs.close(1000, "Attention sink watchdog session rotation")
-                        } catch (e: Exception) {
-                            currentWs.cancel()
-                        }
-                    }
-                    return
-                }
-            } else {
-                lastAsrPhrase = trimmedInput
-                consecutiveAsrRepeatCount = if (micPeakAmplitude <= 1) 1 else 0
-            }
-        }
-
         Log.d(tag, "Распознана речь (IT/EN): $cleanedInput")
         logEvent("INPUT_SPEECH:", "\"$cleanedInput\"")
         appendToSessionBuilder(sessionItalianBuilder, cleanedInput)
@@ -1713,7 +1684,7 @@ class PocketService : Service() {
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
             appendLine("Модель: models/gemini-3.5-live-translate-preview")
-            appendLine("Режим микрофона: $selectedMicSource (${if (selectedMicSource == MicSource.SMARTPHONE) "Встроенный + Hardware DSP + Soft-knee AGC" else "Гарнитура / Bluetooth SCO"})")
+            appendLine("Режим микрофона: $selectedMicSource (${if (selectedMicSource == MicSource.SMARTPHONE) "Встроенный + Hardware DSP" else "Гарнитура / Bluetooth SCO"})")
             appendLine("Hardware DSP: AGC=${hwAgc?.enabled ?: false}, NS=${hwNs?.enabled ?: false}")
             appendLine("Режим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН (Только субтитры)" else "🔊 ВКЛЮЧЕН (Голос в наушник)"}")
             appendLine("Источник микрофона: $activeAudioSource (16 кГц Mono PCM16)")
@@ -1865,8 +1836,6 @@ class PocketService : Service() {
         sessionRotationRunnable = null
         reconnectRunnable?.let { mainHandler.removeCallbacks(it) }
         reconnectRunnable = null
-        lastAsrPhrase = null
-        consecutiveAsrRepeatCount = 0
         connectionState = if (reconnectAttempts > 0) "RECONNECTING ($reconnectAttempts)" else "CONNECTING"
         logEvent("WEBSOCKET_CONNECTING", "(attempt=$reconnectAttempts)")
 
@@ -1921,8 +1890,6 @@ class PocketService : Service() {
                     hasPendingTranslation = false
                     currentTurnInputSpeech = null
                     activeTranslationTurnId = null
-                    lastAsrPhrase = null
-                    consecutiveAsrRepeatCount = 0
                     isRotationPending = false
                     sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
                     sessionRotationRunnable = null
@@ -2002,8 +1969,6 @@ class PocketService : Service() {
                     goAwayRunnable?.let { mainHandler.removeCallbacks(it) }
                     goAwayRunnable = null
                     mainHandler.removeCallbacks(simulIdleRunnable)
-                    lastAsrPhrase = null
-                    consecutiveAsrRepeatCount = 0
 
                     // Ghost Reconnect Guard: If selected engine is not LIVE_WEBSOCKET, DO NOT schedule websocket reconnection
                     if (selectedEngine != TranslationEngine.LIVE_WEBSOCKET) {
@@ -2070,8 +2035,6 @@ class PocketService : Service() {
         hasPendingTranslation = false
         currentTurnInputSpeech = null
         activeTranslationTurnId = null
-        lastAsrPhrase = null
-        consecutiveAsrRepeatCount = 0
         isRotationPending = false
         sessionRotationRunnable?.let { mainHandler.removeCallbacks(it) }
         sessionRotationRunnable = null
@@ -2115,41 +2078,9 @@ class PocketService : Service() {
 
     private fun sendSetup(ws: WebSocket) {
         audioSendQueue.clear()
-        val setupObj = JSONObject().apply {
-            put("model", "models/gemini-3.5-live-translate-preview")
-            put("generationConfig", JSONObject().apply {
-                put("responseModalities", JSONArray().put("AUDIO"))
-                put("speechConfig", JSONObject().apply {
-                    put("voiceConfig", JSONObject().apply {
-                        put("prebuiltVoiceConfig", JSONObject().apply {
-                            put("voiceName", "Puck")
-                        })
-                    })
-                })
-                put("translationConfig", JSONObject().apply {
-                    put("targetLanguageCode", "ru")
-                    put("echoTargetLanguage", false)
-                })
-            })
-            put("inputAudioTranscription", JSONObject())
-            put("outputAudioTranscription", JSONObject())
-            put("realtimeInputConfig", JSONObject().apply {
-                put("activityHandling", "NO_INTERRUPTION")
-                put("automaticActivityDetection", JSONObject().apply {
-                    put("disabled", false)
-                    put("startOfSpeechSensitivity", "START_SENSITIVITY_HIGH")
-                    put("endOfSpeechSensitivity", "END_SENSITIVITY_LOW")
-                    put("silenceDurationMs", 800)
-                    put("prefixPaddingMs", 150)
-                })
-            })
-        }
-
-        val setupJson = JSONObject().apply {
-            put("setup", setupObj)
-        }
+        val setupJson = LiveTranslateReference.buildSetup()
         val enqueued = ws.send(setupJson.toString())
-        logEvent("SETUP_SENT", "model=models/gemini-3.5-live-translate-preview, target=ru, vad=[silence=800ms, NO_INTERRUPTION, sensitivity=LOW]")
+        logEvent("SETUP_SENT", "model=models/gemini-3.5-live-translate-preview, target=ru, echoTargetLanguage=false")
         if (!enqueued) {
             Log.e(tag, "Ошибка отправки Setup: ws.send вернул false!")
             logEvent("SETUP_SEND_FAILED")
@@ -2273,7 +2204,7 @@ class PocketService : Service() {
             }
 
             val serverContent = root.optJSONObject("serverContent")
-            if (serverContent == null && !root.has("outputTranscription") && !root.has("outputAudioTranscription") && !root.has("turnComplete") && !root.has("finished")) {
+            if (serverContent == null && !root.has("outputTranscription") && !root.has("turnComplete") && !root.has("finished")) {
                 return
             }
 
@@ -2333,13 +2264,10 @@ class PocketService : Service() {
                 }
             }
 
-            // 5. Субтитры перевода (outputAudioTranscription / outputTranscription / interimOutputTranscription)
+            // 5. Субтитры перевода (outputTranscription)
+            val outputText = LiveTranslateReference.outputText(serverContent ?: root)
             val outputObj = serverContent?.optJSONObject("outputTranscription")
-                ?: serverContent?.optJSONObject("outputAudioTranscription")
-                ?: serverContent?.optJSONObject("interimOutputTranscription")
                 ?: root.optJSONObject("outputTranscription")
-                ?: root.optJSONObject("outputAudioTranscription")
-            val outputText = outputObj?.optString("text", "") ?: ""
             val isFinished = outputObj?.optBoolean("finished", false) == true ||
                              serverContent?.optBoolean("finished", false) == true ||
                              root.optBoolean("finished", false)
@@ -2354,7 +2282,7 @@ class PocketService : Service() {
                 }
             }
 
-            // 6. Аудио PCM и возможные текстовые фрагменты из modelTurn.parts
+            // 6. Аудио PCM из modelTurn.parts
             val modelTurn = serverContent?.optJSONObject("modelTurn")
             if (modelTurn != null) {
                 val parts = modelTurn.optJSONArray("parts")
@@ -2371,14 +2299,6 @@ class PocketService : Service() {
                                     audioPlaybackQueue.offer(pcmBytes)
                                     queuedPlaybackBytes.addAndGet(pcmBytes.size.toLong())
                                 }
-                            }
-                        }
-                        val text = part.optString("text", "")
-                        if (text.isNotEmpty()) {
-                            val cleanedText = cleanServerTags(text)
-                            if (cleanedText.isNotEmpty()) {
-                                recordTranslationOutput(cleanedText)
-                                translationReceived = true
                             }
                         }
                     }
@@ -2489,45 +2409,6 @@ class PocketService : Service() {
         hwNs = null
     }
 
-    private fun applyDynamicSoftKneeAgc(buffer: ShortArray, length: Int) {
-        var peak = 0
-        for (i in 0 until length) {
-            val absVal = kotlin.math.abs(buffer[i].toInt())
-            if (absVal > peak) peak = absVal
-        }
-        val peakRatio = peak.toFloat() / 32768.0f
-        val gateLow = 0.010f  // 1.0% (~328)
-        val gateHigh = 0.014f // 1.4% (~458)
-
-        // Мягкий Noise Gate: если пик чанка ниже 1.0%–1.4% (фоновый шум комнаты, музыка, тишина),
-        // плавно ослабляем сигнал вместо усиления на +14 дБ.
-        // Это позволяет серверному VAD Gemini мгновенно распознавать паузы между предложениями.
-        if (peakRatio < gateLow) {
-            val attenuation = 0.25f // -12 дБ подавление фонового шума
-            for (i in 0 until length) {
-                buffer[i] = (buffer[i] * attenuation).toInt().toShort()
-            }
-            return
-        }
-
-        val baseGain = 4.85f // +13.7 dB boost (~4.5x–5.0x) для тихой речи (<10%)
-        val effectiveGain = if (peakRatio < gateHigh) {
-            // Плавный переход от подавления к полному AGC без щелчков на границе гейта
-            val t = (peakRatio - gateLow) / (gateHigh - gateLow)
-            0.25f + t * (baseGain - 0.25f)
-        } else {
-            baseGain
-        }
-
-        for (i in 0 until length) {
-            val s = buffer[i].toFloat() / 32768.0f
-            val scaled = s * effectiveGain
-            val saturated = kotlin.math.tanh(scaled.toDouble()).toFloat()
-            val sampleOut = (saturated * 32767.0f).toInt()
-            buffer[i] = sampleOut.coerceIn(-32768, 32767).toShort()
-        }
-    }
-
     private fun createAudioRecord(sampleRate: Int, bufferSize: Int): Pair<AudioRecord?, String> {
         val sources = if (selectedMicSource == MicSource.SMARTPHONE) {
             listOf(
@@ -2633,19 +2514,6 @@ class PocketService : Service() {
                     lastAudioReadResult = read
 
                     if (read > 0) {
-                        // Archive the unamplified PCM from this same microphone read.
-                        val originalPcm = ByteArray(read * 2)
-                        for (i in 0 until read) {
-                            val sample = shortBuffer[i].toInt()
-                            originalPcm[i * 2] = (sample and 0xff).toByte()
-                            originalPcm[i * 2 + 1] = ((sample shr 8) and 0xff).toByte()
-                        }
-                        liveArchive?.offer(originalPcm)
-                        // Если выбран микрофон смартфона, применяем динамический soft-knee AGC/лимитер (+14 дБ для тихой речи с мягким насыщением)
-                        if (selectedMicSource == MicSource.SMARTPHONE) {
-                            applyDynamicSoftKneeAgc(shortBuffer, read)
-                        }
-
                         var maxVal = 0
                         for (i in 0 until read) {
                             val absVal = kotlin.math.abs(shortBuffer[i].toInt())
@@ -2656,13 +2524,8 @@ class PocketService : Service() {
                             sessionMaxAmplitude = micPeakAmplitude
                         }
 
-                        // Конвертация ShortArray в little-endian ByteArray
-                        val byteBuffer = ByteArray(read * 2)
-                        for (i in 0 until read) {
-                            val s = shortBuffer[i].toInt()
-                            byteBuffer[i * 2] = (s and 0xFF).toByte()
-                            byteBuffer[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
-                        }
+                        val byteBuffer = LiveTranslateReference.encodePcm(shortBuffer, read)
+                        liveArchive?.offer(byteBuffer)
 
                         // Неблокирующее помещение в очередь отправки.
                         // Если очередь переполнена (задержка сети), вытесняем старейший чанк для сохранения реал-тайма.
