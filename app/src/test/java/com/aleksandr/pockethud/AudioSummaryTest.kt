@@ -1,8 +1,14 @@
 package com.aleksandr.pockethud
 
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
@@ -16,10 +22,12 @@ import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 class AudioSummaryTest {
@@ -455,15 +463,131 @@ class AudioSummaryTest {
 
     @Test
     fun geminiApiProductionRejectsLoopbackUrls() {
-        // [R4] Production baseUrl rejects http://127.0.0.1 and localhost
-        val api = AudioSummaryApi(baseUrl = "https://generativelanguage.googleapis.com", uploadBaseUrl = "https://generativelanguage.googleapis.com")
+        // [R5] Production baseUrl rejects http://127.0.0.1 and localhost without network calls
+        val requestCount = AtomicInteger(0)
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val count = requestCount.incrementAndGet()
+                if (count > 1) {
+                    throw AssertionError("Any second request must fail: attempted request #$count")
+                }
+                val request = chain.request()
+                Response.Builder()
+                    .request(request)
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .header("X-Goog-Upload-URL", "http://127.0.0.1/upload-session")
+                    .body("{}".toResponseBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+            }
+            .build()
+
+        val api = AudioSummaryApi(
+            client = client,
+            baseUrl = "https://generativelanguage.googleapis.com",
+            uploadBaseUrl = "https://generativelanguage.googleapis.com"
+        )
         val wavFile = File(tempDir, "input.wav").apply {
             writeBytes(createSyntheticWavBytes(audioFormat = 1, channels = 1, sampleRate = 16000, bitsPerSample = 16, pcmSize = 640))
         }
 
-        val res = api.generateSummary(wavFile, apiKey = "key")
-        // Will fail network or security check, but cannot connect to loopback
-        assertTrue(res is AudioSummaryResult.Error)
+        val res = api.generateSummary(wavFile, apiKey = "test-key")
+        assertTrue("Result must be Error", res is AudioSummaryResult.Error)
+        val err = res as AudioSummaryResult.Error
+        assertTrue("Error must describe unsafe upload URL", err.userMessage.contains("Небезопасный URL для загрузки аудио"))
+        assertTrue("Error must mention 127.0.0.1 host", err.userMessage.contains("127.0.0.1"))
+        assertEquals("Exactly one request must have been intercepted", 1, requestCount.get())
+    }
+
+    @Test
+    fun geminiApiDisconnectDuringPollingCleansUpRemoteFile() {
+        // [R1] Network disconnect (IOException) during polling after upload still calls DELETE cleanup
+        val baseUrl = mockWebServer.url("").toString().removeSuffix("/")
+        val api = AudioSummaryApi(
+            client = OkHttpClient.Builder().retryOnConnectionFailure(false).build(),
+            baseUrl = baseUrl, uploadBaseUrl = baseUrl, pollIntervalMs = 1
+        )
+        val wavFile = File(tempDir, "input.wav").apply {
+            writeBytes(createSyntheticWavBytes(audioFormat = 1, channels = 1, sampleRate = 16000, bitsPerSample = 16, pcmSize = 640))
+        }
+
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setHeader("X-Goog-Upload-URL", "$baseUrl/upload"))
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"file":{"name":"files/poll-ioe","uri":"$baseUrl/v1beta/files/poll-ioe","state":"PROCESSING"}}"""))
+        // Poll request throws IOException via DISCONNECT_AFTER_REQUEST
+        mockWebServer.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST))
+        // Cleanup DELETE response
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
+
+        val result = api.generateSummary(wavFile, apiKey = "test-key")
+        assertTrue("Result must be Error", result is AudioSummaryResult.Error)
+
+        assertEquals("Total 4 requests expected: start, upload, poll, delete", 4, mockWebServer.requestCount)
+        mockWebServer.takeRequest(2, TimeUnit.SECONDS) // start
+        mockWebServer.takeRequest(2, TimeUnit.SECONDS) // upload
+        mockWebServer.takeRequest(2, TimeUnit.SECONDS) // poll
+        val deleteReq = mockWebServer.takeRequest(2, TimeUnit.SECONDS)
+        assertNotNull(deleteReq)
+        assertEquals("DELETE", deleteReq.method)
+        assertEquals("/v1beta/files/poll-ioe", deleteReq.path)
+    }
+
+    @Test
+    fun geminiApiInvalidJsonInGenerateContentCleansUpRemoteFile() {
+        // [R1] Malformed JSON in generateContent still preserves uploadedFileName and calls DELETE cleanup
+        val baseUrl = mockWebServer.url("").toString().removeSuffix("/")
+        val api = AudioSummaryApi(baseUrl = baseUrl, uploadBaseUrl = baseUrl)
+        val wavFile = File(tempDir, "input.wav").apply {
+            writeBytes(createSyntheticWavBytes(audioFormat = 1, channels = 1, sampleRate = 16000, bitsPerSample = 16, pcmSize = 640))
+        }
+
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setHeader("X-Goog-Upload-URL", "$baseUrl/upload"))
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"file":{"name":"files/gen-badjson","uri":"$baseUrl/v1beta/files/gen-badjson","state":"ACTIVE"}}"""))
+        // generateContent returns 200 with invalid JSON
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setBody("<html>502 Bad Gateway</html>"))
+        // Cleanup DELETE response
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
+
+        val result = api.generateSummary(wavFile, apiKey = "test-key")
+        assertTrue("Result must be Error", result is AudioSummaryResult.Error)
+        val err = result as AudioSummaryResult.Error
+        assertTrue("Error should mention invalid JSON", err.userMessage.contains("невалидный JSON"))
+
+        assertEquals("Total 4 requests expected: start, upload, generateContent, delete", 4, mockWebServer.requestCount)
+        mockWebServer.takeRequest(2, TimeUnit.SECONDS) // start
+        mockWebServer.takeRequest(2, TimeUnit.SECONDS) // upload
+        mockWebServer.takeRequest(2, TimeUnit.SECONDS) // gen
+        val deleteReq = mockWebServer.takeRequest(2, TimeUnit.SECONDS)
+        assertNotNull(deleteReq)
+        assertEquals("DELETE", deleteReq.method)
+        assertEquals("/v1beta/files/gen-badjson", deleteReq.path)
+    }
+
+    @Test
+    fun geminiApiInvalidJsonInPollCleansUpRemoteFile() {
+        // [R1] Malformed JSON in polling still preserves handle and calls DELETE cleanup
+        val baseUrl = mockWebServer.url("").toString().removeSuffix("/")
+        val api = AudioSummaryApi(baseUrl = baseUrl, uploadBaseUrl = baseUrl, pollIntervalMs = 1)
+        val wavFile = File(tempDir, "input.wav").apply {
+            writeBytes(createSyntheticWavBytes(audioFormat = 1, channels = 1, sampleRate = 16000, bitsPerSample = 16, pcmSize = 640))
+        }
+
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setHeader("X-Goog-Upload-URL", "$baseUrl/upload"))
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setBody("""{"file":{"name":"files/poll-badjson","uri":"$baseUrl/v1beta/files/poll-badjson","state":"PROCESSING"}}"""))
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setBody("<html>Server Error</html>"))
+        mockWebServer.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
+
+        val result = api.generateSummary(wavFile, apiKey = "test-key")
+        assertTrue("Result must be Error", result is AudioSummaryResult.Error)
+
+        assertEquals("Total 4 requests expected", 4, mockWebServer.requestCount)
+        mockWebServer.takeRequest(2, TimeUnit.SECONDS)
+        mockWebServer.takeRequest(2, TimeUnit.SECONDS)
+        mockWebServer.takeRequest(2, TimeUnit.SECONDS)
+        val deleteReq = mockWebServer.takeRequest(2, TimeUnit.SECONDS)
+        assertNotNull(deleteReq)
+        assertEquals("DELETE", deleteReq.method)
+        assertEquals("/v1beta/files/poll-badjson", deleteReq.path)
     }
 
     @Test
@@ -686,15 +810,15 @@ class AudioSummaryTest {
 
     @Test
     fun managerAtomicSaveFailClosedPreservesOldTargetByteForByte() {
-        // [R6] Target file already exists; failed move must preserve old target byte-for-byte and delete temp
-        val manager = AudioSummaryManager()
+        // [R4] Target file already exists; failed atomic move must preserve old target byte-for-byte and delete temp
+        val normalManager = AudioSummaryManager()
         val wavFile = File(tempDir, "record.wav").apply {
             writeBytes(createSyntheticWavBytes(audioFormat = 1, channels = 1, sampleRate = 16000, bitsPerSample = 16, pcmSize = 64000))
         }
 
         // Save initial valid summary
         val initialSummary = "ORIGINAL CRITICAL SUMMARY CONTENT"
-        val targetFile = manager.saveSummary(
+        val targetFile = normalManager.saveSummary(
             wavFile = wavFile,
             startSeconds = 0.0,
             endSeconds = 1.0,
@@ -702,29 +826,71 @@ class AudioSummaryTest {
         )
         assertTrue(targetFile.exists())
         val originalBytes = targetFile.readBytes()
+        val parentDir = targetFile.parentFile ?: tempDir
 
-        // Make targetFile read-only and non-writable directory to force move failure
-        // or create an invalid collision
-        val targetPath = targetFile.toPath()
-        // Lock file on Windows by opening exclusive write stream
-        val lockRaf = RandomAccessFile(targetFile, "rw")
-        val fileLock = lockRaf.channel.lock()
-        try {
-            assertFailsWith<IOException> {
-                manager.saveSummary(
-                    wavFile = wavFile,
-                    startSeconds = 0.0,
-                    endSeconds = 1.0,
-                    summaryMarkdown = "OVERWRITE ATTEMPT"
-                )
+        // Failing manager with publisher throwing AtomicMoveNotSupportedException
+        var moveAttempted = false
+        val failingManager = AudioSummaryManager(
+            atomicMover = { src, dst ->
+                moveAttempted = true
+                throw AtomicMoveNotSupportedException(src.toString(), dst.toString(), "Atomic move simulated failure")
             }
-        } finally {
-            fileLock.release()
-            lockRaf.close()
+        )
+
+        assertFailsWith<IOException> {
+            failingManager.saveSummary(
+                wavFile = wavFile,
+                startSeconds = 0.0,
+                endSeconds = 1.0,
+                summaryMarkdown = "OVERWRITE ATTEMPT THAT MUST FAIL"
+            )
         }
+        assertTrue("Injected atomic mover must have been called", moveAttempted)
 
         // Verify targetFile is byte-for-byte identical to original
         assertArrayEquals("Original target file must remain completely intact", originalBytes, targetFile.readBytes())
+
+        // Verify temp files are cleaned up
+        val tmpFiles = parentDir.listFiles { _, name -> name.contains(".tmp.") } ?: emptyArray()
+        assertEquals("Temp files must be cleaned up", 0, tmpFiles.size)
+
+        // Repeated save with working atomic move replaces body
+        val updatedSummary = "UPDATED SUMMARY CONTENT AFTER SUCCESSFUL ATOMIC MOVE"
+        val replacedFile = normalManager.saveSummary(
+            wavFile = wavFile,
+            startSeconds = 0.0,
+            endSeconds = 1.0,
+            summaryMarkdown = updatedSummary
+        )
+        assertEquals(targetFile.canonicalPath, replacedFile.canonicalPath)
+        val loaded = normalManager.loadSummary(replacedFile)
+        assertNotNull(loaded)
+        assertEquals(updatedSummary, loaded!!.summaryMarkdown)
+    }
+
+    @Test
+    fun wavCalculateFrameBoundsExactAndSampleAccurate() {
+        // [R2] Calculate frame bounds helper without heuristic
+        val wavFile = File(tempDir, "bounds.wav").apply {
+            writeBytes(createSyntheticWavBytes(audioFormat = 1, channels = 1, sampleRate = 16000, bitsPerSample = 16, pcmSize = 32000))
+        }
+        val info = WavAudioClip.parseHeader(wavFile)
+        assertEquals(16000L, info.totalFrames)
+        assertEquals(1.0, info.durationSeconds, 0.0001)
+
+        // 1 frame before end: 15999 / 16000.0
+        val bounds1 = WavAudioClip.calculateFrameBounds(info, 0.0, 15999.0 / 16000.0)
+        assertEquals(0L, bounds1.startFrame)
+        assertEquals(15999L, bounds1.endFrame)
+        assertEquals(0.0, bounds1.startSeconds, 0.0001)
+        assertEquals(15999.0 / 16000.0, bounds1.endSeconds, 0.00001)
+
+        // Full duration
+        val boundsFull = WavAudioClip.calculateFrameBounds(info, 0.0, 1.0)
+        assertEquals(0L, boundsFull.startFrame)
+        assertEquals(16000L, boundsFull.endFrame)
+        assertEquals(0.0, boundsFull.startSeconds, 0.0001)
+        assertEquals(1.0, boundsFull.endSeconds, 0.0001)
     }
 
     @Test

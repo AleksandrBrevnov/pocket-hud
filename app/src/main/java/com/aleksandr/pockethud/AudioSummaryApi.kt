@@ -105,9 +105,12 @@ class AudioSummaryApi(
                 cleanKey = cleanKey,
                 onProgress = onProgress,
                 isCancelled = isCancelled,
-                onCallCreated = onCallCreated
+                onCallCreated = onCallCreated,
+                onUploadedFile = { name -> uploadedFileName = name }
             )
-            uploadedFileName = fileName
+            if (uploadedFileName == null) {
+                uploadedFileName = fileName
+            }
             pipelineResult
         } catch (e: CancellationException) {
             AudioSummaryResult.Error("Формирование конспекта отменено", e)
@@ -118,10 +121,7 @@ class AudioSummaryApi(
         }
 
         // Guaranteed cleanup of uploaded file in Gemini, using a fresh non-cancelled call
-        var cleanupWarning: String? = null
-        if (uploadedFileName != null) {
-            cleanupWarning = performDeleteCleanup(uploadedFileName, cleanKey)
-        }
+        val cleanupWarning = uploadedFileName?.let { name -> performDeleteCleanup(name, cleanKey) }
 
         return if (cleanupWarning != null) {
             when (result) {
@@ -138,7 +138,8 @@ class AudioSummaryApi(
         cleanKey: String,
         onProgress: (String) -> Unit,
         isCancelled: () -> Boolean,
-        onCallCreated: (okhttp3.Call) -> Unit
+        onCallCreated: (okhttp3.Call) -> Unit,
+        onUploadedFile: (String) -> Unit
     ): Pair<AudioSummaryResult, String?> {
         checkCancelled(isCancelled)
         onProgress("Инициализация загрузки аудио...")
@@ -197,13 +198,16 @@ class AudioSummaryApi(
                 return Pair(handleHttpError(resp, "загрузки данных аудио"), null)
             }
             val respBody = resp.body?.string() ?: ""
-            val json = try { JSONObject(respBody) } catch (e: Exception) { JSONObject() }
+            val json = try { JSONObject(respBody) } catch (e: Exception) {
+                return Pair(AudioSummaryResult.Error("Gemini API вернул невалидный JSON при загрузке аудио"), null)
+            }
             val fileObj = json.optJSONObject("file") ?: json
             val name = fileObj.optString("name")
             if (name.isBlank() || !FILE_NAME_REGEX.matches(name)) {
                 return Pair(AudioSummaryResult.Error("Gemini API вернул некорректный дескриптор файла"), null)
             }
             uploadedFileName = name
+            onUploadedFile(name)
 
             val rawUri = fileObj.optString("uri")
             if (rawUri.isBlank()) {
@@ -245,7 +249,11 @@ class AudioSummaryApi(
                     return Pair(handleHttpError(resp, "проверки состояния файла"), uploadedFileName)
                 }
                 val body = resp.body?.string() ?: ""
-                val json = try { JSONObject(body) } catch (e: Exception) { JSONObject() }
+                val json = try {
+                    JSONObject(body)
+                } catch (e: Exception) {
+                    return Pair(AudioSummaryResult.Error("Не удалось разобрать статус файла в Gemini: невалидный JSON"), uploadedFileName)
+                }
                 val fileObj = json.optJSONObject("file") ?: json
                 fileState = fileObj.optString("state", "STATE_UNSPECIFIED")
                 val updatedUri = fileObj.optString("uri")

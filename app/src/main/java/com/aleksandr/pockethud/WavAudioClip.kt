@@ -20,6 +20,13 @@ data class WavInfo(
     val totalFrames: Long
 )
 
+data class FrameBounds(
+    val startFrame: Long,
+    val endFrame: Long,
+    val startSeconds: Double,
+    val endSeconds: Double
+)
+
 object WavAudioClip {
     /**
      * Parses and validates a PCM WAV file header.
@@ -127,21 +134,17 @@ object WavAudioClip {
     }
 
     /**
-     * Extracts a frame-accurate PCM clip into a valid temporary WAV file without altering the original.
+     * Calculates sample-accurate frame bounds and exact fractional seconds
+     * for audio clip extraction and metadata persistence.
+     * Enforces valid finite time ranges without lossy epsilon thresholds near EOF.
      */
-    fun extractClip(
-        sourceFile: File,
+    fun calculateFrameBounds(
+        info: WavInfo,
         startSeconds: Double,
-        endSeconds: Double,
-        destinationFile: File
-    ): File {
+        endSeconds: Double
+    ): FrameBounds {
         require(!startSeconds.isNaN() && !startSeconds.isInfinite()) { "startSeconds must be a finite number: $startSeconds" }
         require(!endSeconds.isNaN() && !endSeconds.isInfinite()) { "endSeconds must be a finite number: $endSeconds" }
-        require(sourceFile.canonicalFile != destinationFile.canonicalFile) {
-            "Source and destination files must be distinct: ${sourceFile.absolutePath}"
-        }
-
-        val info = parseHeader(sourceFile)
         require(startSeconds >= 0.0) { "Start time cannot be negative: $startSeconds" }
         require(endSeconds > startSeconds) { "End time ($endSeconds) must be greater than start time ($startSeconds)" }
 
@@ -153,11 +156,36 @@ object WavAudioClip {
 
         val totalFrames = info.totalFrames
         val startFrame = Math.round(startSeconds * info.sampleRate).toLong().coerceIn(0L, totalFrames)
-        val endFrame = if (Math.abs(effectiveEnd - info.durationSeconds) < 1e-4) {
-            totalFrames
-        } else {
-            Math.round(effectiveEnd * info.sampleRate).toLong().coerceIn(startFrame + 1L, totalFrames)
+        val endFrame = Math.round(effectiveEnd * info.sampleRate).toLong().coerceIn(startFrame + 1L, totalFrames)
+
+        val actualStartSeconds = startFrame.toDouble() / info.sampleRate
+        val actualEndSeconds = endFrame.toDouble() / info.sampleRate
+
+        return FrameBounds(
+            startFrame = startFrame,
+            endFrame = endFrame,
+            startSeconds = actualStartSeconds,
+            endSeconds = actualEndSeconds
+        )
+    }
+
+    /**
+     * Extracts a frame-accurate PCM clip into a valid temporary WAV file without altering the original.
+     */
+    fun extractClip(
+        sourceFile: File,
+        startSeconds: Double,
+        endSeconds: Double,
+        destinationFile: File
+    ): File {
+        require(sourceFile.canonicalFile != destinationFile.canonicalFile) {
+            "Source and destination files must be distinct: ${sourceFile.absolutePath}"
         }
+
+        val info = parseHeader(sourceFile)
+        val bounds = calculateFrameBounds(info, startSeconds, endSeconds)
+        val startFrame = bounds.startFrame
+        val endFrame = bounds.endFrame
 
         val frameCount = endFrame - startFrame
         require(frameCount > 0L) { "Extracted clip duration is 0 frames" }

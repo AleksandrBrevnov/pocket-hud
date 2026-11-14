@@ -3,8 +3,8 @@ package com.aleksandr.pockethud
 import java.io.File
 import java.io.IOException
 import java.nio.charset.StandardCharsets
-import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.time.Instant
 import java.util.Locale
@@ -30,7 +30,10 @@ data class SavedAudioSummary(
 class AudioSummaryManager(
     private val api: AudioSummaryApi = AudioSummaryApi(),
     private val wavAudioClip: WavAudioClip = WavAudioClip,
-    private val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val executor: ExecutorService = Executors.newSingleThreadExecutor(),
+    private val atomicMover: (Path, Path) -> Unit = { src, dst ->
+        Files.move(src, dst, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+    }
 ) : AutoCloseable {
     companion object {
         @Volatile
@@ -193,17 +196,15 @@ class AudioSummaryManager(
         val parentDir = wavFile.parentFile ?: File(".")
         val baseName = wavFile.nameWithoutExtension
         val info = wavAudioClip.parseHeader(wavFile)
-        val startFrame = Math.round(startSeconds * info.sampleRate).toLong().coerceIn(0L, info.totalFrames)
-        val effectiveEnd = minOf(endSeconds, info.durationSeconds)
-        val endFrame = if (Math.abs(effectiveEnd - info.durationSeconds) < 1e-4) {
-            info.totalFrames
-        } else {
-            Math.round(effectiveEnd * info.sampleRate).toLong().coerceIn(startFrame + 1L, info.totalFrames)
-        }
+        val bounds = wavAudioClip.calculateFrameBounds(info, startSeconds, endSeconds)
+        val startFrame = bounds.startFrame
+        val endFrame = bounds.endFrame
+        val actualStartSeconds = bounds.startSeconds
+        val actualEndSeconds = bounds.endSeconds
 
-        val startFormatted = wavAudioClip.formatSecondsToTime(startSeconds)
-        val endFormatted = wavAudioClip.formatSecondsToTime(effectiveEnd)
-        val rangeHuman = "$startFormatted - $endFormatted (${String.format(Locale.US, "%.1f", startSeconds)}s - ${String.format(Locale.US, "%.1f", effectiveEnd)}s)"
+        val startFormatted = wavAudioClip.formatSecondsToTime(actualStartSeconds)
+        val endFormatted = wavAudioClip.formatSecondsToTime(actualEndSeconds)
+        val rangeHuman = "$startFormatted - $endFormatted (${String.format(Locale.US, "%.1f", actualStartSeconds)}s - ${String.format(Locale.US, "%.1f", actualEndSeconds)}s)"
         val sidecarName = "${baseName}_f${startFrame}-f${endFrame}.summary.md"
         val targetFile = File(parentDir, sidecarName)
 
@@ -217,15 +218,14 @@ class AudioSummaryManager(
             append("range: $rangeHuman\n")
             append("startFrame: $startFrame\n")
             append("endFrame: $endFrame\n")
-            append("startSeconds: $startSeconds\n")
-            append("endSeconds: $effectiveEnd\n")
+            append("startSeconds: $actualStartSeconds\n")
+            append("endSeconds: $actualEndSeconds\n")
             append("model: $model\n")
             append("created: $isoDateUtc\n")
             if (cleanupWarning != null) {
                 append("warning: $cleanupWarning\n")
             }
             append("-->\n\n")
-            append("# AI-Конспект по аудио ($model)\n\n")
             append(summaryMarkdown.trim())
             append("\n")
         }
@@ -242,20 +242,7 @@ class AudioSummaryManager(
                 }
 
                 try {
-                    try {
-                        Files.move(
-                            tempFile.toPath(),
-                            targetFile.toPath(),
-                            StandardCopyOption.REPLACE_EXISTING,
-                            StandardCopyOption.ATOMIC_MOVE
-                        )
-                    } catch (e: AtomicMoveNotSupportedException) {
-                        Files.move(
-                            tempFile.toPath(),
-                            targetFile.toPath(),
-                            StandardCopyOption.REPLACE_EXISTING
-                        )
-                    }
+                    atomicMover(tempFile.toPath(), targetFile.toPath())
                 } catch (e: Exception) {
                     tempFile.delete()
                     throw IOException("Не удалось сохранить конспект в ${targetFile.name}: ${e.message}", e)
@@ -270,8 +257,8 @@ class AudioSummaryManager(
                     sourceFileName = wavFile.name,
                     sourceSha256 = sha256,
                     rangeFormatted = rangeHuman,
-                    startSeconds = startSeconds,
-                    endSeconds = effectiveEnd,
+                    startSeconds = actualStartSeconds,
+                    endSeconds = actualEndSeconds,
                     startFrame = startFrame,
                     endFrame = endFrame,
                     model = model,
@@ -303,17 +290,15 @@ class AudioSummaryManager(
         val parentDir = wavFile.parentFile ?: File(".")
         val baseName = wavFile.nameWithoutExtension
         val info = wavAudioClip.parseHeader(wavFile)
-        val startFrame = Math.round(startSeconds * info.sampleRate).toLong().coerceIn(0L, info.totalFrames)
-        val effectiveEnd = minOf(endSeconds, info.durationSeconds)
-        val endFrame = if (Math.abs(effectiveEnd - info.durationSeconds) < 1e-4) {
-            info.totalFrames
-        } else {
-            Math.round(effectiveEnd * info.sampleRate).toLong().coerceIn(startFrame + 1L, info.totalFrames)
-        }
+        val bounds = wavAudioClip.calculateFrameBounds(info, startSeconds, endSeconds)
+        val startFrame = bounds.startFrame
+        val endFrame = bounds.endFrame
+        val actualStartSeconds = bounds.startSeconds
+        val actualEndSeconds = bounds.endSeconds
 
-        val startFormatted = wavAudioClip.formatSecondsToTime(startSeconds)
-        val endFormatted = wavAudioClip.formatSecondsToTime(effectiveEnd)
-        val rangeHuman = "$startFormatted - $endFormatted (${String.format(Locale.US, "%.1f", startSeconds)}s - ${String.format(Locale.US, "%.1f", effectiveEnd)}s)"
+        val startFormatted = wavAudioClip.formatSecondsToTime(actualStartSeconds)
+        val endFormatted = wavAudioClip.formatSecondsToTime(actualEndSeconds)
+        val rangeHuman = "$startFormatted - $endFormatted (${String.format(Locale.US, "%.1f", actualStartSeconds)}s - ${String.format(Locale.US, "%.1f", actualEndSeconds)}s)"
         val sidecarName = "${baseName}_f${startFrame}-f${endFrame}.summary.md"
         val targetFile = File(parentDir, sidecarName)
 
@@ -327,15 +312,14 @@ class AudioSummaryManager(
             append("range: $rangeHuman\n")
             append("startFrame: $startFrame\n")
             append("endFrame: $endFrame\n")
-            append("startSeconds: $startSeconds\n")
-            append("endSeconds: $effectiveEnd\n")
+            append("startSeconds: $actualStartSeconds\n")
+            append("endSeconds: $actualEndSeconds\n")
             append("model: $model\n")
             append("created: $isoDateUtc\n")
             if (cleanupWarning != null) {
                 append("warning: $cleanupWarning\n")
             }
             append("-->\n\n")
-            append("# AI-Конспект по аудио ($model)\n\n")
             append(summaryMarkdown.trim())
             append("\n")
         }
@@ -345,18 +329,7 @@ class AudioSummaryManager(
         try {
             tempFile.writeBytes(utf8Bytes)
             try {
-                Files.move(
-                    tempFile.toPath(),
-                    targetFile.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING,
-                    StandardCopyOption.ATOMIC_MOVE
-                )
-            } catch (e: AtomicMoveNotSupportedException) {
-                Files.move(
-                    tempFile.toPath(),
-                    targetFile.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING
-                )
+                atomicMover(tempFile.toPath(), targetFile.toPath())
             } catch (e: Exception) {
                 tempFile.delete()
                 throw IOException("Не удалось сохранить конспект в ${targetFile.name}: ${e.message}", e)
@@ -405,7 +378,7 @@ class AudioSummaryManager(
             var warning: String? = null
 
             val commentEnd = text.indexOf("-->")
-            val markdownBody = if (text.startsWith("<!--") && commentEnd != -1) {
+            val rawBody = if (text.startsWith("<!--") && commentEnd != -1) {
                 val header = text.substring(4, commentEnd)
                 for (line in header.lines()) {
                     val trimmed = line.trim()
@@ -430,6 +403,12 @@ class AudioSummaryManager(
                 text.substring(commentEnd + 3).trim()
             } else {
                 text.trim()
+            }
+
+            val markdownBody = if (rawBody.startsWith("# AI-Конспект по аудио") && rawBody.contains("\n\n")) {
+                rawBody.substring(rawBody.indexOf("\n\n") + 2).trim()
+            } else {
+                rawBody
             }
 
             SavedAudioSummary(
