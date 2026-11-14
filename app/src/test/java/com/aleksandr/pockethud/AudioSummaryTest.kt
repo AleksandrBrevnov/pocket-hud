@@ -552,12 +552,12 @@ class AudioSummaryTest {
             }
 
             val pauseLatch = CountDownLatch(1)
-            mockWebServer.setDispatcher(object : okhttp3.mockwebserver.Dispatcher() {
+            mockWebServer.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     pauseLatch.await(5, TimeUnit.SECONDS)
                     return MockResponse().setResponseCode(500)
                 }
-            })
+            }
 
             val req1Started = CountDownLatch(1)
             manager.requestSummary(
