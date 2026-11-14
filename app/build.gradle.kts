@@ -11,8 +11,8 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 56
-        versionName = "1.0.52-live-recording"
+        versionCode = 57
+        versionName = "1.0.53-audio-summary"
     }
 
     signingConfigs {
@@ -47,6 +47,8 @@ android {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("org.json:json:20240303")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")

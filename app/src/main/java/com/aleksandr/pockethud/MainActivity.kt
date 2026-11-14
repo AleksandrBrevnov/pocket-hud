@@ -35,12 +35,15 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.google.android.material.checkbox.MaterialCheckBox
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
     private var recordingPlayer: MediaPlayer? = null
+    private var audioSummaryProgressDialog: AlertDialog? = null
+    private var activeAudioSummaryReqId: Long = 0L
 
     enum class ScreenMode {
         DIALOGUE,
@@ -852,44 +855,318 @@ class MainActivity : AppCompatActivity() {
             .setItems(labels) { _, index ->
                 val file = files[index]
                 AlertDialog.Builder(this).setTitle(file.name)
-                    .setItems(arrayOf("Прослушать", "Поделиться аудио")) { _, action ->
-                        if (action == 0) {
-                            recordingPlayer?.release()
-                            val player = MediaPlayer()
-                            recordingPlayer = player
-                            val dialog = AlertDialog.Builder(this).setTitle("Прослушивание")
-                                .setMessage(file.name).setPositiveButton("Стоп", null).create()
-                            dialog.setOnDismissListener {
-                                if (recordingPlayer === player) recordingPlayer = null
-                                player.release()
+                    .setItems(arrayOf("Прослушать", "Суть по аудио", "Сохранённые конспекты", "Поделиться аудио")) { _, action ->
+                        when (action) {
+                            0 -> {
+                                recordingPlayer?.release()
+                                val player = MediaPlayer()
+                                recordingPlayer = player
+                                val dialog = AlertDialog.Builder(this).setTitle("Прослушивание")
+                                    .setMessage(file.name).setPositiveButton("Стоп", null).create()
+                                dialog.setOnDismissListener {
+                                    if (recordingPlayer === player) recordingPlayer = null
+                                    player.release()
+                                }
+                                player.setOnPreparedListener { if (dialog.isShowing) it.start() }
+                                player.setOnCompletionListener { dialog.dismiss() }
+                                player.setOnErrorListener { _, _, _ ->
+                                    Toast.makeText(this, "Не удалось воспроизвести запись", Toast.LENGTH_LONG).show()
+                                    dialog.dismiss()
+                                    true
+                                }
+                                dialog.show()
+                                try {
+                                    player.setDataSource(file.absolutePath)
+                                    player.prepareAsync()
+                                } catch (e: Exception) {
+                                    Log.e("PocketHUD", "Audio playback failed", e)
+                                    dialog.dismiss()
+                                }
                             }
-                            player.setOnPreparedListener { if (dialog.isShowing) it.start() }
-                            player.setOnCompletionListener { dialog.dismiss() }
-                            player.setOnErrorListener { _, _, _ ->
-                                Toast.makeText(this, "Не удалось воспроизвести запись", Toast.LENGTH_LONG).show()
-                                dialog.dismiss()
-                                true
+                            1 -> {
+                                promptAudioSummary(file)
                             }
-                            dialog.show()
-                            try {
-                                player.setDataSource(file.absolutePath)
-                                player.prepareAsync()
-                            } catch (e: Exception) {
-                                Log.e("PocketHUD", "Audio playback failed", e)
-                                dialog.dismiss()
+                            2 -> {
+                                showSavedSummariesDialog(file)
                             }
-                        } else {
-                            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-                            val share = Intent(Intent.ACTION_SEND).apply {
-                                type = if (file.extension == "wav") "audio/wav" else "audio/mp4"
-                                putExtra(Intent.EXTRA_STREAM, uri)
-                                clipData = ClipData.newRawUri("audio", uri)
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            3 -> {
+                                val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+                                val share = Intent(Intent.ACTION_SEND).apply {
+                                    type = if (file.extension == "wav") "audio/wav" else "audio/mp4"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    clipData = ClipData.newRawUri("audio", uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                startActivity(Intent.createChooser(share, "Поделиться записью"))
                             }
-                            startActivity(Intent.createChooser(share, "Поделиться записью"))
                         }
                     }.show()
             }.setNegativeButton("Закрыть", null).show()
+    }
+
+    private fun promptAudioSummary(file: File) {
+        if (file.extension.equals("m4a", ignoreCase = true)) {
+            AlertDialog.Builder(this)
+                .setTitle("Суть по аудио")
+                .setMessage("Суть пока доступна для WAV Live.")
+                .setPositiveButton("Понятно", null)
+                .show()
+            return
+        }
+
+        val wavInfo = try {
+            WavAudioClip.parseHeader(file)
+        } catch (e: Exception) {
+            AlertDialog.Builder(this)
+                .setTitle("Ошибка файла")
+                .setMessage("Не удалось разобрать WAV-файл: ${e.message}")
+                .setPositiveButton("Закрыть", null)
+                .show()
+            return
+        }
+
+        val durationFormatted = WavAudioClip.formatSecondsToTime(wavInfo.durationSeconds)
+
+        val dialogView = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(16), dp(20), dp(16))
+
+            addView(TextView(context).apply {
+                text = "Длительность: $durationFormatted (${String.format(Locale.US, "%.1f", wavInfo.durationSeconds)} с)"
+                textSize = 14f
+                setTextColor(0xFFE2E8F0.toInt())
+            })
+
+            addView(TextView(context).apply {
+                text = "Выбранное аудио будет отправлено в Gemini. Используется API-ключ из настроек; квота зависит от проекта."
+                textSize = 12f
+                setTextColor(0xFF94A3B8.toInt())
+                val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, dp(8), 0, dp(12))
+                }
+                layoutParams = p
+            })
+
+            // Choice: Whole file (default) vs Interval
+            val radioGroup = android.widget.RadioGroup(context).apply {
+                orientation = LinearLayout.VERTICAL
+                val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 0, 0, dp(8))
+                }
+                layoutParams = p
+            }
+
+            val wholeFileRadio = android.widget.RadioButton(context).apply {
+                id = View.generateViewId()
+                text = "Вся запись ($durationFormatted)"
+                setTextColor(0xFFE2E8F0.toInt())
+                textSize = 14f
+                isChecked = true
+            }
+            radioGroup.addView(wholeFileRadio)
+
+            val intervalRadio = android.widget.RadioButton(context).apply {
+                id = View.generateViewId()
+                text = "Интервал"
+                setTextColor(0xFFE2E8F0.toInt())
+                textSize = 14f
+            }
+            radioGroup.addView(intervalRadio)
+
+            addView(radioGroup)
+
+            val rangeRow = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                visibility = View.GONE
+            }
+
+            rangeRow.addView(TextView(context).apply {
+                text = "От: "
+                setTextColor(0xFFE2E8F0.toInt())
+            })
+            val startInput = EditText(context).apply {
+                setText("00:00.0")
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 14f
+                val p = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                layoutParams = p
+            }
+            rangeRow.addView(startInput)
+
+            rangeRow.addView(TextView(context).apply {
+                text = " До: "
+                setTextColor(0xFFE2E8F0.toInt())
+            })
+            val endInput = EditText(context).apply {
+                setText(durationFormatted)
+                setTextColor(0xFFFFFFFF.toInt())
+                textSize = 14f
+                val p = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                layoutParams = p
+            }
+            rangeRow.addView(endInput)
+
+            addView(rangeRow)
+
+            radioGroup.setOnCheckedChangeListener { _, checkedId ->
+                if (checkedId == intervalRadio.id) {
+                    rangeRow.visibility = View.VISIBLE
+                } else {
+                    rangeRow.visibility = View.GONE
+                }
+            }
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Суть по аудио (${file.name})")
+            .setView(dialogView)
+            .setPositiveButton("Сформировать суть", null)
+            .setNegativeButton("Отмена", null)
+            .create()
+
+        dialog.setOnShowListener {
+            val submitBtn = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            submitBtn.setOnClickListener {
+                val prefs = getSharedPreferences("pocket_hud_prefs", Context.MODE_PRIVATE)
+                val apiKey = prefs.getString("api_key", "")?.trim() ?: ""
+                if (apiKey.isEmpty()) {
+                    Toast.makeText(this, "Укажите API-ключ Gemini в настройках приложения!", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
+
+                val radioGroup = dialogView.getChildAt(2) as android.widget.RadioGroup
+                val intervalSelected = radioGroup.checkedRadioButtonId != radioGroup.getChildAt(0).id
+
+                val startSec: Double
+                val endSec: Double
+                if (intervalSelected) {
+                    val rangeRow = dialogView.getChildAt(3) as LinearLayout
+                    val startField = rangeRow.getChildAt(1) as EditText
+                    val endField = rangeRow.getChildAt(3) as EditText
+
+                    try {
+                        startSec = WavAudioClip.parseTimeToSeconds(startField.text.toString())
+                    } catch (e: Exception) {
+                        Toast.makeText(this, "Неверное время начала: ${e.message}", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+
+                    try {
+                        endSec = WavAudioClip.parseTimeToSeconds(endField.text.toString())
+                    } catch (e: Exception) {
+                        Toast.makeText(this, "Неверное время окончания: ${e.message}", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+
+                    if (startSec < 0.0 || endSec <= startSec || endSec > wavInfo.durationSeconds + 0.001) {
+                        Toast.makeText(this, "Диапазон должен быть: 0 <= начало < конец <= длительность", Toast.LENGTH_SHORT).show()
+                        return@setOnClickListener
+                    }
+                } else {
+                    startSec = 0.0
+                    endSec = wavInfo.durationSeconds
+                }
+
+                dialog.dismiss()
+
+                val reqId = ++activeAudioSummaryReqId
+                val progressDialog = AlertDialog.Builder(this@MainActivity).apply {
+                    setTitle("Суть по аудио")
+                    setMessage("Подготовка аудио...")
+                    setCancelable(false)
+                    setNegativeButton("Отмена") { _, _ ->
+                        activeAudioSummaryReqId++
+                        audioSummaryProgressDialog?.dismiss()
+                        audioSummaryProgressDialog = null
+                        AudioSummaryManager.getInstanceOrNull()?.cancelCurrent()
+                    }
+                }.create()
+                audioSummaryProgressDialog = progressDialog
+                progressDialog.show()
+
+                val activityRef = java.lang.ref.WeakReference(this@MainActivity)
+
+                AudioSummaryManager.getInstance().requestSummary(
+                    wavFile = file,
+                    startSeconds = startSec,
+                    endSeconds = endSec,
+                    apiKey = apiKey,
+                    onStart = {
+                        // Progress dialog already shown
+                    },
+                    onProgress = { status ->
+                        activityRef.get()?.let { act ->
+                            act.runOnUiThread {
+                                if (act.isFinishing || act.isDestroyed) return@runOnUiThread
+                                if (act.activeAudioSummaryReqId != reqId) return@runOnUiThread
+                                act.audioSummaryProgressDialog?.setMessage(status)
+                            }
+                        }
+                    },
+                    onSuccess = { saved ->
+                        activityRef.get()?.let { act ->
+                            act.runOnUiThread {
+                                if (act.isFinishing || act.isDestroyed) return@runOnUiThread
+                                if (act.activeAudioSummaryReqId != reqId) return@runOnUiThread
+                                act.audioSummaryProgressDialog?.dismiss()
+                                act.audioSummaryProgressDialog = null
+                                val title = "⚡ AI-Конспект (${saved.rangeFormatted})"
+                                val content = if (saved.cleanupWarning != null) {
+                                    "${saved.summaryMarkdown}\n\n[Предупреждение: ${saved.cleanupWarning}]"
+                                } else {
+                                    saved.summaryMarkdown
+                                }
+                                act.showAiSummaryDialog(content, title)
+                            }
+                        }
+                    },
+                    onError = { err ->
+                        activityRef.get()?.let { act ->
+                            act.runOnUiThread {
+                                if (act.isFinishing || act.isDestroyed) return@runOnUiThread
+                                if (act.activeAudioSummaryReqId != reqId) return@runOnUiThread
+                                act.audioSummaryProgressDialog?.dismiss()
+                                act.audioSummaryProgressDialog = null
+                                AlertDialog.Builder(act)
+                                    .setTitle("Ошибка формирования сути")
+                                    .setMessage(err)
+                                    .setPositiveButton("Закрыть", null)
+                                    .show()
+                            }
+                        }
+                    }
+                )
+            }
+        }
+        dialog.show()
+    }
+
+    private fun showSavedSummariesDialog(file: File) {
+        val summaries = AudioSummaryManager.getInstance().getSavedSummaries(file)
+        if (summaries.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("Сохранённые конспекты")
+                .setMessage("Для записи ${file.name} пока нет сохранённых конспектов.")
+                .setPositiveButton("Закрыть", null)
+                .show()
+            return
+        }
+
+        val items = summaries.map { "${it.rangeFormatted}\n${it.createdAt} [${it.model}]" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Конспекты: ${file.name}")
+            .setItems(items) { _, idx ->
+                val summary = summaries[idx]
+                val content = if (summary.cleanupWarning != null) {
+                    "${summary.summaryMarkdown}\n\n[Предупреждение: ${summary.cleanupWarning}]"
+                } else {
+                    summary.summaryMarkdown
+                }
+                showAiSummaryDialog(content, "⚡ AI-Конспект (${summary.rangeFormatted})")
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
     }
 
     private fun requestAiSummary() {
@@ -899,12 +1176,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        Toast.makeText(this, "⚡ Формирование AI-конспекта встречи через Gemini 3.8 Flash...", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "⚡ Формирование текстового AI-конспекта диалога...", Toast.LENGTH_LONG).show()
 
         PocketService.generateSessionAiSummary(this) { success, result ->
             runOnUiThread {
                 if (success) {
-                    showAiSummaryDialog(result)
+                    showAiSummaryDialog(result, "⚡ AI-Конспект диалога (текстовый)")
                 } else {
                     Toast.makeText(this@MainActivity, result, Toast.LENGTH_LONG).show()
                 }
@@ -912,7 +1189,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showAiSummaryDialog(summaryMarkdown: String) {
+    private fun showAiSummaryDialog(summaryMarkdown: String, titleText: String? = null) {
         val dialog = Dialog(this)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setContentView(LinearLayout(this).apply {
@@ -921,7 +1198,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(20), dp(20), dp(20), dp(20))
 
             addView(TextView(context).apply {
-                text = "⚡ AI-Конспект встречи (Gemini 3.8 Flash)"
+                text = titleText ?: "⚡ AI-Конспект встречи"
                 textSize = 16f
                 setTypeface(null, Typeface.BOLD)
                 setTextColor(0xFFFFFFFF.toInt())
@@ -1802,7 +2079,20 @@ class MainActivity : AppCompatActivity() {
             layoutParams = params
             isClickable = true
             setOnClickListener {
-                requestAiSummary()
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Конспект встречи")
+                    .setItems(arrayOf(
+                        "🎙 Суть по аудио (из записей Live)",
+                        "📝 Текстовый конспект диалога (устаревший метод)"
+                    )) { _, which ->
+                        if (which == 0) {
+                            showAudioRecordings()
+                        } else {
+                            requestAiSummary()
+                        }
+                    }
+                    .setNegativeButton("Отмена", null)
+                    .show()
             }
         }
         dialogueActionsRow.addView(aiSummaryBtn)
@@ -2358,7 +2648,7 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = params
                 isClickable = true
                 setOnClickListener {
-                    showAiSummaryDialog(latestSummary.first)
+                    showAiSummaryDialog(latestSummary.first, "⚡ AI-Конспект диалога")
                 }
             }
             header.addView(summaryBadge)
@@ -2565,6 +2855,9 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         recordingPlayer?.release()
         recordingPlayer = null
+        audioSummaryProgressDialog?.dismiss()
+        audioSummaryProgressDialog = null
+        AudioSummaryManager.getInstanceOrNull()?.cancelCurrent()
         PocketService.removeListener(serviceListener)
         PocketService.onTelemetryUpdated = null
         PocketService.onInputTextReceived = null
