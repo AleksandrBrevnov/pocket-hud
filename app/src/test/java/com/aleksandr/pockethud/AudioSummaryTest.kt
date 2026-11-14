@@ -526,8 +526,7 @@ class AudioSummaryTest {
         mockWebServer.takeRequest(2, TimeUnit.SECONDS) // start
         mockWebServer.takeRequest(2, TimeUnit.SECONDS) // upload
         mockWebServer.takeRequest(2, TimeUnit.SECONDS) // poll
-        val deleteReq = mockWebServer.takeRequest(2, TimeUnit.SECONDS)
-        assertNotNull(deleteReq)
+        val deleteReq = requireNotNull(mockWebServer.takeRequest(2, TimeUnit.SECONDS))
         assertEquals("DELETE", deleteReq.method)
         assertEquals("/v1beta/files/poll-ioe", deleteReq.path)
     }
@@ -557,8 +556,7 @@ class AudioSummaryTest {
         mockWebServer.takeRequest(2, TimeUnit.SECONDS) // start
         mockWebServer.takeRequest(2, TimeUnit.SECONDS) // upload
         mockWebServer.takeRequest(2, TimeUnit.SECONDS) // gen
-        val deleteReq = mockWebServer.takeRequest(2, TimeUnit.SECONDS)
-        assertNotNull(deleteReq)
+        val deleteReq = requireNotNull(mockWebServer.takeRequest(2, TimeUnit.SECONDS))
         assertEquals("DELETE", deleteReq.method)
         assertEquals("/v1beta/files/gen-badjson", deleteReq.path)
     }
@@ -584,8 +582,7 @@ class AudioSummaryTest {
         mockWebServer.takeRequest(2, TimeUnit.SECONDS)
         mockWebServer.takeRequest(2, TimeUnit.SECONDS)
         mockWebServer.takeRequest(2, TimeUnit.SECONDS)
-        val deleteReq = mockWebServer.takeRequest(2, TimeUnit.SECONDS)
-        assertNotNull(deleteReq)
+        val deleteReq = requireNotNull(mockWebServer.takeRequest(2, TimeUnit.SECONDS))
         assertEquals("DELETE", deleteReq.method)
         assertEquals("/v1beta/files/poll-badjson", deleteReq.path)
     }
