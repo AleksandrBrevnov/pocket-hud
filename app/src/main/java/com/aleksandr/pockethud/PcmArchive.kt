@@ -5,6 +5,10 @@ import java.io.IOException
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -15,8 +19,12 @@ class PcmArchive(
     capacity: Int = 200,
     private val maxDataBytes: Int = 16000 * 2 * 600,
     private val beforeWrite: () -> Unit = {},
-    private val onFailure: (String) -> Unit = {}
+    private val onFailure: (String) -> Unit = {},
+    private val startedAtMillis: Long = System.currentTimeMillis(),
+    zoneId: ZoneId = ZoneId.systemDefault()
 ) {
+    private val partTimestamp = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ssXX", Locale.US)
+        .withZone(zoneId)
     private val queue = LinkedBlockingQueue<ByteArray>(capacity)
     private val stateLock = Any()
     @Volatile private var accepting = true
@@ -92,7 +100,9 @@ class PcmArchive(
                     if (output == null) {
                         if (directory.usableSpace < 16L * 1024 * 1024) throw IOException("Not enough space for audio")
                         index++
-                        part = File(directory, "record_${sessionId}_${index.toString().padStart(4, '0')}.wav.part")
+                        val partStart = Instant.ofEpochMilli(startedAtMillis + bytesWritten * 1000L / 32000L)
+                        val timestamp = partTimestamp.format(partStart)
+                        part = File(directory, "record_${timestamp}_${sessionId}_${index.toString().padStart(4, '0')}.wav.part")
                         if (!part!!.createNewFile()) throw IOException("Recording already exists")
                         currentFile = part
                         output = RandomAccessFile(part, "rw")
