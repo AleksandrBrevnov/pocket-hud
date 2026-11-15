@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private var activeAudioSummaryReqId: Long = 0L
     private var conversationExportProgressDialog: AlertDialog? = null
     private var activeConversationExportReqId: Long = 0L
+    private var conversationExportThread: Thread? = null
 
     enum class ScreenMode {
         DIALOGUE,
@@ -947,6 +948,8 @@ class MainActivity : AppCompatActivity() {
             setCancelable(false)
             setNegativeButton("Отмена") { _, _ ->
                 activeConversationExportReqId++
+                conversationExportThread?.interrupt()
+                conversationExportThread = null
                 conversationExportProgressDialog?.dismiss()
                 conversationExportProgressDialog = null
             }
@@ -957,13 +960,14 @@ class MainActivity : AppCompatActivity() {
         val activityRef = java.lang.ref.WeakReference(this)
         val outputDir = File(filesDir, "conversation_exports")
 
-        Thread({
+        conversationExportThread = Thread({
             try {
                 val zipFile = RecordingConversationExport.writeZip(conversation, outputDir)
                 activityRef.get()?.let { act ->
                     act.runOnUiThread {
                         if (act.isFinishing || act.isDestroyed) return@runOnUiThread
                         if (act.activeConversationExportReqId != reqId) return@runOnUiThread
+                        act.conversationExportThread = null
                         act.conversationExportProgressDialog?.dismiss()
                         act.conversationExportProgressDialog = null
                         act.shareConversationZip(zipFile)
@@ -974,6 +978,7 @@ class MainActivity : AppCompatActivity() {
                     act.runOnUiThread {
                         if (act.isFinishing || act.isDestroyed) return@runOnUiThread
                         if (act.activeConversationExportReqId != reqId) return@runOnUiThread
+                        act.conversationExportThread = null
                         act.conversationExportProgressDialog?.dismiss()
                         act.conversationExportProgressDialog = null
                         AlertDialog.Builder(act)
@@ -984,7 +989,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
-        }, "PocketHUD-export-zip").start()
+        }, "PocketHUD-export-zip").also { it.start() }
     }
 
     private fun shareConversationZip(zipFile: File) {
@@ -2962,6 +2967,9 @@ class MainActivity : AppCompatActivity() {
         audioSummaryProgressDialog = null
         conversationExportProgressDialog?.dismiss()
         conversationExportProgressDialog = null
+        activeConversationExportReqId++
+        conversationExportThread?.interrupt()
+        conversationExportThread = null
         AudioSummaryManager.getInstanceOrNull()?.cancelCurrent()
         PocketService.removeListener(serviceListener)
         PocketService.onTelemetryUpdated = null

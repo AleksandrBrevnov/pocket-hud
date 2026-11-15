@@ -4,6 +4,8 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InterruptedIOException
+import java.nio.file.Files
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -201,6 +203,7 @@ object RecordingConversationExport {
 
     @Throws(IOException::class)
     fun writeZip(conversation: Conversation, outputDir: File): File {
+        checkCancelled()
         require(conversation.files.isNotEmpty()) { "Conversation has no files to export" }
 
         for (file in conversation.files) {
@@ -247,12 +250,14 @@ object RecordingConversationExport {
                 ZipOutputStream(fos).use { zos ->
                     val buffer = ByteArray(64 * 1024)
                     for (file in conversation.files) {
+                        checkCancelled()
                         val entry = ZipEntry(file.name)
                         entry.time = file.lastModified()
                         zos.putNextEntry(entry)
                         FileInputStream(file).buffered().use { fis ->
                             var bytesRead: Int
                             while (fis.read(buffer).also { bytesRead = it } != -1) {
+                                checkCancelled()
                                 zos.write(buffer, 0, bytesRead)
                             }
                         }
@@ -262,10 +267,8 @@ object RecordingConversationExport {
                 }
             }
 
-            if (!tempFile.renameTo(targetFile)) {
-                tempFile.copyTo(targetFile, overwrite = false)
-                tempFile.delete()
-            }
+            checkCancelled()
+            Files.move(tempFile.toPath(), targetFile.toPath())
             success = true
             return targetFile
         } finally {
@@ -273,5 +276,9 @@ object RecordingConversationExport {
                 tempFile.delete()
             }
         }
+    }
+
+    private fun checkCancelled() {
+        if (Thread.currentThread().isInterrupted) throw InterruptedIOException("Экспорт отменён")
     }
 }
