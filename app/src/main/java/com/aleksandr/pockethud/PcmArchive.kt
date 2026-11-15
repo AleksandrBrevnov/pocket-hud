@@ -23,7 +23,7 @@ class PcmArchive(
     private val startedAtMillis: Long = System.currentTimeMillis(),
     zoneId: ZoneId = ZoneId.systemDefault()
 ) {
-    private val partTimestamp = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ssXX", Locale.US)
+    private val partTimestamp = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss", Locale.US)
         .withZone(zoneId)
     private val queue = LinkedBlockingQueue<ByteArray>(capacity)
     private val stateLock = Any()

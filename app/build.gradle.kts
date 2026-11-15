@@ -12,7 +12,7 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 59
-        versionName = "1.0.55-recording-dates"
+        versionName = "1.0.55-recording-export"
     }
 
     signingConfigs {

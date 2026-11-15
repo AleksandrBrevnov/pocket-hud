@@ -44,6 +44,8 @@ class MainActivity : AppCompatActivity() {
     private var recordingPlayer: MediaPlayer? = null
     private var audioSummaryProgressDialog: AlertDialog? = null
     private var activeAudioSummaryReqId: Long = 0L
+    private var conversationExportProgressDialog: AlertDialog? = null
+    private var activeConversationExportReqId: Long = 0L
 
     enum class ScreenMode {
         DIALOGUE,
@@ -847,7 +849,9 @@ class MainActivity : AppCompatActivity() {
         if (files.isEmpty()) {
             AlertDialog.Builder(this).setTitle("Аудиозаписи")
                 .setMessage("Готовых записей нет. Запись сохраняется в режиме Gemini Live после остановки. Каскад пока не записывается. Незавершённых файлов: $unfinished.")
-                .setPositiveButton("Закрыть", null).show()
+                .setPositiveButton("Закрыть", null)
+                .setNeutralButton("Разговоры (ZIP)") { _, _ -> promptConversationExport() }
+                .show()
             return
         }
         val labels = files.map { "${it.name}\n${it.length() / 1024} КБ" }.toTypedArray()
@@ -901,7 +905,106 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     }.show()
-            }.setNegativeButton("Закрыть", null).show()
+            }
+            .setPositiveButton("Разговоры (ZIP)") { _, _ -> promptConversationExport() }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
+
+    private fun promptConversationExport() {
+        val allFiles = AudioRecordingManager.getRecordsDir(this).listFiles()?.toList() ?: emptyList()
+        val conversations = RecordingConversationExport.group(allFiles)
+        if (conversations.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("Разговоры (ZIP)")
+                .setMessage("Нет готовых записей разговоров для экспорта.")
+                .setPositiveButton("Закрыть", null)
+                .show()
+            return
+        }
+
+        val labels = conversations.map { it.label }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Выберите разговор (ZIP)")
+            .setItems(labels) { _, which ->
+                val selected = conversations[which]
+                exportConversationZip(selected)
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun exportConversationZip(conversation: RecordingConversationExport.Conversation) {
+        if (conversationExportProgressDialog?.isShowing == true) {
+            Toast.makeText(this, "Экспорт уже выполняется...", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val reqId = ++activeConversationExportReqId
+        val progressDialog = AlertDialog.Builder(this).apply {
+            setTitle("Экспорт разговора")
+            setMessage("Формирование ZIP-архива...")
+            setCancelable(false)
+            setNegativeButton("Отмена") { _, _ ->
+                activeConversationExportReqId++
+                conversationExportProgressDialog?.dismiss()
+                conversationExportProgressDialog = null
+            }
+        }.create()
+        conversationExportProgressDialog = progressDialog
+        progressDialog.show()
+
+        val activityRef = java.lang.ref.WeakReference(this)
+        val outputDir = File(filesDir, "conversation_exports")
+
+        Thread({
+            try {
+                val zipFile = RecordingConversationExport.writeZip(conversation, outputDir)
+                activityRef.get()?.let { act ->
+                    act.runOnUiThread {
+                        if (act.isFinishing || act.isDestroyed) return@runOnUiThread
+                        if (act.activeConversationExportReqId != reqId) return@runOnUiThread
+                        act.conversationExportProgressDialog?.dismiss()
+                        act.conversationExportProgressDialog = null
+                        act.shareConversationZip(zipFile)
+                    }
+                }
+            } catch (e: Exception) {
+                activityRef.get()?.let { act ->
+                    act.runOnUiThread {
+                        if (act.isFinishing || act.isDestroyed) return@runOnUiThread
+                        if (act.activeConversationExportReqId != reqId) return@runOnUiThread
+                        act.conversationExportProgressDialog?.dismiss()
+                        act.conversationExportProgressDialog = null
+                        AlertDialog.Builder(act)
+                            .setTitle("Ошибка экспорта ZIP")
+                            .setMessage(e.message ?: "Не удалось создать архив")
+                            .setPositiveButton("Закрыть", null)
+                            .show()
+                    }
+                }
+            }
+        }, "PocketHUD-export-zip").start()
+    }
+
+    private fun shareConversationZip(zipFile: File) {
+        try {
+            val uri: Uri = FileProvider.getUriForFile(
+                this,
+                "${applicationContext.packageName}.fileprovider",
+                zipFile
+            )
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/zip"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newRawUri(zipFile.name, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "PocketHUD Conversation Export")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(shareIntent, "Поделиться разговором (ZIP)"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "Ошибка отправки архива: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun promptAudioSummary(file: File) {
@@ -2857,6 +2960,8 @@ class MainActivity : AppCompatActivity() {
         recordingPlayer = null
         audioSummaryProgressDialog?.dismiss()
         audioSummaryProgressDialog = null
+        conversationExportProgressDialog?.dismiss()
+        conversationExportProgressDialog = null
         AudioSummaryManager.getInstanceOrNull()?.cancelCurrent()
         PocketService.removeListener(serviceListener)
         PocketService.onTelemetryUpdated = null

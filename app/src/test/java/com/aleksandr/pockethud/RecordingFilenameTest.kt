@@ -19,8 +19,8 @@ class RecordingFilenameTest {
             assertNull(archive.failure)
             val files = dir.listFiles()!!.filter { it.extension == "wav" }.sortedBy { it.name }
             assertEquals(listOf(
-                "record_2026-11-15_14-59-59+0100_unique-session_0001.wav",
-                "record_2026-11-15_15-00-00+0100_unique-session_0002.wav"
+                "record_2026-11-15_14-59-59_unique-session_0001.wav",
+                "record_2026-11-15_15-00-00_unique-session_0002.wav"
             ), files.map { it.name })
             assertEquals(32044L, files[0].length())
             assertArrayEquals(byteArrayOf(42, 0), files[1].readBytes().drop(44).toByteArray())
@@ -37,8 +37,8 @@ class RecordingFilenameTest {
             assertTrue(archive.close())
             assertNull(archive.failure)
             assertEquals(setOf(
-                "record_2026-10-25_02-59-59+0200_dst-session_0001.wav",
-                "record_2026-10-25_02-00-00+0100_dst-session_0002.wav"
+                "record_2026-10-25_02-59-59_dst-session_0001.wav",
+                "record_2026-10-25_02-00-00_dst-session_0002.wav"
             ), dir.listFiles()!!.map { it.name }.toSet())
         } finally { dir.deleteRecursively() }
     }

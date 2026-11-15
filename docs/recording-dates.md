@@ -1,7 +1,7 @@
 # Recording filenames: 1.0.55
 
-New Live WAV parts start with a readable local date/time and UTC offset, e.g.
-`record_2026-11-15_14-18-36+0100_<session-id>_0007.wav`.
+New Live WAV parts start with the smartphone's readable local date/time, e.g.
+`record_2026-11-15_14-18-36_<session-id>_0007.wav`. No time-zone suffix is shown.
 The unique session ID and part index remain; old files are not renamed.
 
 Each part timestamp is calculated from archive creation time plus the exact
