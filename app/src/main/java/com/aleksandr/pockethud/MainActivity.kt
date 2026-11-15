@@ -857,7 +857,7 @@ class MainActivity : AppCompatActivity() {
         if (files.isEmpty() && retainedSummaries.isEmpty()) {
             AlertDialog.Builder(this).setTitle("Аудиозаписи")
                 .setMessage("Готовых записей нет. Запись сохраняется в режиме Gemini Live после остановки. Каскад пока не записывается. Незавершённых файлов: $unfinished.")
-                .setPositiveButton("Разговоры (ZIP)") { _, _ -> promptConversationExport() }
+                .setPositiveButton("Разговоры") { _, _ -> promptConversationExport() }
                 .setNeutralButton("Очистить ZIP") { _, _ -> promptZipCleanup() }
                 .setNegativeButton("Закрыть", null)
                 .show()
@@ -923,7 +923,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }.show()
             }
-            .setPositiveButton("Разговоры (ZIP)") { _, _ -> promptConversationExport() }
+            .setPositiveButton("Разговоры") { _, _ -> promptConversationExport() }
             .setNeutralButton("Очистить ZIP") { _, _ -> promptZipCleanup() }
             .setNegativeButton("Закрыть", null)
             .show()
@@ -934,7 +934,7 @@ class MainActivity : AppCompatActivity() {
         val conversations = RecordingConversationExport.group(allFiles)
         if (conversations.isEmpty()) {
             AlertDialog.Builder(this)
-                .setTitle("Разговоры (ZIP)")
+                .setTitle("Разговоры")
                 .setMessage("Нет готовых записей разговоров для экспорта.")
                 .setPositiveButton("Закрыть", null)
                 .setNeutralButton("Очистить ZIP") { _, _ -> promptZipCleanup() }
@@ -944,7 +944,7 @@ class MainActivity : AppCompatActivity() {
 
         val labels = conversations.map { it.label }.toTypedArray()
         AlertDialog.Builder(this)
-            .setTitle("Выберите разговор (ZIP)")
+            .setTitle("Выбери разговор")
             .setItems(labels) { _, which ->
                 val selected = conversations[which]
                 promptConversationAction(selected)
@@ -1034,6 +1034,7 @@ class MainActivity : AppCompatActivity() {
                             "Удалено файлов: ${result.deleted}$missingNote, освобождено $freedFormatted",
                             Toast.LENGTH_LONG
                         ).show()
+                        showAudioRecordings()
                     } else {
                         AlertDialog.Builder(this)
                             .setTitle("Частичный сбой удаления")
@@ -1100,6 +1101,7 @@ class MainActivity : AppCompatActivity() {
                             "Удалено архивов: ${result.deleted}$missingNote, освобождено $freedFormatted",
                             Toast.LENGTH_LONG
                         ).show()
+                        showAudioRecordings()
                     } else {
                         AlertDialog.Builder(this)
                             .setTitle("Частичный сбой очистки ZIP")

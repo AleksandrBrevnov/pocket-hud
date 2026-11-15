@@ -86,10 +86,7 @@ object RecordingCleanup {
                 throw IllegalArgumentException("Target is a directory: ${file.name}")
             }
             if (Files.isSymbolicLink(file.toPath())) {
-                val realPath = try { file.toPath().toRealPath() } catch (_: Exception) { null }
-                if (realPath == null || realPath.parent != canonicalRoot.toPath()) {
-                    throw IllegalArgumentException("Symlink points outside records directory: ${file.name}")
-                }
+                throw IllegalArgumentException("Symlinks cannot be audio cleanup targets: ${file.name}")
             }
 
             if (isAudioRecordFile(file)) {
@@ -131,10 +128,7 @@ object RecordingCleanup {
                 continue
             }
             if (Files.isSymbolicLink(file.toPath())) {
-                val realPath = try { file.toPath().toRealPath() } catch (_: Exception) { null }
-                if (realPath == null || realPath.parent != canonicalRoot.toPath()) {
-                    continue
-                }
+                continue
             }
             validZips.add(file)
         }
@@ -159,24 +153,34 @@ object RecordingCleanup {
         var failedCount = 0
         var bytesFreed = 0L
 
+        // Reject an invalid caller-supplied scope before deleting any file.
         for (file in plan.files) {
-            val canonicalFile = file.canonicalFile
-            if (canonicalFile.parentFile != canonicalRoot) {
-                throw IllegalArgumentException("File is outside root directory: ${file.path}")
+            require(file.absoluteFile.parentFile?.canonicalFile == canonicalRoot) {
+                "File is outside root directory: ${file.path}"
             }
-            if (file.isDirectory || canonicalFile.isDirectory) {
+        }
+
+        for (file in plan.files) {
+            // Re-check each path because it may have changed since confirmation.
+            val safeTarget = try {
+                !Files.isSymbolicLink(file.toPath()) &&
+                    file.canonicalFile.parentFile == canonicalRoot &&
+                    !file.isDirectory &&
+                    (isAudioRecordFile(file) || file.extension.equals("zip", ignoreCase = true))
+            } catch (_: java.io.IOException) {
+                false
+            }
+            if (!safeTarget) {
                 failedCount++
                 continue
-            }
-            if (Files.isSymbolicLink(file.toPath())) {
-                val realPath = try { file.toPath().toRealPath() } catch (_: Exception) { null }
-                if (realPath == null || realPath.parent != canonicalRoot.toPath()) {
-                    throw IllegalArgumentException("Symlink points outside root directory: ${file.path}")
-                }
             }
 
             if (!file.exists()) {
                 missingCount++
+                continue
+            }
+            if (!file.isFile) {
+                failedCount++
                 continue
             }
 
