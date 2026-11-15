@@ -844,21 +844,37 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val files = AudioRecordingManager.getAllAudioRecords(this)
+        val audioNames = files.map { it.name }.toSet()
+        val retainedSummaries = AudioRecordingManager.getRecordsDir(this).listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".summary.md") }
+            ?.mapNotNull { AudioSummaryManager.getInstance().loadSummary(it) }
+            ?.filter { it.sourceFileName !in audioNames }
+            ?.sortedByDescending { it.summaryFile.lastModified() }
+            ?: emptyList()
         val unfinished = AudioRecordingManager.getRecordsDir(this).listFiles()?.count {
             it.name.endsWith(".part") || it.name.endsWith(".incomplete")
         } ?: 0
-        if (files.isEmpty()) {
+        if (files.isEmpty() && retainedSummaries.isEmpty()) {
             AlertDialog.Builder(this).setTitle("Аудиозаписи")
                 .setMessage("Готовых записей нет. Запись сохраняется в режиме Gemini Live после остановки. Каскад пока не записывается. Незавершённых файлов: $unfinished.")
-                .setPositiveButton("Закрыть", null)
-                .setNeutralButton("Разговоры (ZIP)") { _, _ -> promptConversationExport() }
+                .setPositiveButton("Разговоры (ZIP)") { _, _ -> promptConversationExport() }
+                .setNeutralButton("Очистить ZIP") { _, _ -> promptZipCleanup() }
+                .setNegativeButton("Закрыть", null)
                 .show()
             return
         }
-        val labels = files.map { "${it.name}\n${it.length() / 1024} КБ" }.toTypedArray()
+        val labels = (retainedSummaries.map { "📝 Конспект: ${it.sourceFileName}\n${it.rangeFormatted}" } +
+            files.map { "${it.name}\n${it.length() / 1024} КБ" }).toTypedArray()
         AlertDialog.Builder(this).setTitle("Записи Live (неполных: $unfinished)")
             .setItems(labels) { _, index ->
-                val file = files[index]
+                if (index < retainedSummaries.size) {
+                    val summary = retainedSummaries[index]
+                    val content = summary.summaryMarkdown +
+                        (summary.cleanupWarning?.let { "\n\n[Предупреждение: $it]" } ?: "")
+                    showAiSummaryDialog(content, "⚡ AI-Конспект (${summary.rangeFormatted})")
+                    return@setItems
+                }
+                val file = files[index - retainedSummaries.size]
                 AlertDialog.Builder(this).setTitle(file.name)
                     .setItems(arrayOf("Прослушать", "Суть по аудио", "Сохранённые конспекты", "Поделиться аудио")) { _, action ->
                         when (action) {
@@ -908,6 +924,7 @@ class MainActivity : AppCompatActivity() {
                     }.show()
             }
             .setPositiveButton("Разговоры (ZIP)") { _, _ -> promptConversationExport() }
+            .setNeutralButton("Очистить ZIP") { _, _ -> promptZipCleanup() }
             .setNegativeButton("Закрыть", null)
             .show()
     }
@@ -920,6 +937,7 @@ class MainActivity : AppCompatActivity() {
                 .setTitle("Разговоры (ZIP)")
                 .setMessage("Нет готовых записей разговоров для экспорта.")
                 .setPositiveButton("Закрыть", null)
+                .setNeutralButton("Очистить ZIP") { _, _ -> promptZipCleanup() }
                 .show()
             return
         }
@@ -929,7 +947,169 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Выберите разговор (ZIP)")
             .setItems(labels) { _, which ->
                 val selected = conversations[which]
-                exportConversationZip(selected)
+                promptConversationAction(selected)
+            }
+            .setNeutralButton("Очистить ZIP") { _, _ -> promptZipCleanup() }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun promptConversationAction(conversation: RecordingConversationExport.Conversation) {
+        AlertDialog.Builder(this)
+            .setTitle(conversation.label)
+            .setItems(arrayOf("Выгрузить ZIP", "Удалить аудио разговора")) { _, which ->
+                when (which) {
+                    0 -> exportConversationZip(conversation)
+                    1 -> confirmDeleteConversationAudio(conversation)
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun canPerformCleanupOperation(): Pair<Boolean, String?> {
+        if (PocketService.isServiceActive) {
+            return false to "Служба перевода/записи активна. Остановите её перед удалением файлов."
+        }
+        if (conversationExportProgressDialog?.isShowing == true ||
+            (conversationExportThread != null && conversationExportThread?.isAlive == true)) {
+            return false to "Выполняется экспорт разговора. Дождитесь завершения или отмените экспорт."
+        }
+        if (audioSummaryProgressDialog?.isShowing == true ||
+            AudioSummaryManager.getInstanceOrNull()?.isGenerating() == true) {
+            return false to "Выполняется генерация конспекта аудио. Дождитесь завершения запроса."
+        }
+        return true to null
+    }
+
+    private fun confirmDeleteConversationAudio(conversation: RecordingConversationExport.Conversation) {
+        val (canStart, initialReason) = canPerformCleanupOperation()
+        if (!canStart) {
+            Toast.makeText(this, initialReason, Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val recordsDir = AudioRecordingManager.getRecordsDir(this)
+        val plan = try {
+            RecordingCleanup.planConversationAudioCleanup(conversation, recordsDir)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Ошибка формирования плана удаления: ${e.message}", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        if (plan.fileCount == 0) {
+            AlertDialog.Builder(this)
+                .setTitle("Удаление аудио разговора")
+                .setMessage("Файлы аудио для этого разговора отсутствуют.")
+                .setPositiveButton("Закрыть", null)
+                .show()
+            return
+        }
+
+        val sizeFormatted = RecordingCleanup.formatBytes(plan.totalBytes)
+        val message = "Разговор: ${conversation.label}\n" +
+            "Файлов: ${plan.fileCount}\n" +
+            "Объём: $sizeFormatted\n\n" +
+            "Аудио будет удалено без восстановления. Сначала сохрани нужный разговор. " +
+            "Конспекты останутся; повторный анализ потребует копии аудио.\n\n" +
+            "Удалить аудио разговора?"
+
+        AlertDialog.Builder(this)
+            .setTitle("Удаление аудио разговора")
+            .setMessage(message)
+            .setPositiveButton("Удалить") { _, _ ->
+                val (allowed, reason) = canPerformCleanupOperation()
+                if (!allowed) {
+                    Toast.makeText(this, reason, Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+
+                try {
+                    val result = RecordingCleanup.executePlan(plan, recordsDir)
+                    val freedFormatted = RecordingCleanup.formatBytes(result.bytesFreed)
+                    if (result.isSuccess) {
+                        val missingNote = if (result.missing > 0) " (уже отсутствовало: ${result.missing})" else ""
+                        Toast.makeText(
+                            this,
+                            "Удалено файлов: ${result.deleted}$missingNote, освобождено $freedFormatted",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        AlertDialog.Builder(this)
+                            .setTitle("Частичный сбой удаления")
+                            .setMessage("Удалено файлов: ${result.deleted}\nСбоев удаления: ${result.failed}\nОтсутствовало: ${result.missing}\nОсвобождено: $freedFormatted")
+                            .setPositiveButton("Закрыть", null)
+                            .show()
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Сбой при удалении: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun promptZipCleanup() {
+        val (canStart, initialReason) = canPerformCleanupOperation()
+        if (!canStart) {
+            Toast.makeText(this, initialReason, Toast.LENGTH_LONG).show()
+            return
+        }
+
+        val exportsDir = File(filesDir, "conversation_exports")
+        val plan = try {
+            RecordingCleanup.planExportZipCleanup(exportsDir)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Ошибка проверки каталога экспорта: ${e.message}", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        if (plan.fileCount == 0) {
+            AlertDialog.Builder(this)
+                .setTitle("Очистить ZIP экспорта")
+                .setMessage("Готовых ZIP-архивов экспорта не найдено. Папка экспорта пуста.")
+                .setPositiveButton("Закрыть", null)
+                .show()
+            return
+        }
+
+        val sizeFormatted = RecordingCleanup.formatBytes(plan.totalBytes)
+        val message = "Найдено архивов: ${plan.fileCount}\n" +
+            "Общий объём: $sizeFormatted\n\n" +
+            "Удалятся ZIP-копии для отправки. Убедись, что нужные архивы уже сохранены или отправлены. " +
+            "Аудиозаписи и конспекты останутся.\n\n" +
+            "Очистить все готовые ZIP-архивы экспорта?"
+
+        AlertDialog.Builder(this)
+            .setTitle("Очистить ZIP экспорта")
+            .setMessage(message)
+            .setPositiveButton("Очистить") { _, _ ->
+                val (allowed, reason) = canPerformCleanupOperation()
+                if (!allowed) {
+                    Toast.makeText(this, reason, Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+
+                try {
+                    val result = RecordingCleanup.executePlan(plan, exportsDir)
+                    val freedFormatted = RecordingCleanup.formatBytes(result.bytesFreed)
+                    if (result.isSuccess) {
+                        val missingNote = if (result.missing > 0) " (уже отсутствовало: ${result.missing})" else ""
+                        Toast.makeText(
+                            this,
+                            "Удалено архивов: ${result.deleted}$missingNote, освобождено $freedFormatted",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        AlertDialog.Builder(this)
+                            .setTitle("Частичный сбой очистки ZIP")
+                            .setMessage("Удалено архивов: ${result.deleted}\nСбоев: ${result.failed}\nОтсутствовало: ${result.missing}\nОсвобождено: $freedFormatted")
+                            .setPositiveButton("Закрыть", null)
+                            .show()
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Сбой при очистке ZIP: ${e.message}", Toast.LENGTH_LONG).show()
+                }
             }
             .setNegativeButton("Отмена", null)
             .show()

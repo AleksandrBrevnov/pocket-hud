@@ -11,8 +11,8 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 59
-        versionName = "1.0.55-recording-export"
+        versionCode = 60
+        versionName = "1.0.56-recording-cleanup"
     }
 
     signingConfigs {
