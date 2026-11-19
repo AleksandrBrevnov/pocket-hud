@@ -895,13 +895,13 @@ class MainActivity : AppCompatActivity() {
                 .show()
             return
         }
-        val actions = if (files.isEmpty()) emptyList() else listOf("Выбрать и отправить аудио")
+        val actions = if (files.isEmpty()) emptyList() else listOf("Выбрать и отправить")
         val labels = (actions + retainedSummaries.map { "📝 Конспект: ${it.sourceFileName}\n${it.rangeFormatted}" } +
             files.map(::recordingLabel)).toTypedArray()
         AlertDialog.Builder(this).setTitle("Записи Live (неполных: $unfinished)")
             .setItems(labels) { _, index ->
                 if (index < actions.size) {
-                    showRecordingSelection(files)
+                    showRecordingSelection(files, RecordingConversationExport.group(files))
                     return@setItems
                 }
                 val recordingIndex = index - actions.size
@@ -960,10 +960,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun recordingLabel(file: File): String = "${file.name}\n${file.length() / 1024} КБ"
 
-    private fun showRecordingSelection(files: List<File>) {
+    private fun showRecordingSelection(
+        files: List<File>,
+        conversations: List<RecordingConversationExport.Conversation>
+    ) {
+        val labels = conversations.map { "Разговор\n${it.label}" } +
+            files.map { "Запись\n${recordingLabel(it)}" }
         val dialog = AlertDialog.Builder(this)
-            .setTitle("Выбери аудиозаписи")
-            .setMultiChoiceItems(files.map(::recordingLabel).toTypedArray(), null, null)
+            .setTitle("Разговоры и записи")
+            .setMultiChoiceItems(labels.toTypedArray(), null) { popup, _, _ ->
+                updateRecordingSelectionButtons(popup as AlertDialog, labels.size)
+            }
             .setPositiveButton("Отправить", null)
             .setNeutralButton("Все", null)
             .setNegativeButton("Отмена", null)
@@ -973,23 +980,35 @@ class MainActivity : AppCompatActivity() {
         val list = dialog.listView
         val send = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
         val selectAll = dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
-        fun updateSelection() {
-            val count = list.checkedItemCount
-            send.isEnabled = count > 0
-            send.text = if (count == 0) "Отправить" else "Отправить ($count)"
-            selectAll.text = if (count == files.size) "Снять все" else "Все"
-        }
-        list.setOnItemClickListener { _, _, _, _ -> updateSelection() }
         selectAll.setOnClickListener {
-            val select = list.checkedItemCount != files.size
-            files.indices.forEach { list.setItemChecked(it, select) }
-            updateSelection()
+            val select = list.checkedItemCount != labels.size
+            labels.indices.forEach { list.setItemChecked(it, select) }
+            updateRecordingSelectionButtons(dialog, labels.size)
         }
         send.setOnClickListener {
-            val selected = files.filterIndexed { index, _ -> list.isItemChecked(index) }
-            if (selected.isNotEmpty() && shareAudioRecordings(selected)) dialog.dismiss()
+            val selectedConversations = conversations.filterIndexed { index, _ -> list.isItemChecked(index) }
+            val selectedFiles = files.filterIndexed { index, _ ->
+                list.isItemChecked(conversations.size + index)
+            }
+            val started = if (selectedConversations.isEmpty()) {
+                selectedFiles.isNotEmpty() && shareAudioRecordings(selectedFiles)
+            } else {
+                exportRecordingsZip { outputDir ->
+                    RecordingConversationExport.writeBatchZip(selectedConversations, selectedFiles, outputDir)
+                }
+            }
+            if (started) dialog.dismiss()
         }
-        updateSelection()
+        updateRecordingSelectionButtons(dialog, labels.size)
+    }
+
+    private fun updateRecordingSelectionButtons(dialog: AlertDialog, itemCount: Int) {
+        val count = dialog.listView.checkedItemCount
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).apply {
+            isEnabled = count > 0
+            text = if (count == 0) "Отправить" else "Отправить ($count)"
+        }
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).text = if (count == itemCount) "Снять все" else "Все"
     }
 
     private fun shareAudioRecordings(files: List<File>): Boolean {
@@ -1024,8 +1043,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun promptConversationExport() {
-        val allFiles = AudioRecordingManager.getRecordsDir(this).listFiles()?.toList() ?: emptyList()
-        val conversations = RecordingConversationExport.group(allFiles)
+        val files = AudioRecordingManager.getAllAudioRecords(this).filter(File::isFile)
+        val conversations = RecordingConversationExport.group(files)
         if (conversations.isEmpty()) {
             AlertDialog.Builder(this)
                 .setTitle("Разговоры")
@@ -1036,12 +1055,15 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val labels = conversations.map { it.label }.toTypedArray()
+        val labels = listOf("Выбрать и отправить") + conversations.map { it.label }
         AlertDialog.Builder(this)
-            .setTitle("Выбери разговор")
-            .setItems(labels) { _, which ->
-                val selected = conversations[which]
-                promptConversationAction(selected)
+            .setTitle("Разговоры")
+            .setItems(labels.toTypedArray()) { _, which ->
+                if (which == 0) {
+                    showRecordingSelection(files, conversations)
+                } else {
+                    promptConversationAction(conversations[which - 1])
+                }
             }
             .setNeutralButton("Очистить ZIP") { _, _ -> promptZipCleanup() }
             .setNegativeButton("Отмена", null)
@@ -1053,7 +1075,9 @@ class MainActivity : AppCompatActivity() {
             .setTitle(conversation.label)
             .setItems(arrayOf("Выгрузить ZIP", "Удалить аудио разговора")) { _, which ->
                 when (which) {
-                    0 -> exportConversationZip(conversation)
+                    0 -> exportRecordingsZip { outputDir ->
+                        RecordingConversationExport.writeZip(conversation, outputDir)
+                    }
                     1 -> confirmDeleteConversationAudio(conversation)
                 }
             }
@@ -1211,15 +1235,15 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun exportConversationZip(conversation: RecordingConversationExport.Conversation) {
+    private fun exportRecordingsZip(createArchive: (File) -> File): Boolean {
         if (conversationExportProgressDialog?.isShowing == true) {
             Toast.makeText(this, "Экспорт уже выполняется...", Toast.LENGTH_SHORT).show()
-            return
+            return false
         }
 
         val reqId = ++activeConversationExportReqId
         val progressDialog = AlertDialog.Builder(this).apply {
-            setTitle("Экспорт разговора")
+            setTitle("Экспорт аудио")
             setMessage("Формирование ZIP-архива...")
             setCancelable(false)
             setNegativeButton("Отмена") { _, _ ->
@@ -1238,7 +1262,7 @@ class MainActivity : AppCompatActivity() {
 
         conversationExportThread = Thread({
             try {
-                val zipFile = RecordingConversationExport.writeZip(conversation, outputDir)
+                val zipFile = createArchive(outputDir)
                 activityRef.get()?.let { act ->
                     act.runOnUiThread {
                         if (act.isFinishing || act.isDestroyed) return@runOnUiThread
@@ -1266,6 +1290,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }, "PocketHUD-export-zip").also { it.start() }
+        return true
     }
 
     private fun shareConversationZip(zipFile: File) {
@@ -1282,7 +1307,7 @@ class MainActivity : AppCompatActivity() {
                 putExtra(Intent.EXTRA_SUBJECT, "PocketHUD Conversation Export")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            startActivity(Intent.createChooser(shareIntent, "Поделиться разговором (ZIP)"))
+            startActivity(Intent.createChooser(shareIntent, "Поделиться архивом аудио"))
         } catch (e: Exception) {
             Toast.makeText(this, "Ошибка отправки архива: ${e.message}", Toast.LENGTH_LONG).show()
         }

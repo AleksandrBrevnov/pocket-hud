@@ -203,15 +203,55 @@ object RecordingConversationExport {
 
     @Throws(IOException::class)
     fun writeZip(conversation: Conversation, outputDir: File): File {
-        checkCancelled()
-        require(conversation.files.isNotEmpty()) { "Conversation has no files to export" }
+        return writeArchive(
+            "conversation_${safeKey(conversation.key)}",
+            conversation.files.map { it.name to it },
+            outputDir
+        )
+    }
 
-        for (file in conversation.files) {
+    @Throws(IOException::class)
+    fun writeBatchZip(
+        conversations: List<Conversation>,
+        recordings: List<File>,
+        outputDir: File
+    ): File {
+        val included = mutableSetOf<File>()
+        val entries = buildList {
+            conversations.forEachIndexed { index, conversation ->
+                val folder = "conversations/${index + 1}_${safeKey(conversation.key)}"
+                for (file in conversation.files) {
+                    checkCancelled()
+                    if (included.add(file.canonicalFile)) add("$folder/${file.name}" to file)
+                }
+            }
+            for (file in recordings) {
+                checkCancelled()
+                if (included.add(file.canonicalFile)) add("recordings/${file.name}" to file)
+            }
+        }
+        return writeArchive("conversation_selection", entries, outputDir)
+    }
+
+    private fun safeKey(key: String): String = key
+        .replace(Regex("[^A-Za-z0-9_-]"), "_")
+        .trim('_')
+        .ifEmpty { "conversation" }
+
+    private fun writeArchive(
+        baseName: String,
+        entries: List<Pair<String, File>>,
+        outputDir: File
+    ): File {
+        checkCancelled()
+        require(entries.isNotEmpty()) { "No files to export" }
+
+        for ((_, file) in entries) {
             val lower = file.name.lowercase(Locale.US)
             if (lower.endsWith(".part") || lower.endsWith(".incomplete")) {
                 throw IOException("Cannot export incomplete file: ${file.name}")
             }
-            if (!file.exists() || !file.canRead()) {
+            if (!file.isFile || !file.canRead()) {
                 throw IOException("File does not exist or cannot be read: ${file.absolutePath}")
             }
         }
@@ -221,21 +261,16 @@ object RecordingConversationExport {
         }
         check(outputDir.isDirectory) { "Output directory is not a directory: ${outputDir.absolutePath}" }
 
-        val totalBytes = conversation.files.sumOf { it.length() }
+        val totalBytes = entries.sumOf { (_, file) -> file.length() }
         val usable = outputDir.usableSpace
         if (usable > 0L && usable < totalBytes + 1024L * 1024L) {
             throw IOException("Not enough free space on storage (required ~${totalBytes + 1024 * 1024} bytes, available $usable)")
         }
 
-        val safeKey = conversation.key
-            .replace(Regex("[^A-Za-z0-9_-]"), "_")
-            .trim('_')
-            .ifEmpty { "conversation" }
-
-        var targetFile = File(outputDir, "conversation_${safeKey}.zip")
+        var targetFile = File(outputDir, "$baseName.zip")
         var counter = 1
         while (targetFile.exists()) {
-            targetFile = File(outputDir, "conversation_${safeKey}_$counter.zip")
+            targetFile = File(outputDir, "${baseName}_$counter.zip")
             counter++
         }
 
@@ -249,9 +284,9 @@ object RecordingConversationExport {
             FileOutputStream(tempFile).buffered().use { fos ->
                 ZipOutputStream(fos).use { zos ->
                     val buffer = ByteArray(64 * 1024)
-                    for (file in conversation.files) {
+                    for ((name, file) in entries) {
                         checkCancelled()
-                        val entry = ZipEntry(file.name)
+                        val entry = ZipEntry(name)
                         entry.time = file.lastModified()
                         zos.putNextEntry(entry)
                         FileInputStream(file).buffered().use { fis ->

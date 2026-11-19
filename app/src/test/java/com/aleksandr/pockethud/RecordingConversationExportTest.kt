@@ -17,6 +17,35 @@ import java.util.zip.ZipFile
 class RecordingConversationExportTest {
 
     @Test
+    fun batchZipSeparatesConversationsAndIncludesEachSelectedFileOnce() {
+        val tempDir = Files.createTempDirectory("batch-zip-test").toFile()
+        try {
+            val first = File(tempDir, "record_alpha_0001.wav").apply { writeBytes(byteArrayOf(1, 2)) }
+            val second = File(tempDir, "record_beta_0001.m4a").apply { writeBytes(byteArrayOf(3, 4)) }
+            val extra = File(tempDir, "standalone.wav").apply { writeBytes(byteArrayOf(5, 6)) }
+            val archive = RecordingConversationExport.writeBatchZip(
+                RecordingConversationExport.group(listOf(first, second)),
+                listOf(first, extra, extra),
+                File(tempDir, "exports")
+            )
+
+            ZipFile(archive).use { zip ->
+                val expected = mapOf(
+                    "conversations/1_alpha/${first.name}" to first.readBytes(),
+                    "conversations/2_beta/${second.name}" to second.readBytes(),
+                    "recordings/${extra.name}" to extra.readBytes()
+                )
+                assertEquals(expected.keys, zip.entries().asSequence().map { it.name }.toSet())
+                for ((name, bytes) in expected) {
+                    assertArrayEquals(bytes, zip.getInputStream(zip.getEntry(name)).use { it.readBytes() })
+                }
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun groupOldFormatFilesByExactSessionId() {
         val f1 = File("record_20261115_131836_1_b48d65af_0001.wav")
         val f2 = File("record_20261115_131836_1_b48d65af_0002.wav")
