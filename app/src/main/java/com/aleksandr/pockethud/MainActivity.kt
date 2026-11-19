@@ -2,6 +2,7 @@ package com.aleksandr.pockethud
 
 import android.Manifest
 import android.app.Dialog
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -874,7 +875,7 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Останови перевод перед прослушиванием записи", Toast.LENGTH_LONG).show()
             return
         }
-        val files = AudioRecordingManager.getAllAudioRecords(this)
+        val files = AudioRecordingManager.getAllAudioRecords(this).filter(File::isFile)
         val audioNames = files.map { it.name }.toSet()
         val retainedSummaries = AudioRecordingManager.getRecordsDir(this).listFiles()
             ?.filter { it.isFile && it.name.endsWith(".summary.md") }
@@ -894,18 +895,24 @@ class MainActivity : AppCompatActivity() {
                 .show()
             return
         }
-        val labels = (retainedSummaries.map { "📝 Конспект: ${it.sourceFileName}\n${it.rangeFormatted}" } +
-            files.map { "${it.name}\n${it.length() / 1024} КБ" }).toTypedArray()
+        val actions = if (files.isEmpty()) emptyList() else listOf("Выбрать и отправить аудио")
+        val labels = (actions + retainedSummaries.map { "📝 Конспект: ${it.sourceFileName}\n${it.rangeFormatted}" } +
+            files.map(::recordingLabel)).toTypedArray()
         AlertDialog.Builder(this).setTitle("Записи Live (неполных: $unfinished)")
             .setItems(labels) { _, index ->
-                if (index < retainedSummaries.size) {
-                    val summary = retainedSummaries[index]
+                if (index < actions.size) {
+                    showRecordingSelection(files)
+                    return@setItems
+                }
+                val recordingIndex = index - actions.size
+                if (recordingIndex < retainedSummaries.size) {
+                    val summary = retainedSummaries[recordingIndex]
                     val content = summary.summaryMarkdown +
                         (summary.cleanupWarning?.let { "\n\n[Предупреждение: $it]" } ?: "")
                     showAiSummaryDialog(content, "⚡ AI-Конспект (${summary.rangeFormatted})")
                     return@setItems
                 }
-                val file = files[index - retainedSummaries.size]
+                val file = files[recordingIndex - retainedSummaries.size]
                 AlertDialog.Builder(this).setTitle(file.name)
                     .setItems(arrayOf("Прослушать", "Суть по аудио", "Сохранённые конспекты", "Поделиться аудио")) { _, action ->
                         when (action) {
@@ -941,16 +948,7 @@ class MainActivity : AppCompatActivity() {
                             2 -> {
                                 showSavedSummariesDialog(file)
                             }
-                            3 -> {
-                                val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-                                val share = Intent(Intent.ACTION_SEND).apply {
-                                    type = if (file.extension == "wav") "audio/wav" else "audio/mp4"
-                                    putExtra(Intent.EXTRA_STREAM, uri)
-                                    clipData = ClipData.newRawUri("audio", uri)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                }
-                                startActivity(Intent.createChooser(share, "Поделиться записью"))
-                            }
+                            3 -> shareAudioRecordings(listOf(file))
                         }
                     }.show()
             }
@@ -958,6 +956,71 @@ class MainActivity : AppCompatActivity() {
             .setNeutralButton("Очистить ZIP") { _, _ -> promptZipCleanup() }
             .setNegativeButton("Закрыть", null)
             .show()
+    }
+
+    private fun recordingLabel(file: File): String = "${file.name}\n${file.length() / 1024} КБ"
+
+    private fun showRecordingSelection(files: List<File>) {
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Выбери аудиозаписи")
+            .setMultiChoiceItems(files.map(::recordingLabel).toTypedArray(), null, null)
+            .setPositiveButton("Отправить", null)
+            .setNeutralButton("Все", null)
+            .setNegativeButton("Отмена", null)
+            .create()
+        dialog.show()
+
+        val list = dialog.listView
+        val send = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+        val selectAll = dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
+        fun updateSelection() {
+            val count = list.checkedItemCount
+            send.isEnabled = count > 0
+            send.text = if (count == 0) "Отправить" else "Отправить ($count)"
+            selectAll.text = if (count == files.size) "Снять все" else "Все"
+        }
+        list.setOnItemClickListener { _, _, _, _ -> updateSelection() }
+        selectAll.setOnClickListener {
+            val select = list.checkedItemCount != files.size
+            files.indices.forEach { list.setItemChecked(it, select) }
+            updateSelection()
+        }
+        send.setOnClickListener {
+            val selected = files.filterIndexed { index, _ -> list.isItemChecked(index) }
+            if (selected.isNotEmpty() && shareAudioRecordings(selected)) dialog.dismiss()
+        }
+        updateSelection()
+    }
+
+    private fun shareAudioRecordings(files: List<File>): Boolean {
+        if (files.any { !it.isFile || !it.canRead() }) {
+            Toast.makeText(this, "Часть записей недоступна. Обнови список записей.", Toast.LENGTH_LONG).show()
+            return false
+        }
+        try {
+            val streams = ArrayList(files.map { FileProvider.getUriForFile(this, "$packageName.fileprovider", it) })
+            val mimeTypes = files.map { if (it.extension.equals("wav", ignoreCase = true)) "audio/wav" else "audio/mp4" }
+            val share = Intent(if (streams.size == 1) Intent.ACTION_SEND else Intent.ACTION_SEND_MULTIPLE).apply {
+                type = mimeTypes.distinct().singleOrNull() ?: "audio/*"
+                if (streams.size == 1) {
+                    putExtra(Intent.EXTRA_STREAM, streams.first())
+                } else {
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, streams)
+                }
+                clipData = ClipData.newRawUri("PocketHUD audio", streams.first()).apply {
+                    streams.drop(1).forEach { addItem(ClipData.Item(it)) }
+                }
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(share, "Поделиться аудиозаписями"))
+            return true
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(this, "Нет приложения для отправки аудио.", Toast.LENGTH_LONG).show()
+        } catch (e: IllegalArgumentException) {
+            Log.w("PocketHUD", "Could not prepare recording attachments", e)
+            Toast.makeText(this, "Не удалось подготовить аудио к отправке.", Toast.LENGTH_LONG).show()
+        }
+        return false
     }
 
     private fun promptConversationExport() {
