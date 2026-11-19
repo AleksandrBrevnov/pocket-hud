@@ -40,6 +40,28 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+private object Palette {
+    val Canvas = 0xFFF5F4ED.toInt()
+    val Paper = 0xFFFFFFFF.toInt()
+    val Cream = 0xFFF8F5E9.toInt()
+    val NeutralTint = 0xFFF1F1EA.toInt()
+    val Mint = 0xFFE7F2EB.toInt()
+    val Border = 0xFFDDDFD5.toInt()
+    val MintBorder = 0xFFC7DCCF.toInt()
+    val WarmBorder = 0xFFDEB08F.toInt()
+    val Ink = 0xFF223A33.toInt()
+    val Muted = 0xFF586960.toInt()
+    val Forest = 0xFF17564C.toInt()
+    val DeepForest = 0xFF284D44.toInt()
+    val WarmInk = 0xFF8A4826.toInt()
+    val Terracotta = 0xFF99472F.toInt()
+    val AccentOnForest = 0xFFF5D0A9.toInt()
+    val ForestTint = 0xFF285F54.toInt()
+    val Error = 0xFFA1332F.toInt()
+    val ErrorTint = 0xFFFAEAE5.toInt()
+    val OnForest = 0xFFFFFFFF.toInt()
+}
+
 class MainActivity : AppCompatActivity() {
     private var recordingPlayer: MediaPlayer? = null
     private var audioSummaryProgressDialog: AlertDialog? = null
@@ -138,6 +160,8 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val IT_PLACEHOLDER = "Слушаю итальянскую или английскую речь (собеседник, лекция)..."
         private const val RU_PLACEHOLDER = "Здесь в реальном времени появится полный русский перевод..."
+        private const val DIALOGUE_PLACEHOLDER = "Начни перевод. Здесь появятся оригинал и перевод реплик."
+        private const val TRANSLATION_PLACEHOLDER = "Начни перевод. Здесь появится русский текст."
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -246,9 +270,9 @@ class MainActivity : AppCompatActivity() {
             } else {
                 statusBadgeText.text = "🔵 Запуск сервиса..."
                 italianTranscriptText.text = "Слушаю итальянскую и английскую речь..."
-                italianTranscriptText.setTextColor(0xFF8AB4F8.toInt())
+                italianTranscriptText.setTextColor(Palette.Forest)
                 russianTranscriptText.text = "Ожидание перевода..."
-                russianTranscriptText.setTextColor(0xFF81C995.toInt())
+                russianTranscriptText.setTextColor(Palette.Forest)
                 restoreDialogueView()
 
                 val intent = Intent(this, PocketService::class.java).apply {
@@ -317,13 +341,13 @@ class MainActivity : AppCompatActivity() {
             val itText = PocketService.getSessionItalianText()
             if (itText.isNotBlank()) {
                 italianTranscriptText.text = itText
-                italianTranscriptText.setTextColor(0xFFE8EAED.toInt())
+                italianTranscriptText.setTextColor(Palette.Ink)
                 italianScrollView.post { italianScrollView.fullScroll(View.FOCUS_DOWN) }
             }
             val ruText = PocketService.getSessionRussianText()
             if (ruText.isNotBlank()) {
                 russianTranscriptText.text = ruText
-                russianTranscriptText.setTextColor(0xFF81C995.toInt())
+                russianTranscriptText.setTextColor(Palette.Forest)
                 russianScrollView.post { russianScrollView.fullScroll(View.FOCUS_DOWN) }
             }
         }
@@ -431,40 +455,44 @@ class MainActivity : AppCompatActivity() {
     private fun updateMicSourceStyles() {
         if (!::micPhoneBtn.isInitialized || !::micBluetoothBtn.isInitialized) return
 
-        val activePhoneBg = createRoundedDrawable(0xFF1E3A5F.toInt(), 0xFF4285F4.toInt(), 1, 12f)
-        val activeBtBg = createRoundedDrawable(0xFF1A3B2A.toInt(), 0xFF34A853.toInt(), 1, 12f)
+        val activePhoneBg = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 12f)
+        val activeBtBg = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 12f)
         val inactiveBg = createRoundedDrawable(0x00000000, cornerRadiusDp = 12f)
+        micPhoneBtn.isSelected = currentMicSource == MicSource.SMARTPHONE
+        micBluetoothBtn.isSelected = !micPhoneBtn.isSelected
 
         if (currentMicSource == MicSource.SMARTPHONE) {
             micPhoneBtn.background = activePhoneBg
-            micPhoneBtn.setTextColor(0xFF8AB4F8.toInt())
+            micPhoneBtn.setTextColor(Palette.Forest)
             micBluetoothBtn.background = inactiveBg
-            micBluetoothBtn.setTextColor(0xFF9AA0A6.toInt())
+            micBluetoothBtn.setTextColor(Palette.Muted)
         } else {
             micBluetoothBtn.background = activeBtBg
-            micBluetoothBtn.setTextColor(0xFF81C995.toInt())
+            micBluetoothBtn.setTextColor(Palette.Forest)
             micPhoneBtn.background = inactiveBg
-            micPhoneBtn.setTextColor(0xFF9AA0A6.toInt())
+            micPhoneBtn.setTextColor(Palette.Muted)
         }
     }
 
     private fun updateEngineStyles() {
         if (!::engineCascadedBtn.isInitialized || !::engineLiveBtn.isInitialized) return
 
-        val activeCascadedBg = createRoundedDrawable(0xFF2E2A14.toInt(), 0xFFFBC02D.toInt(), 1, 12f)
-        val activeLiveBg = createRoundedDrawable(0xFF1E3A5F.toInt(), 0xFF4285F4.toInt(), 1, 12f)
+        val activeCascadedBg = createRoundedDrawable(Palette.Cream, Palette.WarmBorder, 1, 12f)
+        val activeLiveBg = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 12f)
         val inactiveBg = createRoundedDrawable(0x00000000, cornerRadiusDp = 12f)
+        engineCascadedBtn.isSelected = currentEngine == TranslationEngine.CASCADED_REST
+        engineLiveBtn.isSelected = !engineCascadedBtn.isSelected
 
         if (currentEngine == TranslationEngine.CASCADED_REST) {
             engineCascadedBtn.background = activeCascadedBg
-            engineCascadedBtn.setTextColor(0xFFFDD835.toInt())
+            engineCascadedBtn.setTextColor(Palette.WarmInk)
             engineLiveBtn.background = inactiveBg
-            engineLiveBtn.setTextColor(0xFF9AA0A6.toInt())
+            engineLiveBtn.setTextColor(Palette.Muted)
         } else {
             engineLiveBtn.background = activeLiveBg
-            engineLiveBtn.setTextColor(0xFF8AB4F8.toInt())
+            engineLiveBtn.setTextColor(Palette.Forest)
             engineCascadedBtn.background = inactiveBg
-            engineCascadedBtn.setTextColor(0xFF9AA0A6.toInt())
+            engineCascadedBtn.setTextColor(Palette.Muted)
         }
     }
 
@@ -493,49 +521,52 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateRestModelStyles(currentModel: String = PocketService.selectedRestModel) {
-        val activeBg = createRoundedDrawable(0xFF1E3A8A.toInt(), 0xFF3B82F6.toInt(), 1, 8f)
+        val activeBg = createRoundedDrawable(Palette.Forest, Palette.Forest, 1, 8f)
         val inactiveBg = createRoundedDrawable(android.graphics.Color.TRANSPARENT, 0, 0, 8f)
         for ((model, btn) in restModelButtons) {
             if (model == currentModel) {
                 btn.background = activeBg
-                btn.setTextColor(0xFFFFFFFF.toInt())
+                btn.setTextColor(Palette.OnForest)
             } else {
                 btn.background = inactiveBg
-                btn.setTextColor(0xFF9AA0A6.toInt())
+                btn.setTextColor(Palette.Muted)
             }
         }
     }
 
     private fun updateTabStyles() {
-        val activeBgDiag = createRoundedDrawable(0xFF28344D.toInt(), 0xFF5C6BC0.toInt(), 1, 14f)
-        val activeBgIt = createRoundedDrawable(0xFF1E3A5F.toInt(), 0xFF4285F4.toInt(), 1, 14f)
-        val activeBgRu = createRoundedDrawable(0xFF1A3B2A.toInt(), 0xFF34A853.toInt(), 1, 14f)
+        val activeBgDiag = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 14f)
+        val activeBgIt = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 14f)
+        val activeBgRu = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 14f)
         val inactiveBg = createRoundedDrawable(0x00000000, cornerRadiusDp = 14f)
+        tabDialogueBtn.isSelected = currentMode == ScreenMode.DIALOGUE
+        tabItalianBtn.isSelected = currentMode == ScreenMode.ITALIAN
+        tabRussianBtn.isSelected = currentMode == ScreenMode.RUSSIAN
 
         when (currentMode) {
             ScreenMode.DIALOGUE -> {
                 tabDialogueBtn.background = activeBgDiag
-                tabDialogueBtn.setTextColor(0xFF8AB4F8.toInt())
+                tabDialogueBtn.setTextColor(Palette.Forest)
                 tabItalianBtn.background = inactiveBg
-                tabItalianBtn.setTextColor(0xFF9AA0A6.toInt())
+                tabItalianBtn.setTextColor(Palette.Muted)
                 tabRussianBtn.background = inactiveBg
-                tabRussianBtn.setTextColor(0xFF9AA0A6.toInt())
+                tabRussianBtn.setTextColor(Palette.Muted)
             }
             ScreenMode.ITALIAN -> {
                 tabItalianBtn.background = activeBgIt
-                tabItalianBtn.setTextColor(0xFF8AB4F8.toInt())
+                tabItalianBtn.setTextColor(Palette.Forest)
                 tabDialogueBtn.background = inactiveBg
-                tabDialogueBtn.setTextColor(0xFF9AA0A6.toInt())
+                tabDialogueBtn.setTextColor(Palette.Muted)
                 tabRussianBtn.background = inactiveBg
-                tabRussianBtn.setTextColor(0xFF9AA0A6.toInt())
+                tabRussianBtn.setTextColor(Palette.Muted)
             }
             ScreenMode.RUSSIAN -> {
                 tabRussianBtn.background = activeBgRu
-                tabRussianBtn.setTextColor(0xFF81C995.toInt())
+                tabRussianBtn.setTextColor(Palette.Forest)
                 tabDialogueBtn.background = inactiveBg
-                tabDialogueBtn.setTextColor(0xFF9AA0A6.toInt())
+                tabDialogueBtn.setTextColor(Palette.Muted)
                 tabItalianBtn.background = inactiveBg
-                tabItalianBtn.setTextColor(0xFF9AA0A6.toInt())
+                tabItalianBtn.setTextColor(Palette.Muted)
             }
         }
     }
@@ -551,9 +582,9 @@ class MainActivity : AppCompatActivity() {
         }
         if (::dialogueEmptyPlaceholder.isInitialized && dialogueFeedLayout.childCount == 1 && dialogueEmptyPlaceholder.visibility == View.VISIBLE) {
             dialogueEmptyPlaceholder.text = if (showOriginalText) {
-                "💬 Режим диалога (Google Translate)\n\nГоворите или слушайте речь на итальянском/английском языке.\nРеплики и синхронный перевод появятся здесь последовательно в единой прокручиваемой ленте."
+                DIALOGUE_PLACEHOLDER
             } else {
-                "💬 Режим диалога (Только перевод)\n\nОригинал речи скрыт по настройке Google Translate.\nЗдесь появятся только карточки русского перевода в реальном времени."
+                TRANSLATION_PLACEHOLDER
             }
         }
         if (::dialogueScrollView.isInitialized) {
@@ -565,12 +596,12 @@ class MainActivity : AppCompatActivity() {
         if (::showOriginalBadge.isInitialized) {
             if (isChecked) {
                 showOriginalBadge.text = "🇮🇹 IT/EN + 🇷🇺 RU"
-                showOriginalBadge.setTextColor(0xFF8AB4F8.toInt())
-                showOriginalBadge.background = createRoundedDrawable(0xFF1E2838.toInt(), 0xFF2A3850.toInt(), 1, 6f)
+                showOriginalBadge.setTextColor(Palette.Forest)
+                showOriginalBadge.background = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 6f)
             } else {
                 showOriginalBadge.text = "🇷🇺 ТОЛЬКО ПЕРЕВОД"
-                showOriginalBadge.setTextColor(0xFF81C995.toInt())
-                showOriginalBadge.background = createRoundedDrawable(0xFF162A1F.toInt(), 0xFF1E402B.toInt(), 1, 6f)
+                showOriginalBadge.setTextColor(Palette.Forest)
+                showOriginalBadge.background = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 6f)
             }
         }
         if (::dialogueTitleText.isInitialized) {
@@ -581,10 +612,10 @@ class MainActivity : AppCompatActivity() {
     private fun updateMuteButtonUi() {
         if (PocketService.isAudioMuted) {
             muteBtn.text = "🔇 ЗВУК: ВЫКЛ"
-            muteBtn.background = createButtonDrawable(0xFFE65100.toInt(), 14f)
+            muteBtn.background = createButtonDrawable(Palette.Terracotta, 14f)
         } else {
             muteBtn.text = "🔊 ЗВУК: ВКЛ"
-            muteBtn.background = createButtonDrawable(0xFF1976D2.toInt(), 14f)
+            muteBtn.background = createButtonDrawable(Palette.Forest, 14f)
         }
     }
 
@@ -592,7 +623,7 @@ class MainActivity : AppCompatActivity() {
         if (!::ttsModeBtn.isInitialized) return
         if (currentEngine == TranslationEngine.LIVE_WEBSOCKET) {
             ttsModeBtn.text = "⚡ TTS: Gemini Live (нейро)"
-            ttsModeBtn.background = createButtonDrawable(0xFF1E293B.toInt(), 14f)
+            ttsModeBtn.background = createButtonDrawable(Palette.DeepForest, 14f)
             ttsModeBtn.alpha = 0.85f
             return
         }
@@ -600,15 +631,15 @@ class MainActivity : AppCompatActivity() {
         when (PocketService.selectedTtsMode) {
             TtsMode.GIST_ONLY -> {
                 ttsModeBtn.text = "💡 TTS: СУТЬ (Gist)"
-                ttsModeBtn.background = createButtonDrawable(0xFF0F766E.toInt(), 14f)
+                ttsModeBtn.background = createButtonDrawable(Palette.Forest, 14f)
             }
             TtsMode.FULL_PHRASE -> {
                 ttsModeBtn.text = "🗣️ TTS: ПОЛНАЯ"
-                ttsModeBtn.background = createButtonDrawable(0xFF6D28D9.toInt(), 14f)
+                ttsModeBtn.background = createButtonDrawable(Palette.Terracotta, 14f)
             }
             TtsMode.MUTED -> {
                 ttsModeBtn.text = "🔇 TTS: ВЫКЛ"
-                ttsModeBtn.background = createButtonDrawable(0xFF78350F.toInt(), 14f)
+                ttsModeBtn.background = createButtonDrawable(Palette.Terracotta, 14f)
             }
         }
     }
@@ -619,18 +650,18 @@ class MainActivity : AppCompatActivity() {
             when {
                 isReady -> {
                     mlKitStatusBadge.text = "⚡ ML Kit: Готов"
-                    mlKitStatusBadge.setTextColor(0xFF34D399.toInt())
-                    mlKitStatusBadge.background = createRoundedDrawable(0xFF133E32.toInt(), 0xFF10B981.toInt(), 1, 6f)
+                    mlKitStatusBadge.setTextColor(Palette.Forest)
+                    mlKitStatusBadge.background = createRoundedDrawable(Palette.Mint, Palette.Forest, 1, 6f)
                 }
                 isDownloading -> {
                     mlKitStatusBadge.text = "⏳ ML Kit: Загрузка..."
-                    mlKitStatusBadge.setTextColor(0xFFFBBF24.toInt())
-                    mlKitStatusBadge.background = createRoundedDrawable(0xFF382D13.toInt(), 0xFFF59E0B.toInt(), 1, 6f)
+                    mlKitStatusBadge.setTextColor(Palette.WarmInk)
+                    mlKitStatusBadge.background = createRoundedDrawable(Palette.Cream, Palette.WarmBorder, 1, 6f)
                 }
                 else -> {
                     mlKitStatusBadge.text = "ML Kit: Ожидание"
-                    mlKitStatusBadge.setTextColor(0xFF9CA3AF.toInt())
-                    mlKitStatusBadge.background = createRoundedDrawable(0xFF1F2937.toInt(), 0xFF374151.toInt(), 1, 6f)
+                    mlKitStatusBadge.setTextColor(Palette.Muted)
+                    mlKitStatusBadge.background = createRoundedDrawable(Palette.NeutralTint, Palette.NeutralTint, 1, 6f)
                 }
             }
         }
@@ -640,10 +671,10 @@ class MainActivity : AppCompatActivity() {
         if (!::overlayToggleBtn.isInitialized) return
         if (FloatingWidgetService.isOverlayActive) {
             overlayToggleBtn.text = "🪟 ОВЕРЛЕЙ: ВКЛ"
-            overlayToggleBtn.background = createButtonDrawable(0xFF15803D.toInt(), 14f)
+            overlayToggleBtn.background = createButtonDrawable(Palette.Forest, 14f)
         } else {
             overlayToggleBtn.text = "🪟 ОВЕРЛЕЙ: ВЫКЛ"
-            overlayToggleBtn.background = createButtonDrawable(0xFF334155.toInt(), 14f)
+            overlayToggleBtn.background = createButtonDrawable(Palette.DeepForest, 14f)
         }
     }
 
@@ -700,12 +731,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun resetItalianCard() {
         italianTranscriptText.text = IT_PLACEHOLDER
-        italianTranscriptText.setTextColor(0xFF70757A.toInt())
+        italianTranscriptText.setTextColor(Palette.Muted)
     }
 
     private fun resetRussianCard() {
         russianTranscriptText.text = RU_PLACEHOLDER
-        russianTranscriptText.setTextColor(0xFF4A6B56.toInt())
+        russianTranscriptText.setTextColor(Palette.Muted)
     }
 
     private fun appendItalianText(text: String) {
@@ -713,7 +744,7 @@ class MainActivity : AppCompatActivity() {
         val current = italianTranscriptText.text.toString()
         if (current == IT_PLACEHOLDER || current.startsWith("Слушаю") || current.startsWith("Говорите") || current.startsWith("Здесь")) {
             italianTranscriptText.text = text
-            italianTranscriptText.setTextColor(0xFFE8EAED.toInt())
+            italianTranscriptText.setTextColor(Palette.Ink)
         } else {
             if (text.startsWith(" ") || current.endsWith(" ")) {
                 italianTranscriptText.append(text)
@@ -738,7 +769,7 @@ class MainActivity : AppCompatActivity() {
         val current = russianTranscriptText.text.toString()
         if (current == RU_PLACEHOLDER || current.startsWith("Ожидание") || current.startsWith("Здесь")) {
             russianTranscriptText.text = text
-            russianTranscriptText.setTextColor(0xFF81C995.toInt())
+            russianTranscriptText.setTextColor(Palette.Forest)
         } else {
             if (text.startsWith(" ") || current.endsWith(" ")) {
                 russianTranscriptText.append(text)
@@ -1224,13 +1255,13 @@ class MainActivity : AppCompatActivity() {
             addView(TextView(context).apply {
                 text = "Длительность: $durationFormatted (${String.format(Locale.US, "%.1f", wavInfo.durationSeconds)} с)"
                 textSize = 14f
-                setTextColor(0xFFE2E8F0.toInt())
+                setTextColor(Palette.Ink)
             })
 
             addView(TextView(context).apply {
                 text = "Выбранное аудио будет отправлено в Gemini. Используется API-ключ из настроек; квота зависит от проекта."
                 textSize = 12f
-                setTextColor(0xFF94A3B8.toInt())
+                setTextColor(Palette.Muted)
                 val p = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                     setMargins(0, dp(8), 0, dp(12))
                 }
@@ -1249,7 +1280,7 @@ class MainActivity : AppCompatActivity() {
             val wholeFileRadio = android.widget.RadioButton(context).apply {
                 id = View.generateViewId()
                 text = "Вся запись ($durationFormatted)"
-                setTextColor(0xFFE2E8F0.toInt())
+                setTextColor(Palette.Ink)
                 textSize = 14f
                 isChecked = true
             }
@@ -1258,7 +1289,7 @@ class MainActivity : AppCompatActivity() {
             val intervalRadio = android.widget.RadioButton(context).apply {
                 id = View.generateViewId()
                 text = "Интервал"
-                setTextColor(0xFFE2E8F0.toInt())
+                setTextColor(Palette.Ink)
                 textSize = 14f
             }
             radioGroup.addView(intervalRadio)
@@ -1273,11 +1304,11 @@ class MainActivity : AppCompatActivity() {
 
             rangeRow.addView(TextView(context).apply {
                 text = "От: "
-                setTextColor(0xFFE2E8F0.toInt())
+                setTextColor(Palette.Ink)
             })
             val startInput = EditText(context).apply {
                 setText("00:00.0")
-                setTextColor(0xFFFFFFFF.toInt())
+                setTextColor(Palette.Ink)
                 textSize = 14f
                 val p = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 layoutParams = p
@@ -1286,11 +1317,11 @@ class MainActivity : AppCompatActivity() {
 
             rangeRow.addView(TextView(context).apply {
                 text = " До: "
-                setTextColor(0xFFE2E8F0.toInt())
+                setTextColor(Palette.Ink)
             })
             val endInput = EditText(context).apply {
                 setText(durationFormatted)
-                setTextColor(0xFFFFFFFF.toInt())
+                setTextColor(Palette.Ink)
                 textSize = 14f
                 val p = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 layoutParams = p
@@ -1484,14 +1515,14 @@ class MainActivity : AppCompatActivity() {
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setContentView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xFF131722.toInt())
+            setBackgroundColor(Palette.Paper)
             setPadding(dp(20), dp(20), dp(20), dp(20))
 
             addView(TextView(context).apply {
                 text = titleText ?: "⚡ AI-Конспект встречи"
                 textSize = 16f
                 setTypeface(null, Typeface.BOLD)
-                setTextColor(0xFFFFFFFF.toInt())
+                setTextColor(Palette.Ink)
             })
 
             val sv = ScrollView(context).apply {
@@ -1504,7 +1535,7 @@ class MainActivity : AppCompatActivity() {
             val contentTv = TextView(context).apply {
                 text = summaryMarkdown
                 textSize = 13f
-                setTextColor(0xFFE2E8F0.toInt())
+                setTextColor(Palette.Ink)
                 setLineSpacing(dp(3).toFloat(), 1.0f)
                 setTextIsSelectable(true)
             }
@@ -1519,8 +1550,8 @@ class MainActivity : AppCompatActivity() {
             val copyBtn = Button(context).apply {
                 text = "📋 Копировать"
                 textSize = 12f
-                setTextColor(0xFFFFFFFF.toInt())
-                background = createRoundedDrawable(0xFF10B981.toInt(), cornerRadiusDp = 8f)
+                setTextColor(Palette.OnForest)
+                background = createRoundedDrawable(Palette.Forest, cornerRadiusDp = 8f)
                 setOnClickListener {
                     val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     clipboard.setPrimaryClip(ClipData.newPlainText("PocketHUD AI Summary", summaryMarkdown))
@@ -1532,8 +1563,8 @@ class MainActivity : AppCompatActivity() {
             val shareBtn = Button(context).apply {
                 text = "📤 Отправить"
                 textSize = 12f
-                setTextColor(0xFFFFFFFF.toInt())
-                background = createRoundedDrawable(0xFF3B82F6.toInt(), cornerRadiusDp = 8f)
+                setTextColor(Palette.OnForest)
+                background = createRoundedDrawable(Palette.Forest, cornerRadiusDp = 8f)
                 val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                     setMargins(dp(8), 0, 0, 0)
                 }
@@ -1552,8 +1583,8 @@ class MainActivity : AppCompatActivity() {
             val closeBtn = Button(context).apply {
                 text = "Закрыть"
                 textSize = 12f
-                setTextColor(0xFFCCCCCC.toInt())
-                background = createRoundedDrawable(0xFF374151.toInt(), cornerRadiusDp = 8f)
+                setTextColor(Palette.Muted)
+                background = createRoundedDrawable(Palette.NeutralTint, cornerRadiusDp = 8f)
                 val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                     setMargins(dp(8), 0, 0, 0)
                 }
@@ -1573,10 +1604,10 @@ class MainActivity : AppCompatActivity() {
                 statusBadgeText.text = status
                 if (status.contains("🟢") || status.contains("🔵") || status.contains("⚡")) {
                     toggleBtn.text = "⏹️ ОСТАНОВИТЬ СУФЛЁР"
-                    toggleBtn.background = createButtonDrawable(0xFFD93025.toInt(), 26f)
+                    toggleBtn.background = createButtonDrawable(Palette.Error, 26f)
                 } else if (status.contains("🔴") || status.contains("⚪")) {
                     toggleBtn.text = "🎙️ ЗАПУСТИТЬ СУФЛЁР"
-                    toggleBtn.background = createButtonDrawable(0xFF1E8E3E.toInt(), 26f)
+                    toggleBtn.background = createButtonDrawable(Palette.Forest, 26f)
                 }
             }
         }
@@ -1659,7 +1690,7 @@ class MainActivity : AppCompatActivity() {
         // 1. Карточка речи собеседника (итальянский / английский)
         val itBubble = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundedDrawable(0xFF1E2638.toInt(), 0xFF2E3D5C.toInt(), 1, 14f)
+            background = createRoundedDrawable(Palette.Cream, Palette.Border, 1, 14f)
             setPadding(dp(12), dp(9), dp(12), dp(9))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1682,7 +1713,7 @@ class MainActivity : AppCompatActivity() {
         val itBadge = TextView(this).apply {
             text = "🇮🇹 РЕЧЬ (IT / EN)"
             textSize = 10.5f
-            setTextColor(0xFF8AB4F8.toInt())
+            setTextColor(Palette.Forest)
             setTypeface(null, Typeface.BOLD)
         }
         itHeader.addView(itBadge)
@@ -1695,7 +1726,7 @@ class MainActivity : AppCompatActivity() {
         val timeView = TextView(this).apply {
             text = timeStr
             textSize = 10f
-            setTextColor(0xFF7B889B.toInt())
+            setTextColor(Palette.Muted)
         }
         itHeader.addView(timeView)
         itBubble.addView(itHeader)
@@ -1703,7 +1734,7 @@ class MainActivity : AppCompatActivity() {
         val itTv = TextView(this).apply {
             text = if (turn.italianText.isBlank()) "(распознавание...)" else turn.italianText
             textSize = 16.5f
-            setTextColor(0xFFE8EAED.toInt())
+            setTextColor(Palette.Ink)
             setLineSpacing(dpF(3f), 1.2f)
         }
         itBubble.addView(itTv)
@@ -1712,7 +1743,7 @@ class MainActivity : AppCompatActivity() {
         // 2. Карточка русского перевода
         val ruBubble = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundedDrawable(0xFF14241B.toInt(), 0xFF1E422C.toInt(), 1, 14f)
+            background = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 14f)
             setPadding(dp(12), dp(9), dp(12), dp(10))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1734,7 +1765,7 @@ class MainActivity : AppCompatActivity() {
         val ruBadge = TextView(this).apply {
             text = if (showOriginalText) "➔ 🇷🇺 ПЕРЕВОД" else "🇷🇺 ПЕРЕВОД"
             textSize = 11f
-            setTextColor(0xFF81C995.toInt())
+            setTextColor(Palette.Forest)
             setTypeface(null, Typeface.BOLD)
         }
         ruHeader.addView(ruBadge)
@@ -1747,7 +1778,7 @@ class MainActivity : AppCompatActivity() {
         val ruTimeView = TextView(this).apply {
             text = timeStr
             textSize = 10f
-            setTextColor(0xFF7B889B.toInt())
+            setTextColor(Palette.Muted)
             visibility = if (showOriginalText) View.GONE else View.VISIBLE
         }
         ruHeader.addView(ruTimeView)
@@ -1763,9 +1794,9 @@ class MainActivity : AppCompatActivity() {
             textSize = 17.5f
             setTypeface(null, Typeface.BOLD)
             setTextColor(when {
-                !isRuBlank -> 0xFF81C995.toInt()
-                turn.isFinalized -> 0xFFE5A93C.toInt()
-                else -> 0xFF4A6B56.toInt()
+                !isRuBlank -> Palette.Forest
+                turn.isFinalized -> Palette.WarmInk
+                else -> Palette.Muted
             })
             setLineSpacing(dpF(4f), 1.25f)
         }
@@ -1803,13 +1834,13 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (turn.russianText.isNotBlank()) {
                     holder.russianText.text = turn.russianText
-                    holder.russianText.setTextColor(0xFF81C995.toInt())
+                    holder.russianText.setTextColor(Palette.Forest)
                 } else if (turn.isFinalized) {
                     holder.russianText.text = "⚠️ Перевод не получен (шум / пауза)"
-                    holder.russianText.setTextColor(0xFFE5A93C.toInt())
+                    holder.russianText.setTextColor(Palette.WarmInk)
                 } else {
                     holder.russianText.text = "⏳ Ожидание перевода..."
-                    holder.russianText.setTextColor(0xFF4A6B56.toInt())
+                    holder.russianText.setTextColor(Palette.Muted)
                 }
             }
 
@@ -1830,12 +1861,12 @@ class MainActivity : AppCompatActivity() {
             val itText = PocketService.getSessionItalianText()
             if (itText.isNotBlank() && (italianTranscriptText.text == IT_PLACEHOLDER || italianTranscriptText.text.isBlank())) {
                 italianTranscriptText.text = itText
-                italianTranscriptText.setTextColor(0xFFE8EAED.toInt())
+                italianTranscriptText.setTextColor(Palette.Ink)
             }
             val ruText = PocketService.getSessionRussianText()
             if (ruText.isNotBlank() && (russianTranscriptText.text == RU_PLACEHOLDER || russianTranscriptText.text.isBlank())) {
                 russianTranscriptText.text = ruText
-                russianTranscriptText.setTextColor(0xFF81C995.toInt())
+                russianTranscriptText.setTextColor(Palette.Forest)
             }
         }
 
@@ -1856,10 +1887,10 @@ class MainActivity : AppCompatActivity() {
     private fun updateUi() {
         if (PocketService.isServiceActive) {
             toggleBtn.text = "⏹️ ОСТАНОВИТЬ СУФЛЁР"
-            toggleBtn.background = createButtonDrawable(0xFFD93025.toInt(), 26f)
+            toggleBtn.background = createButtonDrawable(Palette.Error, 26f)
         } else {
             toggleBtn.text = "🎙️ ЗАПУСТИТЬ СУФЛЁР"
-            toggleBtn.background = createButtonDrawable(0xFF1E8E3E.toInt(), 26f)
+            toggleBtn.background = createButtonDrawable(Palette.Forest, 26f)
             statusBadgeText.text = "⚪ Суфлёр остановлен."
             telemetryBadgeText.text = "🎙️ 0% | 📦 0 | ⚡ 0"
         }
@@ -1901,7 +1932,7 @@ class MainActivity : AppCompatActivity() {
     private fun createLayout(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xFF121316.toInt())
+            setBackgroundColor(Palette.Canvas)
             setPadding(dp(16), dp(12), dp(16), dp(14))
         }
 
@@ -1911,47 +1942,47 @@ class MainActivity : AppCompatActivity() {
         val topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(Palette.Forest, Palette.DeepForest)
+            ).apply { cornerRadius = dpF(22f) }
+            setPadding(dp(16), dp(12), dp(12), dp(12))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(0, 0, 0, dp(8)) }
+            ).apply { setMargins(0, 0, 0, dp(10)) }
             layoutParams = params
         }
 
-        val appTitle = TextView(this).apply {
-            text = "PocketHUD"
-            textSize = 19f
-            setTextColor(0xFFFFFFFF.toInt())
-            setTypeface(null, Typeface.BOLD)
+        val heading = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginEnd = dp(8) }
+            addView(TextView(context).apply {
+                text = "PocketHUD"
+                textSize = 23f
+                setTextColor(Palette.OnForest)
+                setTypeface(null, Typeface.BOLD)
+                includeFontPadding = false
+            })
+            addView(TextView(context).apply {
+                text = "Живой перевод · IT / EN → RU"
+                textSize = 12f
+                setTextColor(Palette.AccentOnForest)
+            })
         }
-        topBar.addView(appTitle)
-
-        val versionBadge = TextView(this).apply {
-            text = "v1.0.46"
-            textSize = 10.5f
-            setTextColor(0xFF9AA0A6.toInt())
-            background = createRoundedDrawable(0xFF20232A.toInt(), cornerRadiusDp = 6f)
-            setPadding(dp(6), dp(2), dp(6), dp(2))
-            val params = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { setMargins(dp(8), 0, 0, 0) }
-            layoutParams = params
-        }
-        topBar.addView(versionBadge)
-
-        val headerSpacer = View(this).apply {
-            layoutParams = LinearLayout.LayoutParams(0, 1, 1f)
-        }
-        topBar.addView(headerSpacer)
+        topBar.addView(heading)
 
         settingsToggleBtn = TextView(this).apply {
             text = "⚙️ API Ключ ▾"
             textSize = 12f
-            setTextColor(0xFF8AB4F8.toInt())
+            setTextColor(Palette.Forest)
             setTypeface(null, Typeface.BOLD)
-            background = createRoundedDrawable(0xFF1F2533.toInt(), 0xFF2A3449.toInt(), 1, 8f)
+            background = createRoundedDrawable(Palette.Cream, cornerRadiusDp = 12f)
+            gravity = Gravity.CENTER
+            minHeight = dp(48)
             setPadding(dp(10), dp(6), dp(10), dp(6))
+            isFocusable = true
             isClickable = true
             setOnClickListener {
                 val isVisible = apiSettingsContainer.visibility == View.VISIBLE
@@ -1965,7 +1996,7 @@ class MainActivity : AppCompatActivity() {
         // Раскрывающийся блок ввода API ключа
         apiSettingsContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundedDrawable(0xFF1A1D24.toInt(), 0xFF2E3440.toInt(), 1, 12f)
+            background = createRoundedDrawable(Palette.Paper, Palette.Border, 1, 12f)
             setPadding(dp(14), dp(12), dp(14), dp(12))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1976,9 +2007,9 @@ class MainActivity : AppCompatActivity() {
 
         apiKeyInput = EditText(this).apply {
             hint = "Введите Google AI Studio API Key"
-            setHintTextColor(0xFF5F6368.toInt())
-            setTextColor(0xFFFFFFFF.toInt())
-            background = createRoundedDrawable(0xFF12141A.toInt(), 0xFF3C4043.toInt(), 1, 8f)
+            setHintTextColor(Palette.Muted)
+            setTextColor(Palette.Ink)
+            background = createRoundedDrawable(Palette.Cream, Palette.Border, 1, 8f)
             setPadding(dp(14), dp(10), dp(14), dp(10))
             textSize = 13.5f
         }
@@ -1987,7 +2018,7 @@ class MainActivity : AppCompatActivity() {
         val apiHint = TextView(this).apply {
             text = "Ключ сохраняется локально на устройстве для Gemini Live WebSocket и REST Flash"
             textSize = 11f
-            setTextColor(0xFF80868B.toInt())
+            setTextColor(Palette.Muted)
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -2004,7 +2035,7 @@ class MainActivity : AppCompatActivity() {
         engineSelectorBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = createRoundedDrawable(0xFF1A1D24.toInt(), 0xFF2B3240.toInt(), 1, 14f)
+            background = createRoundedDrawable(Palette.Paper, Palette.Border, 1, 14f)
             setPadding(dp(4), dp(4), dp(4), dp(4))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -2052,7 +2083,7 @@ class MainActivity : AppCompatActivity() {
         val micSelectorBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = createRoundedDrawable(0xFF1A1D24.toInt(), 0xFF2B3240.toInt(), 1, 14f)
+            background = createRoundedDrawable(Palette.Paper, Palette.Border, 1, 14f)
             setPadding(dp(4), dp(4), dp(4), dp(4))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -2100,7 +2131,7 @@ class MainActivity : AppCompatActivity() {
         val languageBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = createRoundedDrawable(0xFF1A1D24.toInt(), 0xFF2B3240.toInt(), 1, 16f)
+            background = createRoundedDrawable(Palette.Paper, Palette.Border, 1, 16f)
             setPadding(dp(4), dp(4), dp(4), dp(4))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -2142,7 +2173,8 @@ class MainActivity : AppCompatActivity() {
         val swapArrowBtn = TextView(this).apply {
             text = "⇄"
             textSize = 15f
-            setTextColor(0xFF80868B.toInt())
+            setTextColor(Palette.Muted)
+            contentDescription = "Переключить язык"
             gravity = Gravity.CENTER
             setPadding(dp(4), dp(7), dp(4), dp(7))
             isClickable = true
@@ -2179,6 +2211,8 @@ class MainActivity : AppCompatActivity() {
         val statusRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            background = createRoundedDrawable(Palette.Mint, cornerRadiusDp = 12f)
+            setPadding(dp(10), dp(3), dp(5), dp(3))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -2189,7 +2223,7 @@ class MainActivity : AppCompatActivity() {
         statusBadgeText = TextView(this).apply {
             text = "⚪ Суфлёр остановлен."
             textSize = 12.5f
-            setTextColor(0xFFCCCCCC.toInt())
+            setTextColor(Palette.Forest)
             setTypeface(null, Typeface.BOLD)
             val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             layoutParams = params
@@ -2199,9 +2233,9 @@ class MainActivity : AppCompatActivity() {
         telemetryBadgeText = TextView(this).apply {
             text = "🎙️ 0% | 📦 0 | ⚡ 0"
             textSize = 12f
-            setTextColor(0xFF00E5FF.toInt())
+            setTextColor(Palette.AccentOnForest)
             setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-            background = createRoundedDrawable(0xFF16222F.toInt(), 0xFF1C354A.toInt(), 1, 6f)
+            background = createRoundedDrawable(Palette.ForestTint, cornerRadiusDp = 9f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
         }
         statusRow.addView(telemetryBadgeText)
@@ -2225,7 +2259,7 @@ class MainActivity : AppCompatActivity() {
         // ----------------------------------------------------
         dialogueCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundedDrawable(0xFF16181F.toInt(), 0xFF242A38.toInt(), 1, 18f)
+            background = createRoundedDrawable(Palette.Paper, Palette.Border, 1, 18f)
             setPadding(dp(12), dp(10), dp(12), dp(10))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -2258,9 +2292,9 @@ class MainActivity : AppCompatActivity() {
         dialogueTitleText = TextView(this).apply {
             text = "💬 ДИАЛОГ (IT / EN ➔ RU)"
             textSize = 11.5f
-            setTextColor(0xFF8AB4F8.toInt())
+            setTextColor(Palette.Forest)
             setTypeface(null, Typeface.BOLD)
-            background = createRoundedDrawable(0xFF20283C.toInt(), 0xFF313F5E.toInt(), 1, 8f)
+            background = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 8f)
             setPadding(dp(10), dp(4), dp(10), dp(4))
         }
         dialogueHeaderTopRow.addView(dialogueTitleText)
@@ -2303,8 +2337,8 @@ class MainActivity : AppCompatActivity() {
         copyDialogueBtn = TextView(this).apply {
             text = "📋 Копировать"
             textSize = 11f
-            setTextColor(0xFFCCCCCC.toInt())
-            background = createRoundedDrawable(0xFF252A36.toInt(), cornerRadiusDp = 6f)
+            setTextColor(Palette.Muted)
+            background = createRoundedDrawable(Palette.NeutralTint, cornerRadiusDp = 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             isClickable = true
             setOnClickListener {
@@ -2323,8 +2357,8 @@ class MainActivity : AppCompatActivity() {
         shareDialogueBtn = TextView(this).apply {
             text = "📤 Поделиться"
             textSize = 11f
-            setTextColor(0xFF81C995.toInt())
-            background = createRoundedDrawable(0xFF1B3828.toInt(), 0xFF2D5539.toInt(), 1, 6f)
+            setTextColor(Palette.Forest)
+            background = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2341,8 +2375,8 @@ class MainActivity : AppCompatActivity() {
         historyDialogueBtn = TextView(this).apply {
             text = "📁 История"
             textSize = 11f
-            setTextColor(0xFF8AB4F8.toInt())
-            background = createRoundedDrawable(0xFF1F2B42.toInt(), cornerRadiusDp = 6f)
+            setTextColor(Palette.Forest)
+            background = createRoundedDrawable(Palette.Mint, cornerRadiusDp = 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2359,8 +2393,8 @@ class MainActivity : AppCompatActivity() {
         aiSummaryBtn = TextView(this).apply {
             text = "⚡ Конспект"
             textSize = 11f
-            setTextColor(0xFF34D399.toInt())
-            background = createRoundedDrawable(0xFF133E32.toInt(), cornerRadiusDp = 6f)
+            setTextColor(Palette.Forest)
+            background = createRoundedDrawable(Palette.Mint, cornerRadiusDp = 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2390,7 +2424,7 @@ class MainActivity : AppCompatActivity() {
         dialogueActionsRow.addView(TextView(this).apply {
             text = "🎙 Записи"
             textSize = 11f
-            setTextColor(0xFF8AB4F8.toInt())
+            setTextColor(Palette.Forest)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             setOnClickListener { showAudioRecordings() }
         })
@@ -2398,8 +2432,8 @@ class MainActivity : AppCompatActivity() {
         clearDialogueBtn = TextView(this).apply {
             text = "🗑️ Очистить"
             textSize = 11f
-            setTextColor(0xFFCCCCCC.toInt())
-            background = createRoundedDrawable(0xFF252A36.toInt(), cornerRadiusDp = 6f)
+            setTextColor(Palette.Muted)
+            background = createRoundedDrawable(Palette.NeutralTint, cornerRadiusDp = 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2425,7 +2459,7 @@ class MainActivity : AppCompatActivity() {
         val dialogueOptionsRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = createRoundedDrawable(0xFF1B202C.toInt(), 0xFF2A3448.toInt(), 1, 10f)
+            background = createRoundedDrawable(Palette.NeutralTint, Palette.MintBorder, 1, 10f)
             setPadding(dp(10), dp(6), dp(10), dp(6))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -2441,7 +2475,7 @@ class MainActivity : AppCompatActivity() {
         showOriginalCheckBox = MaterialCheckBox(this).apply {
             text = "Показывать оригинал"
             textSize = 12f
-            setTextColor(0xFFE8EAED.toInt())
+            setTextColor(Palette.Ink)
             isChecked = showOriginalText
             minHeight = 0
             minimumHeight = 0
@@ -2450,8 +2484,8 @@ class MainActivity : AppCompatActivity() {
                 intArrayOf(-android.R.attr.state_checked)
             )
             val colors = intArrayOf(
-                0xFF8AB4F8.toInt(),
-                0xFF80868B.toInt()
+                Palette.Forest,
+                Palette.Muted
             )
             buttonTintList = ColorStateList(states, colors)
             compoundDrawablePadding = dp(6)
@@ -2497,11 +2531,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         dialogueEmptyPlaceholder = TextView(this).apply {
-            text = "💬 Режим диалога (Google Translate)\n\nГоворите или слушайте речь на итальянском/английском языке.\nРеплики и синхронный перевод появятся здесь последовательно в единой прокручиваемой ленте."
+            text = DIALOGUE_PLACEHOLDER
             textSize = 14.5f
-            setTextColor(0xFF70757A.toInt())
-            gravity = Gravity.CENTER
-            setPadding(dp(16), dp(40), dp(16), dp(40))
+            setTextColor(Palette.Ink)
+            background = createRoundedDrawable(Palette.Cream, cornerRadiusDp = 14f)
+            setPadding(dp(16), dp(18), dp(16), dp(18))
             setLineSpacing(dpF(4f), 1.25f)
         }
         dialogueFeedLayout.addView(dialogueEmptyPlaceholder)
@@ -2515,7 +2549,7 @@ class MainActivity : AppCompatActivity() {
         // ------------------------------------------
         italianCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundedDrawable(0xFF1E2026.toInt(), 0xFF2D323F.toInt(), 1, 18f)
+            background = createRoundedDrawable(Palette.Paper, Palette.Border, 1, 18f)
             setPadding(dp(14), dp(12), dp(14), dp(12))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -2538,9 +2572,9 @@ class MainActivity : AppCompatActivity() {
         italianTitleText = TextView(this).apply {
             text = "🇮🇹 ITALIANO"
             textSize = 11.5f
-            setTextColor(0xFF8AB4F8.toInt())
+            setTextColor(Palette.Forest)
             setTypeface(null, Typeface.BOLD)
-            background = createRoundedDrawable(0xFF28344D.toInt(), cornerRadiusDp = 8f)
+            background = createRoundedDrawable(Palette.Mint, cornerRadiusDp = 8f)
             setPadding(dp(10), dp(4), dp(10), dp(4))
         }
         italianHeader.addView(italianTitleText)
@@ -2553,8 +2587,8 @@ class MainActivity : AppCompatActivity() {
         expandItalianBtn = TextView(this).apply {
             text = "💬 Диалог"
             textSize = 11f
-            setTextColor(0xFF8AB4F8.toInt())
-            background = createRoundedDrawable(0xFF233045.toInt(), 0xFF354868.toInt(), 1, 6f)
+            setTextColor(Palette.Forest)
+            background = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             isClickable = true
             setOnClickListener {
@@ -2566,8 +2600,8 @@ class MainActivity : AppCompatActivity() {
         val copyItalianBtn = TextView(this).apply {
             text = "📋 Копировать"
             textSize = 11f
-            setTextColor(0xFFCCCCCC.toInt())
-            background = createRoundedDrawable(0xFF2A2E39.toInt(), cornerRadiusDp = 6f)
+            setTextColor(Palette.Muted)
+            background = createRoundedDrawable(Palette.NeutralTint, cornerRadiusDp = 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2588,8 +2622,8 @@ class MainActivity : AppCompatActivity() {
         val clearItalianBtn = TextView(this).apply {
             text = "🗑️ Очистить"
             textSize = 11f
-            setTextColor(0xFFCCCCCC.toInt())
-            background = createRoundedDrawable(0xFF2A2E39.toInt(), cornerRadiusDp = 6f)
+            setTextColor(Palette.Muted)
+            background = createRoundedDrawable(Palette.NeutralTint, cornerRadiusDp = 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2619,7 +2653,7 @@ class MainActivity : AppCompatActivity() {
         italianTranscriptText = TextView(this).apply {
             text = IT_PLACEHOLDER
             textSize = 17.5f
-            setTextColor(0xFF70757A.toInt())
+            setTextColor(Palette.Muted)
             setLineSpacing(dpF(4f), 1.25f)
         }
         italianScrollView.addView(italianTranscriptText)
@@ -2631,7 +2665,7 @@ class MainActivity : AppCompatActivity() {
         // ------------------------------------------
         russianCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundedDrawable(0xFF14201A.toInt(), 0xFF1E3A2B.toInt(), 1, 18f)
+            background = createRoundedDrawable(Palette.Paper, Palette.Border, 1, 18f)
             setPadding(dp(14), dp(12), dp(14), dp(12))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -2654,9 +2688,9 @@ class MainActivity : AppCompatActivity() {
         russianTitleText = TextView(this).apply {
             text = "🇷🇺 РУССКИЙ"
             textSize = 11.5f
-            setTextColor(0xFF81C995.toInt())
+            setTextColor(Palette.Forest)
             setTypeface(null, Typeface.BOLD)
-            background = createRoundedDrawable(0xFF1A3828.toInt(), cornerRadiusDp = 8f)
+            background = createRoundedDrawable(Palette.Mint, cornerRadiusDp = 8f)
             setPadding(dp(10), dp(4), dp(10), dp(4))
         }
         russianHeader.addView(russianTitleText)
@@ -2669,8 +2703,8 @@ class MainActivity : AppCompatActivity() {
         expandRussianBtn = TextView(this).apply {
             text = "💬 Диалог"
             textSize = 11f
-            setTextColor(0xFF81C995.toInt())
-            background = createRoundedDrawable(0xFF1E3526.toInt(), 0xFF2D5539.toInt(), 1, 6f)
+            setTextColor(Palette.Forest)
+            background = createRoundedDrawable(Palette.Mint, Palette.MintBorder, 1, 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             isClickable = true
             setOnClickListener {
@@ -2682,8 +2716,8 @@ class MainActivity : AppCompatActivity() {
         val copyRussianBtn = TextView(this).apply {
             text = "📋 Копировать"
             textSize = 11f
-            setTextColor(0xFFCCCCCC.toInt())
-            background = createRoundedDrawable(0xFF23352A.toInt(), cornerRadiusDp = 6f)
+            setTextColor(Palette.Muted)
+            background = createRoundedDrawable(Palette.NeutralTint, cornerRadiusDp = 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2704,8 +2738,8 @@ class MainActivity : AppCompatActivity() {
         val clearRussianBtn = TextView(this).apply {
             text = "🗑️ Очистить"
             textSize = 11f
-            setTextColor(0xFFCCCCCC.toInt())
-            background = createRoundedDrawable(0xFF23352A.toInt(), cornerRadiusDp = 6f)
+            setTextColor(Palette.Muted)
+            background = createRoundedDrawable(Palette.NeutralTint, cornerRadiusDp = 6f)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2735,7 +2769,7 @@ class MainActivity : AppCompatActivity() {
         russianTranscriptText = TextView(this).apply {
             text = RU_PLACEHOLDER
             textSize = 18.5f
-            setTextColor(0xFF4A6B56.toInt())
+            setTextColor(Palette.Muted)
             setTypeface(null, Typeface.BOLD)
             setLineSpacing(dpF(5f), 1.25f)
         }
@@ -2769,8 +2803,8 @@ class MainActivity : AppCompatActivity() {
 
         overlayToggleBtn = Button(this).apply {
             text = "🪟 ОВЕРЛЕЙ"
-            setTextColor(0xFFFFFFFF.toInt())
-            background = createButtonDrawable(0xFF334155.toInt(), 14f)
+            setTextColor(Palette.OnForest)
+            background = createButtonDrawable(Palette.DeepForest, 14f)
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setPadding(dp(6), dp(10), dp(6), dp(10))
@@ -2785,8 +2819,8 @@ class MainActivity : AppCompatActivity() {
 
         ttsModeBtn = Button(this).apply {
             text = "💡 TTS: СУТЬ"
-            setTextColor(0xFFFFFFFF.toInt())
-            background = createButtonDrawable(0xFF0F766E.toInt(), 14f)
+            setTextColor(Palette.OnForest)
+            background = createButtonDrawable(Palette.Forest, 14f)
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setPadding(dp(6), dp(10), dp(6), dp(10))
@@ -2804,8 +2838,8 @@ class MainActivity : AppCompatActivity() {
         // Главная крупная кнопка запуска / остановки суфлёра
         toggleBtn = Button(this).apply {
             text = "🎙️ ЗАПУСТИТЬ СУФЛЁР"
-            setTextColor(0xFFFFFFFF.toInt())
-            background = createButtonDrawable(0xFF1E8E3E.toInt(), 26f)
+            setTextColor(Palette.OnForest)
+            background = createButtonDrawable(Palette.Forest, 26f)
             textSize = 15.5f
             setTypeface(null, Typeface.BOLD)
             setPadding(0, dp(14), 0, dp(14))
@@ -2824,8 +2858,8 @@ class MainActivity : AppCompatActivity() {
 
         muteBtn = Button(this).apply {
             text = "🔊 ЗВУК: ВКЛ"
-            setTextColor(0xFFFFFFFF.toInt())
-            background = createButtonDrawable(0xFF1976D2.toInt(), 14f)
+            setTextColor(Palette.OnForest)
+            background = createButtonDrawable(Palette.Forest, 14f)
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setPadding(dp(6), dp(10), dp(6), dp(10))
@@ -2839,8 +2873,8 @@ class MainActivity : AppCompatActivity() {
 
         shareDialogueDockBtn = Button(this).apply {
             text = "💬 ДИАЛОГ"
-            setTextColor(0xFFFFFFFF.toInt())
-            background = createButtonDrawable(0xFF1E3A5F.toInt(), 14f)
+            setTextColor(Palette.OnForest)
+            background = createButtonDrawable(Palette.DeepForest, 14f)
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setPadding(dp(6), dp(10), dp(6), dp(10))
@@ -2857,8 +2891,8 @@ class MainActivity : AppCompatActivity() {
 
         copySummaryBtn = Button(this).apply {
             text = "📋 СВОДКА"
-            setTextColor(0xFFFFFFFF.toInt())
-            background = createButtonDrawable(0xFF2E333D.toInt(), 14f)
+            setTextColor(Palette.OnForest)
+            background = createButtonDrawable(Palette.DeepForest, 14f)
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setPadding(dp(6), dp(10), dp(6), dp(10))
@@ -2872,8 +2906,8 @@ class MainActivity : AppCompatActivity() {
 
         shareLogBtn = Button(this).apply {
             text = "📤 ЛОГ"
-            setTextColor(0xFFFFFFFF.toInt())
-            background = createButtonDrawable(0xFF1F3D2A.toInt(), 14f)
+            setTextColor(Palette.OnForest)
+            background = createButtonDrawable(Palette.DeepForest, 14f)
             textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setPadding(dp(6), dp(10), dp(6), dp(10))
@@ -2898,7 +2932,7 @@ class MainActivity : AppCompatActivity() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = createRoundedDrawable(0xFF131722.toInt(), 0xFF2A3448.toInt(), 2, 16f)
+            background = createRoundedDrawable(Palette.Paper, Palette.MintBorder, 2, 16f)
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
 
@@ -2917,7 +2951,7 @@ class MainActivity : AppCompatActivity() {
             text = "📁 Сохранённые диалоги (${sessions.size})"
             textSize = 15f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(0xFFFFFFFF.toInt())
+            setTextColor(Palette.Ink)
             val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             layoutParams = params
         }
@@ -2928,8 +2962,8 @@ class MainActivity : AppCompatActivity() {
             val summaryBadge = TextView(this).apply {
                 text = "⚡ Конспект"
                 textSize = 11f
-                setTextColor(0xFF34D399.toInt())
-                background = createRoundedDrawable(0xFF133E32.toInt(), cornerRadiusDp = 6f)
+                setTextColor(Palette.Forest)
+                background = createRoundedDrawable(Palette.Mint, cornerRadiusDp = 6f)
                 setPadding(dp(8), dp(4), dp(8), dp(4))
                 val params = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -2948,7 +2982,7 @@ class MainActivity : AppCompatActivity() {
             text = "✕"
             textSize = 16f
             typeface = Typeface.DEFAULT_BOLD
-            setTextColor(0xFF9AA0A6.toInt())
+            setTextColor(Palette.Muted)
             setPadding(dp(8), dp(4), dp(8), dp(4))
             isClickable = true
             setOnClickListener { dialog.dismiss() }
@@ -2960,7 +2994,7 @@ class MainActivity : AppCompatActivity() {
             val emptyText = TextView(this).apply {
                 text = "Нет сохранённых диалогов.\nРазговоры сохраняются автоматически при остановке суфлёра или очистке экрана."
                 textSize = 12.5f
-                setTextColor(0xFF80868B.toInt())
+                setTextColor(Palette.Muted)
                 gravity = Gravity.CENTER
                 setPadding(dp(12), dp(24), dp(12), dp(24))
             }
@@ -2981,7 +3015,7 @@ class MainActivity : AppCompatActivity() {
             for (session in sessions) {
                 val itemCard = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
-                    background = createRoundedDrawable(0xFF1C2230.toInt(), 0xFF2D384E.toInt(), 1, 12f)
+                    background = createRoundedDrawable(Palette.NeutralTint, Palette.Border, 1, 12f)
                     setPadding(dp(12), dp(10), dp(12), dp(10))
                     val params = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.MATCH_PARENT,
@@ -2999,7 +3033,7 @@ class MainActivity : AppCompatActivity() {
                     text = "📅 ${session.formattedDate}"
                     textSize = 12f
                     typeface = Typeface.DEFAULT_BOLD
-                    setTextColor(0xFF8AB4F8.toInt())
+                    setTextColor(Palette.Forest)
                     val params = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                     layoutParams = params
                 }
@@ -3008,8 +3042,8 @@ class MainActivity : AppCompatActivity() {
                 val countBadge = TextView(this).apply {
                     text = "${session.turnCount} реплик"
                     textSize = 10f
-                    setTextColor(0xFFA8C7FA.toInt())
-                    background = createRoundedDrawable(0xFF28344E.toInt(), cornerRadiusDp = 6f)
+                    setTextColor(Palette.Forest)
+                    background = createRoundedDrawable(Palette.Mint, cornerRadiusDp = 6f)
                     setPadding(dp(6), dp(2), dp(6), dp(2))
                 }
                 metaRow.addView(countBadge)
@@ -3019,7 +3053,7 @@ class MainActivity : AppCompatActivity() {
                 val previewText = TextView(this).apply {
                     text = session.preview
                     textSize = 11.5f
-                    setTextColor(0xFFD2E3FC.toInt())
+                    setTextColor(Palette.Ink)
                     maxLines = 2
                     ellipsize = TextUtils.TruncateAt.END
                     val params = LinearLayout.LayoutParams(
@@ -3039,8 +3073,8 @@ class MainActivity : AppCompatActivity() {
                 val loadBtn = TextView(this).apply {
                     text = "📂 Загрузить"
                     textSize = 11f
-                    setTextColor(0xFF81C995.toInt())
-                    background = createRoundedDrawable(0xFF1C3829.toInt(), cornerRadiusDp = 6f)
+                    setTextColor(Palette.Forest)
+                    background = createRoundedDrawable(Palette.Mint, cornerRadiusDp = 6f)
                     setPadding(dp(8), dp(4), dp(8), dp(4))
                     isClickable = true
                     setOnClickListener {
@@ -3061,8 +3095,8 @@ class MainActivity : AppCompatActivity() {
                 val copyBtn = TextView(this).apply {
                     text = "📋 Копировать"
                     textSize = 11f
-                    setTextColor(0xFFE8EAED.toInt())
-                    background = createRoundedDrawable(0xFF2E384D.toInt(), cornerRadiusDp = 6f)
+                    setTextColor(Palette.Ink)
+                    background = createRoundedDrawable(Palette.Mint, cornerRadiusDp = 6f)
                     setPadding(dp(8), dp(4), dp(8), dp(4))
                     val params = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -3082,8 +3116,8 @@ class MainActivity : AppCompatActivity() {
                 val shareBtn = TextView(this).apply {
                     text = "📤"
                     textSize = 11f
-                    setTextColor(0xFF8AB4F8.toInt())
-                    background = createRoundedDrawable(0xFF1F2B42.toInt(), cornerRadiusDp = 6f)
+                    setTextColor(Palette.Forest)
+                    background = createRoundedDrawable(Palette.Mint, cornerRadiusDp = 6f)
                     setPadding(dp(8), dp(4), dp(8), dp(4))
                     val params = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -3105,8 +3139,8 @@ class MainActivity : AppCompatActivity() {
                 val deleteBtn = TextView(this).apply {
                     text = "🗑️"
                     textSize = 11f
-                    setTextColor(0xFFF28B82.toInt())
-                    background = createRoundedDrawable(0xFF3C2020.toInt(), cornerRadiusDp = 6f)
+                    setTextColor(Palette.Error)
+                    background = createRoundedDrawable(Palette.ErrorTint, cornerRadiusDp = 6f)
                     setPadding(dp(8), dp(4), dp(8), dp(4))
                     val params = LinearLayout.LayoutParams(
                         LinearLayout.LayoutParams.WRAP_CONTENT,

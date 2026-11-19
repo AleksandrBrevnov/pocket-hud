@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.PocketHUD" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="colorPrimary">#17564C</item>
+        <item name="colorPrimaryVariant">#284D44</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">#99472F</item>
+        <item name="colorOnSecondary">#FFFFFF</item>
+        <item name="colorSurface">#FFFFFF</item>
+        <item name="colorOnSurface">#223A33</item>
+        <item name="android:windowBackground">#F5F4ED</item>
+        <item name="android:statusBarColor">#F5F4ED</item>
+        <item name="android:navigationBarColor">#F5F4ED</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>
