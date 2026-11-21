@@ -50,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var apiSettingsContainer: LinearLayout
 
     private lateinit var micPhoneBtn: TextView
+    private lateinit var micSoundcoreBtn: TextView
     private lateinit var micBluetoothBtn: TextView
 
     private lateinit var tabDialogueBtn: TextView
@@ -163,6 +164,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             TranslationEngine.CASCADED_REST
         }
+        currentEngine = currentMicSource.resolveEngine(currentEngine)
         PocketService.selectedEngine = currentEngine
         updateEngineStyles()
 
@@ -405,42 +407,56 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setMicSource(source: MicSource) {
+        if (source == MicSource.SOUNDCORE_D3200 && !checkPermissions(source)) {
+            requestPermissions(source, requestCode = 102)
+            return
+        }
         currentMicSource = source
         val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
-        prefs.edit().putString(keyMicSource, source.name).apply()
         PocketService.selectedMicSource = source
+        currentEngine = PocketService.selectedEngine
+        prefs.edit().putString(keyMicSource, source.name)
+            .putString(keyTranslationEngine, currentEngine.name).apply()
         updateMicSourceStyles()
+        updateEngineStyles()
+        updateTtsModeButtonUi()
 
-        val toastMsg = if (source == MicSource.SMARTPHONE) {
-            "📱 Включен микрофон смартфона (+2.8x усиление для зала/лекций)"
-        } else {
-            "🎧 Включен микрофон гарнитуры (Bluetooth SCO)"
+        val toastMsg = when (source) {
+            MicSource.SMARTPHONE -> "📱 Включен микрофон смартфона (+2.8x усиление для зала/лекций)"
+            MicSource.BLUETOOTH -> "🎧 Включен микрофон гарнитуры (Bluetooth SCO)"
+            MicSource.SOUNDCORE_D3200 -> "📡 Soundcore Work · Gemini Live"
         }
         Toast.makeText(this, toastMsg, Toast.LENGTH_SHORT).show()
     }
 
     private fun updateMicSourceStyles() {
-        if (!::micPhoneBtn.isInitialized || !::micBluetoothBtn.isInitialized) return
+        if (!::micPhoneBtn.isInitialized || !::micBluetoothBtn.isInitialized || !::micSoundcoreBtn.isInitialized) return
 
         val activePhoneBg = createRoundedDrawable(0xFF1E3A5F.toInt(), 0xFF4285F4.toInt(), 1, 12f)
         val activeBtBg = createRoundedDrawable(0xFF1A3B2A.toInt(), 0xFF34A853.toInt(), 1, 12f)
         val inactiveBg = createRoundedDrawable(0x00000000, cornerRadiusDp = 12f)
 
-        if (currentMicSource == MicSource.SMARTPHONE) {
-            micPhoneBtn.background = activePhoneBg
-            micPhoneBtn.setTextColor(0xFF8AB4F8.toInt())
-            micBluetoothBtn.background = inactiveBg
-            micBluetoothBtn.setTextColor(0xFF9AA0A6.toInt())
-        } else {
-            micBluetoothBtn.background = activeBtBg
-            micBluetoothBtn.setTextColor(0xFF81C995.toInt())
-            micPhoneBtn.background = inactiveBg
-            micPhoneBtn.setTextColor(0xFF9AA0A6.toInt())
+        for ((source, button) in listOf(MicSource.SMARTPHONE to micPhoneBtn, MicSource.BLUETOOTH to micBluetoothBtn,
+            MicSource.SOUNDCORE_D3200 to micSoundcoreBtn)) {
+            val active = source == currentMicSource
+            button.background = when {
+                !active -> inactiveBg.constantState?.newDrawable() ?: inactiveBg
+                source == MicSource.SMARTPHONE -> activePhoneBg
+                else -> activeBtBg
+            }
+            button.setTextColor(when {
+                !active -> 0xFF9AA0A6.toInt()
+                source == MicSource.SMARTPHONE -> 0xFF8AB4F8.toInt()
+                else -> 0xFF81C995.toInt()
+            })
         }
     }
 
     private fun updateEngineStyles() {
         if (!::engineCascadedBtn.isInitialized || !::engineLiveBtn.isInitialized) return
+        engineCascadedBtn.isEnabled = currentMicSource.resolveEngine(TranslationEngine.CASCADED_REST) ==
+            TranslationEngine.CASCADED_REST
+        engineCascadedBtn.alpha = if (engineCascadedBtn.isEnabled) 1f else 0.5f
 
         val activeCascadedBg = createRoundedDrawable(0xFF2E2A14.toInt(), 0xFFFBC02D.toInt(), 1, 12f)
         val activeLiveBg = createRoundedDrawable(0xFF1E3A5F.toInt(), 0xFF4285F4.toInt(), 1, 12f)
@@ -460,6 +476,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setTranslationEngine(engine: TranslationEngine) {
+        if (currentMicSource.resolveEngine(engine) != engine) return
         if (currentEngine == engine) return
         currentEngine = engine
         val prefs = getSharedPreferences(prefsName, Context.MODE_PRIVATE)
@@ -990,7 +1007,12 @@ class MainActivity : AppCompatActivity() {
         PocketService.onMicSourceChanged = { source ->
             runOnUiThread {
                 currentMicSource = source
+                currentEngine = PocketService.selectedEngine
+                getSharedPreferences(prefsName, Context.MODE_PRIVATE).edit()
+                    .putString(keyMicSource, source.name).putString(keyTranslationEngine, currentEngine.name).apply()
                 updateMicSourceStyles()
+                updateEngineStyles()
+                updateTtsModeButtonUi()
             }
         }
 
@@ -1235,30 +1257,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun checkPermissions(): Boolean {
-        val recordAudio = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        val postNotif = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-        } else true
-        val btConnect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-        } else true
-        return recordAudio && postNotif && btConnect
-    }
-
-    private fun requestPermissions() {
-        val perms = mutableListOf(Manifest.permission.RECORD_AUDIO)
+    private fun missingPermissions(source: MicSource): List<String> = buildList {
+        add(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            perms.add(Manifest.permission.POST_NOTIFICATIONS)
+            add(Manifest.permission.POST_NOTIFICATIONS)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            perms.add(Manifest.permission.BLUETOOTH_CONNECT)
+            add(Manifest.permission.BLUETOOTH_CONNECT)
+            if (source == MicSource.SOUNDCORE_D3200) add(Manifest.permission.BLUETOOTH_SCAN)
+        } else if (source == MicSource.SOUNDCORE_D3200) {
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) add(Manifest.permission.ACCESS_COARSE_LOCATION)
         }
-        ActivityCompat.requestPermissions(this, perms.toTypedArray(), 101)
+    }.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+
+    private fun checkPermissions(source: MicSource = currentMicSource): Boolean = missingPermissions(source).isEmpty()
+
+    private fun requestPermissions(source: MicSource = currentMicSource, requestCode: Int = 101) {
+        ActivityCompat.requestPermissions(this, missingPermissions(source).toTypedArray(), requestCode)
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 102) {
+            if (checkPermissions(MicSource.SOUNDCORE_D3200)) setMicSource(MicSource.SOUNDCORE_D3200)
+            else Toast.makeText(this, "Для Soundcore Work нужен доступ к Bluetooth и микрофону", Toast.LENGTH_LONG).show()
+            return
+        }
         if (requestCode == 101) {
             if (checkPermissions()) {
                 Toast.makeText(this, "Разрешения предоставлены! Нажмите 'ЗАПУСТИТЬ СУФЛЁР'", Toast.LENGTH_SHORT).show()
@@ -1460,6 +1485,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
         micSelectorBar.addView(micBluetoothBtn)
+        micSoundcoreBtn = TextView(this).apply {
+            text = "📡 Soundcore Work"
+            textSize = 12f
+            setTypeface(null, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener { setMicSource(MicSource.SOUNDCORE_D3200) }
+        }
+        micSelectorBar.addView(micSoundcoreBtn)
         root.addView(micSelectorBar)
 
         updateMicSourceStyles()
