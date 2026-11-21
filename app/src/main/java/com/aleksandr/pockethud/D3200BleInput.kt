@@ -64,7 +64,7 @@ internal class D3200BleInput(
     }
 
     private val session = D3200Session(::enqueue, ::report, { _, ms ->
-        setDeadline(ms) { sessionTimeout() }
+        setDeadline(ms, ::sessionTimeout)
     }, ::decode, ::finish)
 
     fun start() = post {
@@ -252,7 +252,9 @@ internal class D3200BleInput(
         handler.postDelayed(next, ms)
     }
 
-    private fun sessionTimeout() = session.timeout()
+    private fun sessionTimeout() {
+        session.timeout()
+    }
 
     private fun shutdown() {
         if (shuttingDown) return
