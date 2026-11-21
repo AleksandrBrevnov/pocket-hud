@@ -198,6 +198,9 @@ internal class D3200BleInput(
                 frame.payload.size <= 64 -> " payload=" + frame.payload.joinToString("") { hex(it.toInt()) }
                 else -> " payload=unexpected_length"
             }
+        } else if ((frame.type == 0x1a || frame.type == 0x1b) &&
+            frame.id == 0x0e && frame.payload.size == 1) {
+            " resultByte=${hex(frame.payload[0].toInt())}"
         } else ""
         onTrace("rx cmdType=${hex(frame.type)} cmdId=${hex(frame.id)} statusByte=${hex(frame.status)} payloadLength=${frame.payload.size}$payload")
     }

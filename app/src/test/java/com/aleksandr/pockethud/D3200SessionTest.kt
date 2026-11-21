@@ -118,9 +118,29 @@ class D3200SessionTest {
         link.handshake(recording = false)
         link.reply(0x18, 0x82, byteArrayOf(-1))
         assertEquals("0101", link.lastCommand())
-        assertThrows(IllegalStateException::class.java) { link.info(false) }
+        link.info(false)
+        assertFalse(link.closed)
+        link.reply(0x1a, 6, byteArrayOf(42, 0, 0, 0))
+        assertEquals("1a07", link.lastCommand())
+        assertEquals(42, link.sent.last()[13].toInt())
+        val commandCount = link.sent.size
         link.session.stop()
+        assertEquals(commandCount, link.sent.size)
         assertTrue(link.closed)
+    }
+
+    @Test fun missingListsWaitForNewManualRecordingEvent() {
+        val link = Link()
+        link.handshake(recording = true)
+        link.reply(0x1b, 0x0e, byteArrayOf(-1))
+        link.reply(0x1a, 0x0e, byteArrayOf(0))
+        assertFalse(link.closed)
+        link.reply(0x18, 0x82, byteArrayOf(0))
+        assertFalse(link.closed)
+        link.reply(0x1a, 6, byteArrayOf(51, 0, 0, 0))
+        assertEquals("1a07", link.lastCommand())
+        assertEquals(51, link.sent.last()[13].toInt())
+        assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() == "1882" })
     }
 
     @Test fun nonstandardEmptyAckRequiresDeviceInfoBeforeStreaming() {

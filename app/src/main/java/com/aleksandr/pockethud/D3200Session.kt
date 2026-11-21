@@ -15,7 +15,7 @@ internal class D3200Session(
     private val close: () -> Unit,
     private val trace: (String) -> Unit = {}
 ) {
-    private enum class Phase { NEW, HANDSHAKE, INFO, START, FILE_EVENT, VERIFY_START, LIST, LEGACY_LIST, HEAD, AUDIO, STOP, CLOSED }
+    private enum class Phase { NEW, HANDSHAKE, INFO, START, FILE_EVENT, VERIFY_START, LIST, LEGACY_LIST, MANUAL_START, HEAD, AUDIO, STOP, CLOSED }
 
     private var phase = Phase.NEW
     private var keyPair: KeyPair? = null
@@ -59,7 +59,7 @@ internal class D3200Session(
                         notifiedFileId = id
                         if (!stopRequested && sawUnconfirmedRecording) probeStart("file_event_without_confirmed_ack")
                     }
-                    Phase.FILE_EVENT -> {
+                    Phase.FILE_EVENT, Phase.LIST, Phase.LEGACY_LIST, Phase.MANUAL_START -> {
                         notifiedFileId = id
                         startLive(id)
                     }
@@ -76,7 +76,7 @@ internal class D3200Session(
             }
             0x1a0e -> if (phase == Phase.LEGACY_LIST) {
                 val id = if (frame.isRejected) null else D3200Protocol.liveFileId(payload, legacy = true)
-                startLive(checkNotNull(id) { "Номер активной записи D3200 недоступен" })
+                if (id != null) startLive(id) else awaitManualStart(alreadyRecording = true)
             }
             0x1a07 -> if (phase == Phase.HEAD) {
                 trace("realtime result=${if (frame.isRejected) "rejected" else "response"} status=${frame.status}")
@@ -123,10 +123,12 @@ internal class D3200Session(
         trace("recording_info state=$state phase=$phase")
         if (phase == Phase.VERIFY_START) {
             if (state != 1) startedByPocketHud = false
-            check(state == 1) {
-                if (startProbeReason == "explicit_refusal") "D3200 ответил FF и не начал запись"
-                else "Запуск записи D3200 не подтверждён (состояние $state)"
+            if (state == 0) {
+                trace("remote_start_not_confirmed reason=$startProbeReason")
+                awaitManualStart(alreadyRecording = false)
+                return
             }
+            check(state == 1) { "Запуск записи D3200 не подтверждён (состояние $state)" }
             if (notifiedFileId == null) startedByPocketHud = false
             followActiveRecording()
             return
@@ -198,6 +200,18 @@ internal class D3200Session(
         request(Phase.VERIFY_START, Command.INFO.frame())
     }
 
+    private fun awaitManualStart(alreadyRecording: Boolean) {
+        startedByPocketHud = false
+        notifiedFileId = null
+        val instruction = if (alreadyRecording) {
+            "ID текущей записи недоступен. Останови её и начни новую кнопкой D3200"
+        } else {
+            "Автозапуск не подтверждён. Начни запись кнопкой D3200"
+        }
+        arm(Phase.MANUAL_START, 90_000)
+        status(instruction)
+    }
+
     private fun followActiveRecording() {
         if (stopRequested) {
             stop()
@@ -228,6 +242,11 @@ internal class D3200Session(
     fun timeout() {
         when (phase) {
             Phase.LIST -> request(Phase.LEGACY_LIST, Command.LEGACY_LIST.frame())
+            Phase.LEGACY_LIST -> awaitManualStart(alreadyRecording = true)
+            Phase.MANUAL_START -> {
+                status("За 90 секунд D3200 не сообщил ID новой записи")
+                finish()
+            }
             Phase.START, Phase.FILE_EVENT -> {
                 if (stopRequested) finish()
                 else probeStart("confirmation_timeout")
