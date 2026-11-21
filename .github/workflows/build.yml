@@ -2,7 +2,7 @@ name: Build PocketHUD APK
 
 on:
   push:
-    branches: [ "main", "master", "asr-test/**" ]
+    branches: [ "main", "master", "asr-test/**", "feature/soundcore-d3200-ble-input" ]
     tags: [ "v*" ]
   workflow_dispatch:
 
@@ -58,7 +58,7 @@ jobs:
         with:
           name: PocketHUD-test-results
           path: app/build/test-results/testDebugUnitTest/*.xml
-          if-no-files-found: warn
+          if-no-files-found: error
           overwrite: true
 
       - name: Create Release and Upload APK

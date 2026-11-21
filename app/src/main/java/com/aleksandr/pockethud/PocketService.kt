@@ -56,7 +56,11 @@ import java.util.concurrent.atomic.AtomicLong
 
 enum class MicSource {
     SMARTPHONE, // 📱 Встроенный микрофон смартфона (AudioSource.VOICE_RECOGNITION, Hardware AGC)
-    BLUETOOTH   // 🎧 Микрофон гарнитуры (VOICE_COMMUNICATION, Bluetooth SCO)
+    BLUETOOTH,  // 🎧 Микрофон гарнитуры (VOICE_COMMUNICATION, Bluetooth SCO)
+    SOUNDCORE_D3200;
+
+    fun resolveEngine(requested: TranslationEngine): TranslationEngine =
+        if (this == SOUNDCORE_D3200) TranslationEngine.LIVE_WEBSOCKET else requested
 }
 
 enum class TranslationEngine {
@@ -258,7 +262,16 @@ class PocketService : Service() {
     private var playbackThread: Thread? = null
 
     // Очереди: захват микрофона и воспроизведение аудио
-    private val audioSendQueue = LinkedBlockingQueue<ByteArray>(60)
+    private data class LiveInputChunk(val source: MicSource, val pcm: ByteArray)
+
+    private val audioSendQueue = LinkedBlockingQueue<LiveInputChunk>(60)
+    private var foregroundSource = MicSource.SMARTPHONE
+    @Volatile private var d3200Epoch = 0
+    private var d3200Attempt = -1
+    private var d3200Input: D3200BleInput? = null
+    private val d3200PcmSent = AtomicLong(0L)
+    private val d3200PcmDropped = AtomicLong(0L)
+    @Volatile private var d3200Status = ""
     private val audioPlaybackQueue = LinkedBlockingQueue<ByteArray>()
 
     // Телеметрия и сводка диагностики (Volatile для потокобезопасности между потоками mic, send, okhttp и UI)
@@ -374,8 +387,10 @@ class PocketService : Service() {
         var selectedEngine: TranslationEngine = TranslationEngine.CASCADED_REST
             set(value) {
                 if (field == value) return
-                field = value
-                currentInstance?.applyEngineChange(value)
+                val allowed = selectedMicSource.resolveEngine(value)
+                if (field == allowed) return
+                field = allowed
+                currentInstance?.applyEngineChange(allowed)
             }
 
         @Volatile
@@ -396,7 +411,9 @@ class PocketService : Service() {
         var selectedMicSource: MicSource = MicSource.SMARTPHONE
             set(value) {
                 if (field == value) return
+                if (field == value) return
                 field = value
+                selectedEngine = value.resolveEngine(selectedEngine)
                 currentInstance?.applyMicSourceChange(value)
             }
 
@@ -555,6 +572,11 @@ class PocketService : Service() {
             return File(dir, "pocket_hud_session.log")
         }
 
+        fun getD3200LogFile(context: Context): File {
+            val dir = context.getExternalFilesDir(null) ?: context.filesDir
+            return File(dir, "pockethud-soundcore.log")
+        }
+
         fun getDiagnosticSummary(): String {
             val inst = currentInstance
             if (inst != null) {
@@ -615,7 +637,7 @@ class PocketService : Service() {
                     triggerWearHapticFeedback()
                     logEvent("WEAR_ACTION_SWITCH_ENGINE", "(nextEngine=$nextEngine)")
                     selectedEngine = nextEngine
-                    onEngineChanged?.invoke(nextEngine)
+                    onEngineChanged?.invoke(selectedEngine)
                     return START_STICKY
                 }
                 ACTION_SWITCH_TTS_MODE -> {
@@ -715,16 +737,7 @@ class PocketService : Service() {
 
         val notification = buildNotification("Карманный суфлёр активен (экран можно выключить)")
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceCompat.startForeground(
-                    this,
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, notification)
-            }
+            promoteForMicSource(notification, selectedMicSource)
         } catch (e: Exception) {
             Log.e(tag, "Ошибка запуска startForeground (Android 14 FGS restriction): ${e.message}", e)
             logEvent("START_FOREGROUND_EXCEPTION", "${e.message}")
@@ -751,7 +764,8 @@ class PocketService : Service() {
         isServiceActive = true
 
         // Only Live archives its existing PCM stream; no independent microphone recorder.
-        logEvent("AUDIO_ARCHIVE_POLICY", "live=shared_pcm_wav, cascaded=not_recorded")
+        foregroundSource = selectedMicSource
+        logEvent("AUDIO_ARCHIVE_POLICY", "live=shared_pcm_wav, cascaded=not_recorded, soundcore=device_recording")
 
         if (selectedEngine == TranslationEngine.CASCADED_REST) {
             // Немедленно выводим карточку субтитров для часов Xiaomi Watch 2 (Wear OS 5)
@@ -843,96 +857,116 @@ class PocketService : Service() {
         }
     }
 
-    private val micSwitchLock = Any()
+    private fun promoteForMicSource(notification: Notification, source: MicSource) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                if (source == MicSource.SOUNDCORE_D3200) ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE else 0
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, type)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
 
     fun applyMicSourceChange(newSource: MicSource) {
-        logEvent("MIC_SOURCE_CHANGE_REQUESTED", "newSource=$newSource")
-        if (selectedMicSource != newSource) {
-            selectedMicSource = newSource
-            return
-        }
         if (!isRunning) return
-
-        if (selectedEngine == TranslationEngine.CASCADED_REST) {
-            setupAudioRouting()
-            restartSpeechRecognizer()
-            mainHandler.post {
-                val modeStr = if (isAudioMuted) "Карманный суфлёр (🔇 Режим только субтитров)" else "Карманный суфлёр (🔊 Звук в наушник)"
-                val updatedFg = buildNotification(modeStr)
-                val nm = getSystemService(NotificationManager::class.java)
-                nm?.notify(NOTIFICATION_ID, updatedFg)
-                if (lastPostedSubtitleText.isNotBlank()) {
-                    updateOngoingNotification(lastPostedSubtitleText, lastPostedSubtitleHistory)
-                }
-            }
-            return
-        }
-
         mainHandler.post {
-            if (!isRunning || selectedEngine != TranslationEngine.LIVE_WEBSOCKET || selectedMicSource != newSource) return@post
-            if (audioRecord == null) {
-                setupAudioRouting()
-                logEvent("MIC_SOURCE_PENDING", "source=$newSource, waiting_for_setup=true")
+            if (!isRunning || selectedMicSource != newSource || foregroundSource == newSource) return@post
+            val previous = foregroundSource
+            try {
+                promoteForMicSource(buildNotification("Карманный суфлёр активен"), newSource)
+            } catch (error: SecurityException) {
+                logEvent("MIC_FGS_PERMISSION", error.javaClass.simpleName)
+                selectedMicSource = previous
+                onMicSourceChanged?.invoke(previous)
+                notifyStatusChanged("Проверь разрешения микрофона и Bluetooth")
                 return@post
             }
-            synchronized(micSwitchLock) {
-                try {
-                    recordThread?.interrupt()
-                    audioRecord?.stop()
-                    recordThread?.join(500)
-                } catch (e: Exception) {
-                    Log.w(tag, "Ошибка ожидания завершения recordThread: ${e.message}")
-                }
-                recordThread = null
-
-                releaseHardwareEffects()
-                try {
-                    audioRecord?.release()
-                } catch (e: Exception) {
-                    Log.w(tag, "Ошибка освобождения AudioRecord: ${e.message}")
-                }
-                audioRecord = null
+            foregroundSource = newSource
+            logEvent("MIC_SOURCE_CHANGE", "from=$previous to=$newSource")
+            setupAudioRouting()
+            if (selectedEngine == TranslationEngine.CASCADED_REST) {
+                restartSpeechRecognizer()
+            } else {
+                stopD3200()
+                stopAndroidCapture()
                 audioSendQueue.clear()
-
-                setupAudioRouting()
-
-                val sampleRate = 16000
-                val minBufferSize = AudioRecord.getMinBufferSize(
-                    sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT
-                )
-                val bufferSize = maxOf(minBufferSize * 4, sampleRate * 2 * 2)
-                val (record, sourceName) = createAudioRecord(sampleRate, bufferSize)
-                if (record != null && record.state == AudioRecord.STATE_INITIALIZED) {
-                    audioRecord = record
-                    activeAudioSource = sourceName
-                    try {
-                        record.startRecording()
-                        logEvent("MIC_SOURCE_RESTARTED", "source=$activeAudioSource")
-                        if (isRunning) {
-                            startRecordThread()
-                        }
-                        mainHandler.post {
-                            val modeStr = if (isAudioMuted) "Карманный суфлёр (🔇 Режим только субтитров)" else "Карманный суфлёр (🔊 Звук в наушник)"
-                            val updatedFg = buildNotification(modeStr)
-                            val nm = getSystemService(NotificationManager::class.java)
-                            nm?.notify(NOTIFICATION_ID, updatedFg)
-                            if (lastPostedSubtitleText.isNotBlank()) {
-                                updateOngoingNotification(lastPostedSubtitleText, lastPostedSubtitleHistory)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        logEvent("MIC_SOURCE_START_FAILED", "${e.message}")
-                    }
-                } else {
-                    val err = "🔴 Ошибка переключения микрофона ($newSource)"
-                    lastError = err
-                    notifyStatusChanged(err)
-                    logEvent("MIC_SOURCE_INIT_FAILED")
+                if (newSource == MicSource.SOUNDCORE_D3200) stopLiveArchive()
+                val usage = if (newSource == MicSource.BLUETOOTH) AudioAttributes.USAGE_VOICE_COMMUNICATION
+                    else AudioAttributes.USAGE_MEDIA
+                if (audioTrack?.audioAttributes?.usage != usage) {
+                    stopLiveOutput()
+                    initAudioOutput()
                 }
+                if (isSetupComplete) startRecording()
+            }
+            if (lastPostedSubtitleText.isNotBlank()) {
+                updateOngoingNotification(lastPostedSubtitleText, lastPostedSubtitleHistory)
             }
         }
+    }
+
+    @Synchronized
+    private fun logD3200(event: String) {
+        try {
+            val time = logDateFormat.format(Date())
+            getD3200LogFile(this).appendText("[$time] $event\n", Charsets.UTF_8)
+        } catch (error: java.io.IOException) {
+            Log.w(tag, "Не удалось записать диагностику D3200", error)
+        }
+    }
+
+    private fun startD3200() {
+        if (d3200Input != null || d3200Attempt == d3200Epoch) return
+        val epoch = d3200Epoch
+        d3200Attempt = epoch
+        d3200PcmSent.set(0)
+        d3200PcmDropped.set(0)
+        logD3200("--- START PocketHUD 1.0.58-d3200 ---")
+        activeAudioSource = "Soundcore Work BLE"
+        d3200Input = D3200BleInput(applicationContext, { status ->
+            if (d3200Epoch == epoch && isRunning) {
+                d3200Status = status
+                notifyStatusChanged("📡 Soundcore Work · $status")
+            }
+        }, { bytes ->
+            d3200Epoch == epoch && offerLivePcm(MicSource.SOUNDCORE_D3200, bytes)
+        }, {
+            mainHandler.post {
+                d3200Input = null
+                logD3200("closed pcmSentToGemini=${d3200PcmSent.get()} queueDrops=${d3200PcmDropped.get()}")
+                if (d3200Epoch != epoch && selectedMicSource == MicSource.SOUNDCORE_D3200) startRecording()
+            }
+        }, ::logD3200).also { it.start() }
+    }
+
+    private fun stopD3200() {
+        d3200Epoch++
+        d3200Input?.stop()
+    }
+
+    private fun stopAndroidCapture() {
+        val thread = recordThread
+        val capture = audioRecord
+        recordThread = null
+        audioRecord = null
+        thread?.interrupt()
+        runCatching { capture?.stop() }.onFailure { Log.w(tag, "Ошибка остановки AudioRecord", it) }
+        try {
+            thread?.join(500)
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        releaseHardwareEffects()
+        runCatching { capture?.release() }.onFailure { Log.w(tag, "Ошибка освобождения AudioRecord", it) }
+    }
+
+    private fun stopLiveOutput() {
+        playbackThread?.interrupt()
+        playbackThread = null
+        val track = audioTrack
+        audioTrack = null
+        runCatching { track?.stop() }.onFailure { Log.w(tag, "Ошибка остановки AudioTrack", it) }
+        runCatching { track?.release() }.onFailure { Log.w(tag, "Ошибка освобождения AudioTrack", it) }
     }
 
     private fun triggerFailureHaptic() {
@@ -1429,7 +1463,7 @@ class PocketService : Service() {
                 }
                 audioManager.mode = AudioManager.MODE_NORMAL
                 audioManager.isSpeakerphoneOn = false
-                logEvent("AUDIO_ROUTING_SETUP", "SMARTPHONE_MIC (MODE_NORMAL)")
+                logEvent("AUDIO_ROUTING_SETUP", "$selectedMicSource (MODE_NORMAL)")
             }
         } catch (e: Exception) {
             Log.w(tag, "Предупреждение при настройке аудиомаршрутизации: ${e.message}")
@@ -1619,7 +1653,11 @@ class PocketService : Service() {
             .addAction(actions.stopAction)
 
         // 1. Обновляем статус постоянного сервиса
-        val micStatus = if (selectedMicSource == MicSource.SMARTPHONE) "📱 Смартфон" else "🎧 Гарнитура"
+        val micStatus = when (selectedMicSource) {
+            MicSource.SMARTPHONE -> "📱 Смартфон"
+            MicSource.BLUETOOTH -> "🎧 Гарнитура"
+            MicSource.SOUNDCORE_D3200 -> "📡 Soundcore Work"
+        }
         val fgTitle = if (isAudioMuted) "PocketHUD — MUTE" else "PocketHUD — Перевод ($micStatus)"
         val fgNotification = NotificationCompat.Builder(this, CHANNEL_SERVICE_ID)
             .setContentTitle(fgTitle)
@@ -1684,7 +1722,8 @@ class PocketService : Service() {
             appendLine("Статус сокета: $connectionState")
             appendLine("Сессионная ротация (Resumption): отключена (нативный Live Translate)")
             appendLine("Модель: models/gemini-3.5-live-translate-preview")
-            appendLine("Режим микрофона: $selectedMicSource (${if (selectedMicSource == MicSource.SMARTPHONE) "Встроенный + Hardware DSP" else "Гарнитура / Bluetooth SCO"})")
+            appendLine("Режим микрофона: $selectedMicSource")
+            if (d3200Status.isNotEmpty()) appendLine("Soundcore Work: $d3200Status")
             appendLine("Hardware DSP: AGC=${hwAgc?.enabled ?: false}, NS=${hwNs?.enabled ?: false}")
             appendLine("Режим звука: ${if (isAudioMuted) "🔇 ВЫКЛЮЧЕН (Только субтитры)" else "🔊 ВКЛЮЧЕН (Голос в наушник)"}")
             appendLine("Источник микрофона: $activeAudioSource (16 кГц Mono PCM16)")
@@ -1747,7 +1786,7 @@ class PocketService : Service() {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
-            if (selectedMicSource == MicSource.SMARTPHONE && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (selectedMicSource != MicSource.BLUETOOTH) {
                 try {
                     val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
                     val outDevices = audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
@@ -1777,7 +1816,7 @@ class PocketService : Service() {
 
         playbackThread = Thread {
             isPlaybackSpeedBoosted = false
-            while (isRunning) {
+            while (isRunning && !Thread.currentThread().isInterrupted) {
                 try {
                     val chunk = audioPlaybackQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
                     val remainingBytes = queuedPlaybackBytes.addAndGet(-chunk.size.toLong()).coerceAtLeast(0L)
@@ -2164,9 +2203,7 @@ class PocketService : Service() {
                     "🟢 Слушаю речь вокруг...",
                     "PocketHUD готов к переводу. Слушаю итальянскую и английскую речь..."
                 )
-                if (audioRecord == null || audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                    startRecording()
-                }
+                startRecording()
                 return
             }
 
@@ -2503,6 +2540,7 @@ class PocketService : Service() {
 
     private fun startRecordThread() {
         val capture = audioRecord ?: return
+        val mic = selectedMicSource
         recordThread = Thread {
             // Чанк 100 мс при 16 кГц Mono 16-бит = 1600 сэмплов (Shorts) = 3200 байт
             val shortBuffer = ShortArray(1600)
@@ -2527,12 +2565,7 @@ class PocketService : Service() {
                         val byteBuffer = LiveTranslateReference.encodePcm(shortBuffer, read)
                         liveArchive?.offer(byteBuffer)
 
-                        // Неблокирующее помещение в очередь отправки.
-                        // Если очередь переполнена (задержка сети), вытесняем старейший чанк для сохранения реал-тайма.
-                        if (!audioSendQueue.offer(byteBuffer)) {
-                            audioSendQueue.poll()
-                            audioSendQueue.offer(byteBuffer)
-                        }
+                        offerLivePcm(mic, byteBuffer)
                     } else {
                         if (read < 0) {
                             audioReadErrors++
@@ -2563,7 +2596,30 @@ class PocketService : Service() {
         recordThread?.start()
     }
 
+    @Synchronized
+    private fun offerLivePcm(mic: MicSource, pcm: ByteArray): Boolean {
+        if (!isRunning || selectedMicSource != mic || selectedEngine != TranslationEngine.LIVE_WEBSOCKET) return false
+        val chunk = LiveInputChunk(mic, pcm)
+        if (audioSendQueue.offer(chunk)) return true
+        if (audioSendQueue.poll()?.source == MicSource.SOUNDCORE_D3200) {
+            val count = d3200PcmDropped.incrementAndGet()
+            if (count == 1L || count % 250L == 0L) logD3200("queue_overflow dropped=$count")
+        }
+        return audioSendQueue.offer(chunk)
+    }
+
     private fun startRecording() {
+        if (!isRunning || !isSetupComplete || selectedEngine != TranslationEngine.LIVE_WEBSOCKET ||
+            selectedMicSource != foregroundSource) return
+        if (selectedMicSource == MicSource.SOUNDCORE_D3200) {
+            startD3200()
+        } else if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            if (!startAndroidInput()) return
+        }
+        if (sendThread == null) startAudioSender()
+    }
+
+    private fun startAndroidInput(): Boolean {
         startLiveArchive()
         val sampleRate = 16000
         val minBufferSize = AudioRecord.getMinBufferSize(
@@ -2582,7 +2638,7 @@ class PocketService : Service() {
             logEvent("MIC_INIT_FAILED")
             notifyStatusChanged(err)
             stopSelf()
-            return
+            return false
         }
 
         audioRecord = record
@@ -2597,18 +2653,20 @@ class PocketService : Service() {
             logEvent("MIC_START_ERROR", "${e.message}")
             notifyStatusChanged(err)
             stopSelf()
-            return
+            return false
         }
 
         // Поток 1: Неблокирующий захват PCM звука с микрофона в audioSendQueue
         startRecordThread()
+        return true
+    }
 
-        // Поток 2: Отдельный независимый поток отправки аудиочанков в WebSocket
+    private fun startAudioSender() {
         sendThread = Thread {
             var lastTelemetryEmit = 0L
             var lastLogStreamEmit = 0L
 
-            while (isRunning) {
+            while (isRunning && !Thread.currentThread().isInterrupted) {
                 try {
                     // Защита: не отправляем аудио в сокет, пока сервер не прислал setupComplete.
                     // Удерживаем чанки в audioSendQueue до подтверждения готовности сессии.
@@ -2623,8 +2681,10 @@ class PocketService : Service() {
 
                     val chunk = audioSendQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
 
+                    if (chunk.source != selectedMicSource) continue
+
                     liveSocketGate.send { ws ->
-                        val base64Data = Base64.encodeToString(chunk, Base64.NO_WRAP)
+                        val base64Data = Base64.encodeToString(chunk.pcm, Base64.NO_WRAP)
                         val chunkJson = JSONObject().apply {
                             put("realtimeInput", JSONObject().apply {
                                 put("audio", JSONObject().apply {
@@ -2636,7 +2696,11 @@ class PocketService : Service() {
                         val accepted = ws.send(chunkJson.toString())
                         if (accepted) {
                             chunksSent++
-                            bytesSent += chunk.size
+                            bytesSent += chunk.pcm.size
+                            if (chunk.source == MicSource.SOUNDCORE_D3200) {
+                                val count = d3200PcmSent.incrementAndGet()
+                                if (count == 1L || count % 250L == 0L) logD3200("pcm_sent_to_gemini count=$count")
+                            }
                         } else {
                             isSetupComplete = false
                             mainHandler.post {
@@ -2703,31 +2767,13 @@ class PocketService : Service() {
                 isSetupComplete = false
                 isRotationPending = false
 
-                try {
-                    recordThread?.interrupt()
-                    audioRecord?.stop()
-                    recordThread?.join(1000)
-                } catch (e: Exception) {}
-                recordThread = null
-
-                try {
-                    sendThread?.interrupt()
-                } catch (e: Exception) {}
+                stopD3200()
+                stopAndroidCapture()
+                sendThread?.interrupt()
                 sendThread = null
-
-                releaseHardwareEffects()
-                try {
-                    audioRecord?.release()
-                } catch (e: Exception) {}
-                audioRecord = null
                 stopLiveArchive()
                 audioSendQueue.clear()
-
-                try {
-                    audioTrack?.stop()
-                    audioTrack?.release()
-                } catch (e: Exception) {}
-                audioTrack = null
+                stopLiveOutput()
 
                 // Start Cascaded REST components
                 setupAudioRouting()
@@ -3739,6 +3785,7 @@ class PocketService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        stopD3200()
         isServiceActive = false
         isSetupComplete = false
         liveSocketGate.begin()
@@ -3807,22 +3854,9 @@ class PocketService : Service() {
         sendThread?.interrupt()
         sendThread = null
 
-        recordThread?.interrupt()
-
-        try {
-            audioRecord?.stop()
-            recordThread?.join(1000)
-            audioRecord?.release()
-            audioRecord = null
-        } catch (e: Exception) {}
-        recordThread = null
+        stopAndroidCapture()
         stopLiveArchive()
-
-        try {
-            audioTrack?.stop()
-            audioTrack?.release()
-            audioTrack = null
-        } catch (e: Exception) {}
+        stopLiveOutput()
 
         webSocket?.close(1000, "Service stopped")
         webSocket = null
