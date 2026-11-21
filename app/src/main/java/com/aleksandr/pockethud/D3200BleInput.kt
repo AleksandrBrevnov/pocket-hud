@@ -55,7 +55,7 @@ internal class D3200BleInput(
         override fun run() {
             safely {
                 decoder?.drain()
-                if (decoded == 0L && SystemClock.elapsedRealtime() >= awaitingPcmUntil) {
+                if (SystemClock.elapsedRealtime() >= awaitingPcmUntil) {
                     error("MediaCodec не выдаёт PCM")
                 }
                 handler.postDelayed(this, 20)
@@ -68,8 +68,10 @@ internal class D3200BleInput(
     }, ::decode, ::finish)
 
     fun start() = post {
-        val adapter = context.getSystemService(BluetoothManager::class.java)?.adapter
-        check(adapter?.isEnabled == true) { "Включи Bluetooth для Soundcore Work" }
+        val adapter = checkNotNull(context.getSystemService(BluetoothManager::class.java)?.adapter) {
+            "На телефоне нет Bluetooth-адаптера"
+        }
+        check(adapter.isEnabled) { "Включи Bluetooth для Soundcore Work" }
         val le = checkNotNull(adapter.bluetoothLeScanner) { "Сканирование BLE недоступно" }
         scanner = le
         report("Поиск Soundcore Work")
@@ -79,7 +81,7 @@ internal class D3200BleInput(
 
     fun stop() = post { shutdown() }
 
-    private val scanCallback = object : ScanCallback() {
+    private val scanCallback: ScanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = post {
             if (scanner == null) return@post
             val record = result.scanRecord ?: return@post
@@ -98,7 +100,7 @@ internal class D3200BleInput(
         }
     }
 
-    private val gattCallback = object : BluetoothGattCallback() {
+    private val gattCallback: BluetoothGattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(link: BluetoothGatt, status: Int, newState: Int) = post {
             if (link !== gatt) return@post
             if (status != BluetoothGatt.GATT_SUCCESS || newState == BluetoothProfile.STATE_DISCONNECTED) {
@@ -223,6 +225,7 @@ internal class D3200BleInput(
             decoded++
             if (onPcm(pcm)) queued++
             val now = SystemClock.elapsedRealtime()
+            awaitingPcmUntil = now + 6000
             if (now >= nextTelemetry) {
                 nextTelemetry = now + 5000
                 report("PCM16LE 16 кГц mono · Opus=$received, PCM=$decoded, в очереди=$queued")

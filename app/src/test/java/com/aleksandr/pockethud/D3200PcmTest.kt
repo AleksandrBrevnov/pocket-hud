@@ -12,6 +12,8 @@ class D3200PcmTest {
         val packet = byteArrayOf(0xbc.toByte(), 42, 0, 99)
         packet.copyInto(slice)
         assertArrayEquals(packet, D3200Pcm.opusPacket(slice))
+        assertArrayEquals(byteArrayOf(0xbc.toByte()),
+            D3200Pcm.opusPacket(ByteArray(160).apply { this[0] = 0xbc.toByte() }))
         assertThrows(IllegalArgumentException::class.java) { D3200Pcm.opusPacket(ByteArray(160)) }
     }
 

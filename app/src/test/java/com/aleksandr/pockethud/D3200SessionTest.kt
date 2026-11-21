@@ -69,10 +69,31 @@ class D3200SessionTest {
         assertEquals(0, link.sent.last()[9].toInt())
     }
 
+    @Test fun decryptsLiveAudioAndSuppressesRepeatedSlices() {
+        val link = Link()
+        link.handshake(recording = false)
+        link.reply(0x18, 0x82)
+        link.reply(0x1a, 6, byteArrayOf(42, 0, 0, 0))
+        val fileKey = ByteArray(32) { (it + 1).toByte() }
+        val nonce = ByteArray(16) { (it + 3).toByte() }
+        val sessionNonce = ByteArray(16) { (it + 5).toByte() }
+        val wrapped = D3200Crypto.ctr(link.sessionKey, sessionNonce, "soundcored3200".toByteArray() + fileKey)
+        val head = byteArrayOf(42, 0, 0, 0, -1, -1, -1, -1) + nonce + wrapped + sessionNonce + byteArrayOf(0)
+        link.reply(0x1a, 7, head)
+        val opus = byteArrayOf(0xbc.toByte(), 12, 34).copyOf(160)
+        val encrypted = D3200Crypto.ctr(fileKey, D3200Crypto.counter(nonce, 5), opus)
+        val slice = byteArrayOf(5, 0, 0, 0, 1) + encrypted + byteArrayOf(0)
+        link.reply(0x1a, 8, slice + slice)
+        assertEquals(1, link.opus.size)
+        assertArrayEquals(opus, link.opus.single())
+    }
+
     private class Link {
         val sent = mutableListOf<ByteArray>()
+        val opus = mutableListOf<ByteArray>()
+        lateinit var sessionKey: ByteArray
         var closed = false
-        val session = D3200Session({ sent.add(it) }, {}, { _, _ -> }, {}, { closed = true })
+        val session = D3200Session({ sent.add(it) }, {}, { _, _ -> }, { opus.add(it) }, { closed = true })
 
         fun lastCommand() = sent.last().copyOfRange(5, 7).hex()
 
@@ -84,7 +105,10 @@ class D3200SessionTest {
             session.begin()
             val local = sent.last().copyOfRange(9, 74)
             val peer = D3200Crypto.generate()
-            reply(0x2e, 1, D3200Crypto.encode(peer.public as ECPublicKey) + D3200Crypto.shared(peer, local))
+            val shared = D3200Crypto.shared(peer, local)
+            val context = byteArrayOf(1, 2, 3)
+            sessionKey = D3200Crypto.hkdf(shared, context, context)
+            reply(0x2e, 1, D3200Crypto.encode(peer.public as ECPublicKey) + shared)
             if (recording != null) {
                 val info = ByteArray(51)
                 "03.56".toByteArray().copyInto(info, 3)

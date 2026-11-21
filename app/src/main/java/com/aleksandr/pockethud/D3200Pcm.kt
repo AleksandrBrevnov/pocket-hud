@@ -63,7 +63,7 @@ internal class D3200Pcm(private val sampleRate: Int, channelCount: Int, pcm16: B
             require(slice.size == 160)
             // Both protocol references describe fixed transport slots with trailing zero padding.
             val last = slice.indexOfLast { it != 0.toByte() }
-            require(last >= 1) { "Пустой пакет Opus D3200" }
+            require(last >= 0) { "Пустой пакет Opus D3200" }
             return slice.copyOf(last + 1)
         }
     }
