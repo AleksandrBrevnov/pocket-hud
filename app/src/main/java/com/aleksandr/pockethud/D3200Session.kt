@@ -451,7 +451,14 @@ internal class D3200Session(
         fileOpusCount = 0L
         status(if (realtimeMode) "Запрос realtime, file ID=$fileId" else "Запрос готового файла по BLE, file ID=$fileId")
         trace("file_transfer_request fileId=$fileId realtimeFlag=$realtimeFlag offset=0")
-        request(Phase.HEAD, Command.LIVE.frame(fileId = fileId, realtimeFlag = realtimeFlag))
+        val headerRequest = if (realtimeMode) {
+            Command.LIVE.frame(fileId = fileId, realtimeFlag = 1)
+        } else {
+            // The official Soundcore App 5.0.39 capture on firmware 03.56
+            // uses the legacy 8-byte offset+fileId request for completed files.
+            Command.FILE_PULL.frame(fileId = fileId)
+        }
+        request(Phase.HEAD, headerRequest)
     }
 
     private fun request(next: Phase, request: ByteArray, ms: Long = 6000) {
