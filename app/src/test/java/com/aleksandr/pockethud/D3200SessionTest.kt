@@ -73,7 +73,9 @@ class D3200SessionTest {
         link.reply(0x18, 0x82, byteArrayOf(0))
 
         assertFalse(link.closed)
-        assertEquals("1a07", link.lastCommand())
+        assertEquals("1a07", link.lastCommand()) // Still the rejected realtime request
+        assertEquals(1, link.sent.last()[17].toInt())
+        link.postStopLists()
         assertEquals("completed-file request must use realtimeFlag=0", 0, link.sent.last()[17].toInt())
         assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in listOf("0b87", "0b8b", "0b8c") })
     }
@@ -85,6 +87,7 @@ class D3200SessionTest {
         link.reply(0x1a, 6, byteArrayOf(42, 0, 0, 0))
         link.reply(0x1a, 7, byteArrayOf(-1))
         link.reply(0x18, 0x82, byteArrayOf(0))
+        link.postStopLists()
 
         val fileKey = ByteArray(32) { (it + 1).toByte() }
         val nonce = ByteArray(16) { (it + 3).toByte() }
@@ -97,6 +100,50 @@ class D3200SessionTest {
         assertArrayEquals(opus, link.opus.single())
         assertTrue(link.closed)
         assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in listOf("0b87", "0b8b", "0b8c") })
+    }
+
+    @Test fun completedFileRefusalRetriesOnceAfterASecondPause() {
+        val link = Link()
+        link.handshake(recording = false)
+        link.reply(0x18, 0x82)
+        link.reply(0x1a, 6, byteArrayOf(42, 0, 0, 0))
+        link.reply(0x1a, 7, byteArrayOf(-1))
+        link.reply(0x18, 0x82, byteArrayOf(0))
+        link.postStopLists()
+        val count = link.sent.size
+
+        link.reply(0x1a, 7, byteArrayOf(-1))
+        assertFalse(link.closed)
+        assertEquals(count, link.sent.size)
+        link.session.timeout()
+        assertEquals(count + 1, link.sent.size)
+        assertEquals("1a07", link.lastCommand())
+        assertEquals(0, link.sent.last()[17].toInt())
+
+        val error = assertThrows(IllegalStateException::class.java) {
+            link.reply(0x1a, 7, byteArrayOf(-1))
+        }
+        assertTrue(error.message.orEmpty().contains("offlineAttempts=2"))
+        assertEquals(count + 1, link.sent.size)
+        link.session.stop()
+        assertTrue(link.closed)
+    }
+
+    @Test fun postStopListTimeoutsStillReachReadOnlyFileProbe() {
+        val link = Link()
+        link.handshake(recording = false)
+        link.reply(0x18, 0x82)
+        link.reply(0x1a, 6, byteArrayOf(42, 0, 0, 0))
+        link.reply(0x1a, 7, byteArrayOf(-1))
+        link.reply(0x18, 0x82, byteArrayOf(0))
+        link.session.timeout()
+        assertEquals("1b0e", link.lastCommand())
+        link.session.timeout()
+        assertEquals("1a0e", link.lastCommand())
+        link.session.timeout()
+        assertEquals("1a07", link.lastCommand())
+        assertEquals(0, link.sent.last()[17].toInt())
+        assertFalse(link.closed)
     }
 
     @Test fun decryptsLiveAudioAndSuppressesRepeatedSlices() {
@@ -279,6 +326,17 @@ class D3200SessionTest {
         val session = D3200Session({ sent.add(it) }, {}, { _, _ -> }, { opus.add(it) }, { closeCount++ })
 
         fun lastCommand() = sent.last().copyOfRange(5, 7).hex()
+
+        fun postStopLists() {
+            // WAIT_FILE_FLUSH: the device may still be committing the file.
+            session.timeout()
+            assertEquals("1b0e", lastCommand())
+            reply(0x1b, 0x0e, byteArrayOf(-1))
+            assertEquals("1a0e", lastCommand())
+            reply(0x1a, 0x0e, byteArrayOf(-1))
+            assertEquals("1a07", lastCommand())
+            assertEquals(0, sent.last()[17].toInt())
+        }
 
         fun rotation(fileId: Int): ByteArray = byteArrayOf(
             fileId.toByte(), 0, 0, 0, 0xE8.toByte(), 0x03, 0, 0, 1
