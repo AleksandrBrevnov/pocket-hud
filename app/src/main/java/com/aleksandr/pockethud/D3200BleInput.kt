@@ -217,18 +217,22 @@ internal class D3200BleInput(
             nextAudioTrace = now + 5000
         }
         val payload = if (frame.type == 0x18 && frame.id == 0x82) {
-            when {
-                frame.payload.isEmpty() -> " payload=empty"
-                frame.payload.size <= 64 -> " payload=" + frame.payload.joinToString("") { hex(it.toInt()) }
-                else -> " payload=unexpected_length"
+            val state = frame.payload.firstOrNull()?.toInt()?.and(0xff)
+            val label = when (state) {
+                0 -> "stopped"
+                1 -> "recording"
+                2 -> "paused"
+                255 -> "refused"
+                else -> "unknown"
             }
+            " controlState=$label"
         } else if ((frame.type == 0x1a || frame.type == 0x1b) &&
             frame.id == 0x0e && frame.payload.size == 1) {
             " resultByte=${hex(frame.payload[0].toInt())}"
-        } else if (frame.type == 0x1a && frame.id == 0x07 && frame.payload.size <= 16) {
-            " responsePayload=" + frame.payload.joinToString("") { hex(it.toInt()) }
-        } else if (frame.type == 0x1a && frame.id == 0x06 && frame.payload.size <= 16) {
-            " eventPayload=" + frame.payload.joinToString("") { hex(it.toInt()) }
+        } else if (frame.type == 0x1a && frame.id == 0x07 && frame.payload.size == 1) {
+            " responseCode=${hex(frame.payload[0].toInt())}"
+        } else if (frame.type == 0x1a && frame.id == 0x06) {
+            " eventPayloadBytes=${frame.payload.size}"
         } else ""
         onTrace("rx cmdType=${hex(frame.type)} cmdId=${hex(frame.id)} statusByte=${hex(frame.status)} payloadLength=${frame.payload.size}$payload")
     }
@@ -238,7 +242,13 @@ internal class D3200BleInput(
     private fun enqueue(frame: ByteArray) {
         val commandPayload = if (frame.size >= 10 && frame[5].toInt() and 0xff == 0x1a &&
             frame[6].toInt() and 0xff == 0x07) {
-            " payload=" + frame.copyOfRange(9, frame.size - 1).joinToString("") { hex(it.toInt()) }
+            val payloadBytes = frame.size - 10
+            val mode = when (payloadBytes) {
+                8 -> "completed"
+                9 -> "realtime"
+                else -> "unknown"
+            }
+            " transferMode=$mode requestPayloadBytes=$payloadBytes"
         } else ""
         onTrace("tx cmdType=${hex(frame[5].toInt())} cmdId=${hex(frame[6].toInt())} length=${frame.size}$commandPayload")
         val maximum = mtu - 3

@@ -102,6 +102,34 @@ class D3200SessionTest {
         assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in listOf("0b87", "0b8b", "0b8c") })
     }
 
+    @Test fun sequenceGapsDuplicatesAndLatePacketsAreReportedWithoutFileIds() {
+        val link = Link()
+        link.handshake(recording = false)
+        link.reply(0x18, 0x82)
+        link.reply(0x1a, 6, byteArrayOf(42, 0, 0, 0))
+        link.reply(0x1a, 7, byteArrayOf(-1))
+        link.reply(0x18, 0x82, byteArrayOf(0))
+        link.postStopLists()
+
+        val fileKey = ByteArray(32) { (it + 1).toByte() }
+        val nonce = ByteArray(16) { (it + 3).toByte() }
+        val prefix = byteArrayOf(0xbc.toByte(), 12, 34)
+        link.header(42, fileKey, nonce, fileSize = 166)
+        link.audio(fileKey, nonce, 0, prefix, flags = 2)
+        link.audio(fileKey, nonce, 1, prefix)
+        link.audio(fileKey, nonce, 4, prefix)
+        link.audio(fileKey, nonce, 4, prefix)
+        link.audio(fileKey, nonce, 3, prefix)
+        link.reply(0x1a, 0x0a, link.complete(42))
+
+        assertEquals(3, link.opus.size)
+        val summary = link.trace.single { it.contains("audio_sequence_summary") }
+        assertTrue(summary.contains("missing_estimate=2"))
+        assertTrue(summary.contains("duplicates=1"))
+        assertTrue(summary.contains("late=1"))
+        assertFalse(link.trace.any { it.contains("fileId=42") || it.contains("file_id=42") })
+    }
+
     @Test fun completedFileRefusalRetriesOnceAfterASecondPause() {
         val link = Link()
         link.handshake(recording = false)
@@ -320,10 +348,11 @@ class D3200SessionTest {
     private class Link {
         val sent = mutableListOf<ByteArray>()
         val opus = mutableListOf<ByteArray>()
+        val trace = mutableListOf<String>()
         lateinit var sessionKey: ByteArray
         var closeCount = 0
         val closed get() = closeCount != 0
-        val session = D3200Session({ sent.add(it) }, {}, { _, _ -> }, { opus.add(it) }, { closeCount++ })
+        val session = D3200Session({ sent.add(it) }, {}, { _, _ -> }, { opus.add(it) }, { closeCount++ }, trace::add)
 
         fun lastCommand() = sent.last().copyOfRange(5, 7).hex()
 
@@ -357,14 +386,14 @@ class D3200SessionTest {
             reply(0x1a, 0x07, payload)
         }
 
-        fun audio(fileKey: ByteArray, nonce: ByteArray, sequence: Long, opusPrefix: ByteArray) {
+        fun audio(fileKey: ByteArray, nonce: ByteArray, sequence: Long, opusPrefix: ByteArray, flags: Int = 1) {
             val packet = ByteArray(160)
             opusPrefix.copyInto(packet)
             val encrypted = D3200Crypto.ctr(
                 fileKey, D3200Crypto.counter(nonce, sequence), packet
             )
             val seq = ByteArray(4) { (sequence shr (it * 8)).toByte() }
-            reply(0x1a, 0x08, seq + byteArrayOf(1) + encrypted + byteArrayOf(0))
+            reply(0x1a, 0x08, seq + byteArrayOf(flags.toByte()) + encrypted + byteArrayOf(0))
         }
 
         fun reply(type: Int, id: Int, payload: ByteArray = byteArrayOf(), status: Int = 1) {

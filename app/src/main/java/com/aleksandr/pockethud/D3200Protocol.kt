@@ -7,7 +7,7 @@ internal object D3200Protocol {
     private const val SLICE_SIZE = 166
 
     enum class Command(val type: Int, val id: Int) {
-        HANDSHAKE(0x2e, 1), INFO(1, 1), START(0x18, 0x82), STOP(0x18, 0x82),
+        HANDSHAKE(0x2e, 1), INFO(1, 1), START(0x18, 0x82), PAUSE(0x18, 0x82), STOP(0x18, 0x82),
         LIST(0x1b, 0x0e), LEGACY_LIST(0x1a, 0x0e), LIVE(0x1a, 7), FILE_PULL(0x1a, 7);
 
         fun frame(
@@ -22,6 +22,7 @@ internal object D3200Protocol {
                 HANDSHAKE -> publicKey.also { require(it.size == 65 && it[0] == 4.toByte()) }
                 INFO -> byteArrayOf()
                 START -> byteArrayOf(1)
+                PAUSE -> byteArrayOf(2, 1)
                 STOP -> byteArrayOf(0)
                 LIST, LEGACY_LIST -> ByteArray(2)
                 LIVE -> {

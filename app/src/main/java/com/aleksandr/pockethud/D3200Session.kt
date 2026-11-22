@@ -30,6 +30,11 @@ internal class D3200Session(
     private var startProbeReason = ""
     private var sawUnconfirmedRecording = false
     private var maxSequence = -1L
+    private var firstSequence: Long? = null
+    private var sequenceGapEstimate = 0L
+    private var duplicateSequenceCount = 0L
+    private var lateSequenceCount = 0L
+    private var sequenceSummaryEmitted = false
     private var opusCount = 0L
     private var fileOpusCount = 0L
     private var realtimeMode = true
@@ -38,6 +43,7 @@ internal class D3200Session(
 
     fun begin() {
         check(phase == Phase.NEW)
+        trace("auth_status=NOT_ATTEMPTED reason=firmware_03_56_auth_format_unverified")
         val pair = D3200Crypto.generate()
         keyPair = pair
         status("Обмен ключами ECDH")
@@ -61,7 +67,7 @@ internal class D3200Session(
                 val event = D3200Protocol.recordingRotation(payload)
                 if (event != null) {
                     val id = event.fileId
-                    trace("recording_rotation fileId=$id durationMs=${event.durationMs} appendPreAudio=${event.appendPreAudio} phase=$phase")
+                    trace("recording_rotation durationMs=${event.durationMs} appendPreAudio=${event.appendPreAudio} phase=$phase")
                     when (phase) {
                         Phase.HANDSHAKE, Phase.INFO, Phase.VERIFY_START -> notifiedFileId = id
                         Phase.START -> {
@@ -75,7 +81,7 @@ internal class D3200Session(
                         Phase.HEAD -> queueRotation(id)
                         Phase.AUDIO, Phase.WAIT_ROTATION -> {
                             if (id != notifiedFileId) startLive(id)
-                            else trace("duplicate_rotation_ignored fileId=$id")
+                            else trace("duplicate_rotation_ignored")
                         }
                         else -> Unit
                     }
@@ -105,10 +111,10 @@ internal class D3200Session(
             }
             0x1a07 -> if (phase == Phase.HEAD) {
                 val responseCode = if (payload.isNotEmpty()) u8(payload, 0) else null
-                val responsePayloadDescription = if (payload.size <= 16) {
-                    payload.joinToString("") { "%02X".format(it.toInt() and 0xff) }
-                } else {
-                    "redacted(length=${payload.size})"
+                val responsePayloadDescription = when {
+                    payload.isEmpty() -> "empty"
+                    payload.size == 1 && u8(payload, 0) == 0xff -> "FF"
+                    else -> "redacted(length=${payload.size})"
                 }
                 trace("file_header_response mode=${if (realtimeMode) "realtime" else "completed"} status=${frame.status} payloadInfo=$responsePayloadDescription")
                 if (frame.isRejected) {
@@ -144,13 +150,13 @@ internal class D3200Session(
                 nonce = payload.copyOfRange(8, 24)
                 maxSequence = -1L
                 fileOpusCount = 0L
-                trace("file_header_accepted mode=${if (realtimeMode) "realtime" else "completed"} fileId=$headId size=$fileSize")
+                trace("file_header_accepted mode=${if (realtimeMode) "realtime" else "completed"} size=$fileSize")
                 if (realtimeMode) {
                     if (!startNextLive()) {
-                        status("Realtime открыт, file ID=$headId. Ожидание Opus")
+                        status("Realtime открыт. Ожидание Opus")
                         arm(Phase.AUDIO, 6000)
                     } else {
-                        trace("realtime_header_followed_by_queued_rotation fileId=$headId")
+                        trace("realtime_header_followed_by_queued_rotation")
                     }
                 } else {
                     status("Обычная BLE-передача готового файла началась")
@@ -160,10 +166,30 @@ internal class D3200Session(
             0x1a08, 0x1a12 -> if (phase == Phase.AUDIO && !frame.isRejected &&
                 (frame.id == 8 || (payload.isNotEmpty() && payload.size % 166 == 0))) {
                 for (slice in D3200Protocol.slices(payload)) {
-                    if (slice.sequence <= maxSequence) continue
-                    val iv = D3200Crypto.counter(requireNotNull(nonce), slice.sequence)
+                    val sequence = slice.sequence
+                    if (maxSequence < 0L) {
+                        firstSequence = sequence
+                        if (slice.flags and 0x02 != 0 && sequence > 0L) {
+                            sequenceGapEstimate += sequence
+                            trace("audio_sequence_gap expected=0 received=$sequence missing=$sequence total=$sequenceGapEstimate")
+                        }
+                    } else if (sequence > maxSequence + 1L) {
+                        val missing = sequence - maxSequence - 1L
+                        sequenceGapEstimate += missing
+                        trace("audio_sequence_gap expected=${maxSequence + 1L} received=$sequence missing=$missing total=$sequenceGapEstimate")
+                    } else if (sequence <= maxSequence) {
+                        if (sequence == maxSequence) {
+                            duplicateSequenceCount++
+                            trace("audio_sequence_duplicate sequence=$sequence count=$duplicateSequenceCount")
+                        } else {
+                            lateSequenceCount++
+                            trace("audio_sequence_late sequence=$sequence max=$maxSequence count=$lateSequenceCount")
+                        }
+                        continue
+                    }
+                    val iv = D3200Crypto.counter(requireNotNull(nonce), sequence)
                     val packet = D3200Crypto.ctr(requireNotNull(fileKey), iv, slice.ciphertext)
-                    maxSequence = slice.sequence
+                    maxSequence = sequence
                     fileOpusCount++
                     if (opusCount++ == 0L) status("Получен Opus")
                     onOpus(packet)
@@ -176,7 +202,8 @@ internal class D3200Session(
                 val matchesCurrent = completion.fileId != 0L && completion.fileId == currentFileId
                 val untargetedCurrent = completion.fileId == 0L && fileOpusCount > 0L
                 if (matchesCurrent || untargetedCurrent) {
-                    trace("realtime_complete result=${completion.result} durationMs=${completion.durationMs} fileId=${completion.fileId} currentFileId=$currentFileId")
+                    traceAudioSequenceSummary("completion")
+                    trace("realtime_complete result=${completion.result} durationMs=${completion.durationMs} currentFileMatches=true")
                     check(completion.result == 0) {
                         "D3200 завершил realtime с ошибкой ${completion.result}"
                     }
@@ -195,7 +222,7 @@ internal class D3200Session(
                         arm(Phase.WAIT_ROTATION, 60_000)
                     }
                 } else {
-                    trace("stale_or_empty_realtime_complete ignored fileId=${completion.fileId} currentFileId=$currentFileId opus=$fileOpusCount")
+                    trace("stale_or_empty_realtime_complete ignored currentFileMatches=false opus=$fileOpusCount")
                 }
             }
         }
@@ -401,15 +428,15 @@ internal class D3200Session(
 
     private fun queueRotation(fileId: Long) {
         if (fileId == notifiedFileId || pendingFileIds.contains(fileId)) {
-            trace("duplicate_rotation_ignored fileId=$fileId")
+            trace("duplicate_rotation_ignored")
             return
         }
         if (pendingFileIds.size >= 8) {
             val dropped = pendingFileIds.removeFirst()
-            trace("rotation_queue_overflow droppedFileId=$dropped")
+            trace("rotation_queue_overflow dropped_oldest=true")
         }
         pendingFileIds.addLast(fileId)
-        trace("rotation_queued fileId=$fileId pending=${pendingFileIds.size}")
+        trace("rotation_queued pending=${pendingFileIds.size}")
     }
 
     private fun startNextLive(): Boolean {
@@ -422,7 +449,7 @@ internal class D3200Session(
         startedByPocketHud = false
         offlineProbeAttempts = 0
         status("Запись остановлена. Ждём сохранения файла перед BLE-проверкой")
-        trace("post_stop_file_flush_wait fileId=$notifiedFileId delayMs=3000")
+        trace("post_stop_file_flush_wait delayMs=3000")
         arm(Phase.WAIT_FILE_FLUSH, 3_000)
     }
 
@@ -434,7 +461,7 @@ internal class D3200Session(
         realtimeRejected = false
         offlineProbeAttempts++
         check(offlineProbeAttempts <= 2) { "Превышено безопасное число запросов готового файла" }
-        trace("completed_file_probe fileId=$fileId realtimeFlag=0 attempt=$offlineProbeAttempts")
+        trace("completed_file_probe realtimeFlag=0 attempt=$offlineProbeAttempts")
         startLive(fileId, realtimeFlag = 0)
     }
 
@@ -447,10 +474,16 @@ internal class D3200Session(
         fileKey = null
         nonce?.fill(0)
         nonce = null
+        traceAudioSequenceSummary("file_switch")
         maxSequence = -1L
+        firstSequence = null
+        sequenceGapEstimate = 0L
+        duplicateSequenceCount = 0L
+        lateSequenceCount = 0L
+        sequenceSummaryEmitted = false
         fileOpusCount = 0L
-        status(if (realtimeMode) "Запрос realtime, file ID=$fileId" else "Запрос готового файла по BLE, file ID=$fileId")
-        trace("file_transfer_request fileId=$fileId realtimeFlag=$realtimeFlag offset=0")
+        status(if (realtimeMode) "Запрос realtime" else "Запрос готового файла по BLE")
+        trace("file_transfer_request mode=${if (realtimeMode) "realtime" else "completed"} realtimeFlag=$realtimeFlag offset=0")
         val headerRequest = if (realtimeMode) {
             Command.LIVE.frame(fileId = fileId, realtimeFlag = 1)
         } else {
@@ -472,7 +505,14 @@ internal class D3200Session(
         deadline(next.name, ms)
     }
 
+    private fun traceAudioSequenceSummary(reason: String) {
+        if (sequenceSummaryEmitted || (firstSequence == null && fileOpusCount == 0L)) return
+        sequenceSummaryEmitted = true
+        trace("audio_sequence_summary reason=$reason first=${firstSequence ?: "unknown"} last=$maxSequence accepted=$fileOpusCount missing_estimate=$sequenceGapEstimate duplicates=$duplicateSequenceCount late=$lateSequenceCount")
+    }
+
     private fun finish() {
+        traceAudioSequenceSummary("session_end")
         discard()
         close()
     }

@@ -25,6 +25,13 @@ class D3200ProtocolTest {
         }
     }
 
+    @Test fun officialAppPauseUsesObservedTwoByteControlPayload() {
+        val pause = D3200Protocol.Command.PAUSE.frame()
+        assertEquals("08ee00000018820c0002019f", pause.hex())
+        assertEquals(12, D3200Protocol.u16(pause, 7))
+        assertArrayEquals(byteArrayOf(2, 1), pause.copyOfRange(9, pause.size - 1))
+    }
+
     @Test fun officialAppCompletedFilePullUsesEightBytePayload() {
         val request = D3200Protocol.Command.FILE_PULL.frame(fileId = 42)
         assertEquals(18, request.size)

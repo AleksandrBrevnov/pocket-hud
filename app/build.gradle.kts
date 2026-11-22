@@ -11,8 +11,8 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 71
-        versionName = "1.0.67-d3200-legacy-file-pull"
+        versionCode = 72
+        versionName = "1.0.68-d3200-safe-diagnostics"
     }
 
     signingConfigs {
