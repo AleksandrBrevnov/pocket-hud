@@ -82,6 +82,51 @@ Do not guess a longer UID, replay captured ciphertext, reuse a nonce, or send bi
 5. The official capture proves paused active-file retrieval, not continuous live BLE streaming.
 6. The exact semantics of `1A/A7`, the second byte in the official `18/82` pause payload, the post-transfer recording state, and the official file-key unwrap path remain open questions.
 
+## 7. Pocket HUD 1.0.68 device log — 2026-11-22
+
+Source: user-provided `pockethud-soundcore(6).log`. This summary is redacted; no file IDs, raw event payloads, MAC addresses, keys, nonces, or audio are included.
+
+### Latest 1.0.68 session (22:46 local device time)
+
+- First scan attempt (22:45:36) did not find the device. A second attempt 24 seconds later succeeded; treat this as a transient discovery miss, not the cause of the protocol refusal.
+- Advertisement reports `bound_bit_set`.
+- GATT connected; services discovered; MTU 512; notifications active.
+- `auth_status=NOT_ATTEMPTED` is explicitly logged.
+- Existing Pocket HUD ECDH `2E/01` succeeds.
+- `01/01` succeeds and identifies firmware 03.56.
+- Pocket HUD's remote start request `18/82` is refused with `FF`.
+- The user starts recording with the physical D3200 button; Pocket HUD receives `1A/06`.
+- Realtime `1A/07` request: 9-byte command payload, 19-byte full TX frame; device replies with `FF`.
+- After physical stop, the device reports stopped.
+- `1B/0E` and legacy `1A/0E` file-list requests both return `FF`.
+- Completed-file `1A/07` request: 8-byte command payload, 18-byte full TX frame; device replies with `FF` twice, five seconds apart.
+- No `1A/08` slices or `1A/0A` completion are received. Opus, decoded PCM, PCM queue, and audio sent to Gemini remain zero.
+- GATT closes cleanly. Gemini Live remains `READY (Streaming)` in the service log; this session provides no evidence that Gemini is the cause of the BLE failure.
+
+### What this confirms
+
+1. The 1.0.68 request framing is correct relative to the captured official-app completed-file request length (8-byte payload) and the current realtime variant (9-byte payload). Both are refused, so changing `1A/07` length again is not justified by this log.
+2. The device is currently marked bound in its advertisement. This is an observed state, not proof that binding causes the refusal.
+3. Pocket HUD still does not execute the official app's observed `0B/8B` and `1A/A7` steps. The current refusal is therefore still upstream of the Opus/PCM/Gemini pipeline.
+4. The log is privacy-safe: the updated diagnostics omit file IDs and raw command payloads.
+
+## 8. Binding-state comparison and command naming
+
+The [tacshi/Soundcore protocol notes](https://github.com/tacshi/Soundcore/blob/main/PROTOCOL.md) report hardware tests on firmware 04.73 in which completed-file export and realtime audio worked over BLE **after unbinding**. Those tests used `2E/01` and `1A/07`, without `0B/87) binding commands or a Feishu account token. The same notes explicitly say those observations are not guaranteed for other firmware or account-binding states and leave local-only binding requirements open.
+
+The same public notes identify `0B/87` as the stock bind/unbind command and `0B/88` as a bind confirmation. The official-app capture discussed here contains a different command, `0B/8B`. Do not conflate `0B/8B` with `0B/87`, and do not send either bind/unbind operation during this investigation.
+
+This gives one new hypothesis to investigate, not a conclusion: firmware 03.56 in a bound state may require an official-app-specific authenticated session before file transport, whereas the public 04.73 test succeeded after unbinding. The available evidence does not prove this relationship. No unbind test is permitted.
+
+## 9. Exact data still missing for safe 03.56 implementation
+
+The earlier analysis of the official-app BTSnoop recorded only:
+- `0B/8B` payload length 62 bytes, comprising a 44-byte encrypted block and a 16-byte nonce; response result was reported as `00`.
+- `1A/A7` was sent three times and acknowledged each time.
+- No exact byte-level field offsets, length-prefix values, UID representation, timestamp fields, payload bytes, or acknowledgement payloads were retained.
+
+Therefore, the exact `0B/8B` builder and `1A/A7` setup payload cannot be reconstructed from the recorded summary. Do not guess the missing fields, replay ciphertext/nonces, or synthesize credentials. A fresh sanitized extraction from the original BTSnoop, or static analysis of the official Soundcore App 5.0.39 implementation, is required before implementing these commands.
+
 ## 6. Next steps
 
 1. Recover a sanitized command timeline from the original BTSnoop (or create a fresh official-app capture). Keep raw HCI and all secret fields local; share only the redacted audit JSON.
