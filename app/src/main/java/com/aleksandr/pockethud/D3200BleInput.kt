@@ -81,7 +81,10 @@ internal class D3200BleInput(
         setDeadline(15000) { error("Soundcore Work не найден по BLE") }
     }
 
-    fun stop() = post { shutdown() }
+    fun stop() = post {
+        onTrace("external_ble_stop_requested")
+        shutdown()
+    }
 
     private val scanCallback: ScanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) = post {
@@ -189,24 +192,21 @@ internal class D3200BleInput(
     }
 
     /**
-     * The D3200 advertisement manufacturer payload stores the bind flag at
-     * combined manufacturer-data byte 6 (company ID occupies bytes 0..1).
-     * The "soundc" marker at combined bytes 8..13 lets us identify the record
-     * without logging its MAC address or the rest of the manufacturer data.
+     * Service UUID was already verified by scanCallback. Android strips the
+     * 2-byte company ID from manufacturerSpecificData; 6 bytes therefore
+     * suffice to read the D3200 flag at payload byte 4.
+     *
+     * Never log the full manufacturer payload: it includes identifying bytes.
      */
     private fun readAdvertisementBoundState(record: android.bluetooth.le.ScanRecord): String {
         val data = record.manufacturerSpecificData ?: return "unknown(no_manufacturer_data)"
-        if (data.size() == 0) return "unknown(no_manufacturer_data)"
         for (index in 0 until data.size()) {
-            val bytes = data.valueAt(index) ?: continue
-            if (bytes.size < 12) continue
-            val marker = String(bytes.copyOfRange(6, 12), Charsets.US_ASCII)
-            if (marker == "soundc") {
-                val flags = bytes[4].toInt() and 0xff
-                return if ((flags and 0x80) != 0) "bound_bit_set" else "bound_bit_clear"
-            }
+            val payload = data.valueAt(index) ?: continue
+            if (payload.size >= 5) return D3200Advertisement.bindingState(payload)
         }
-        val lengths = (0 until data.size()).joinToString(",") { data.valueAt(it)?.size?.toString() ?: "null" }
+        val lengths = (0 until data.size()).joinToString(",") {
+            data.valueAt(it)?.size?.toString() ?: "null"
+        }
         return "unknown(vendor_payload_lengths=$lengths)"
     }
 
