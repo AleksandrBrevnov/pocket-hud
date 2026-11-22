@@ -11,8 +11,8 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 65
-        versionName = "1.0.61-d3200-continuous"
+        versionCode = 66
+        versionName = "1.0.62-d3200-refusal-diag"
     }
 
     signingConfigs {
