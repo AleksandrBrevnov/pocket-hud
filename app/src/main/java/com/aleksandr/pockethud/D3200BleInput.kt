@@ -20,6 +20,7 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
 import java.util.ArrayDeque
+import java.util.Locale
 import java.util.UUID
 
 @SuppressLint("MissingPermission")
@@ -89,6 +90,8 @@ internal class D3200BleInput(
             val record = result.scanRecord ?: return@post
             if (record.serviceUuids.orEmpty().none { it.uuid == SERVICE } &&
                 record.serviceData.orEmpty().keys.none { it.uuid == SERVICE }) return@post
+            val boundState = readAdvertisementBoundState(record)
+            report("D3200 advertisement binding=$boundState")
             stopScan()
             report("Подключение GATT")
             gatt = checkNotNull(result.device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)) {
@@ -186,6 +189,26 @@ internal class D3200BleInput(
         setDeadline(8000) { error("Истекло ожидание сервисов GATT") }
     }
 
+    /**
+     * The D3200 advertisement manufacturer payload stores the bind flag at
+     * combined manufacturer-data byte 6 (company ID occupies bytes 0..1).
+     * The "soundc" marker at combined bytes 8..13 lets us identify the record
+     * without logging its MAC address or the rest of the manufacturer data.
+     */
+    private fun readAdvertisementBoundState(record: android.bluetooth.le.ScanRecord): String {
+        val data = record.manufacturerSpecificData ?: return "unknown"
+        for (index in 0 until data.size()) {
+            val bytes = data.valueAt(index) ?: continue
+            if (bytes.size < 12) continue
+            val marker = String(bytes.copyOfRange(6, 12), Charsets.US_ASCII)
+            if (marker == "soundc") {
+                val flags = bytes[4].toInt() and 0xff
+                return if ((flags and 0x80) != 0) "bound_bit_set" else "bound_bit_clear"
+            }
+        }
+        return "unknown"
+    }
+
     private fun traceReceived(frame: D3200Protocol.Frame) {
         if (frame.type == 0x1a && (frame.id == 0x08 || frame.id == 0x12)) {
             val now = SystemClock.elapsedRealtime()
@@ -201,6 +224,10 @@ internal class D3200BleInput(
         } else if ((frame.type == 0x1a || frame.type == 0x1b) &&
             frame.id == 0x0e && frame.payload.size == 1) {
             " resultByte=${hex(frame.payload[0].toInt())}"
+        } else if (frame.type == 0x1a && frame.id == 0x07 && frame.payload.size <= 16) {
+            " responsePayload=" + frame.payload.joinToString("") { hex(it.toInt()) }
+        } else if (frame.type == 0x1a && frame.id == 0x06 && frame.payload.size <= 16) {
+            " eventPayload=" + frame.payload.joinToString("") { hex(it.toInt()) }
         } else ""
         onTrace("rx cmdType=${hex(frame.type)} cmdId=${hex(frame.id)} statusByte=${hex(frame.status)} payloadLength=${frame.payload.size}$payload")
     }
@@ -208,7 +235,11 @@ internal class D3200BleInput(
     private fun hex(value: Int): String = (value and 255).toString(16).padStart(2, '0').uppercase()
 
     private fun enqueue(frame: ByteArray) {
-        onTrace("tx cmdType=${hex(frame[5].toInt())} cmdId=${hex(frame[6].toInt())} length=${frame.size}")
+        val commandPayload = if (frame.size >= 10 && frame[5].toInt() and 0xff == 0x1a &&
+            frame[6].toInt() and 0xff == 0x07) {
+            " payload=" + frame.copyOfRange(9, frame.size - 1).joinToString("") { hex(it.toInt()) }
+        } else ""
+        onTrace("tx cmdType=${hex(frame[5].toInt())} cmdId=${hex(frame[6].toInt())} length=${frame.size}$commandPayload")
         val maximum = mtu - 3
         for (offset in frame.indices step maximum) {
             writes.add(frame.copyOfRange(offset, minOf(frame.size, offset + maximum)))
