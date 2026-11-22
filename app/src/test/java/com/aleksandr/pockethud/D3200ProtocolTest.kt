@@ -10,6 +10,21 @@ class D3200ProtocolTest {
         assertEquals(11, D3200Protocol.u16(tx, 7))
     }
 
+    @Test fun liveCommandSupportsRealtimeAndCompletedFileModes() {
+        val realtime = D3200Protocol.Command.LIVE.frame(fileId = 42)
+        val completed = D3200Protocol.Command.LIVE.frame(fileId = 42, realtimeFlag = 0)
+
+        assertEquals(19, realtime.size)
+        assertEquals(1, realtime[17].toInt() and 0xff)
+        assertEquals(0, completed[17].toInt() and 0xff)
+        assertEquals(42L, D3200Protocol.u32(completed, 13))
+        assertEquals((completed.take(completed.lastIndex).sumOf { it.toInt() and 0xff } and 0xff),
+            completed.last().toInt() and 0xff)
+        assertThrows(IllegalArgumentException::class.java) {
+            D3200Protocol.Command.LIVE.frame(fileId = 42, realtimeFlag = 2)
+        }
+    }
+
     @Test fun splitJoinedAndCorruptNotifications() {
         val parser = D3200Protocol.Parser()
         val rejected = rx(0x1a, 7, byteArrayOf(-1))
