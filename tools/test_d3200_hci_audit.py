@@ -129,6 +129,17 @@ class AuditTest(unittest.TestCase):
         self.assertNotIn(bytes(range(16)).hex(), serialized)
         self.assertNotIn("nonce", serialized.lower().replace("auth_nonce_bytes", ""))
 
+    def test_legacy_eight_byte_file_header_request_is_not_mislabeled_realtime(self):
+        request = d3200(0, 0x1A, 0x07, bytes(4) + (42).to_bytes(4, "little"))
+        raw = snoop([(0, packet) for packet in make_hci_packets(0, request)])
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "hci.log"
+            p.write_bytes(raw)
+            event = analyze(p)["events"][0]
+        self.assertEqual("legacy_file_header_request_without_mode_byte",
+                         event["transfer_mode"])
+        self.assertNotIn("file_id", json.dumps(event))
+
     def test_completed_mode_and_dangerous_commands_are_only_observed(self):
         packets = [
             d3200(0, 0x1A, 7, b"\0\0\0\0" + b"\x01\x02\x03\x04" + b"\x00"),
