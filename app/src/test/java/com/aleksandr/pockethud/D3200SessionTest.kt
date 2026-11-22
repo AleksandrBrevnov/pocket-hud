@@ -169,6 +169,80 @@ class D3200SessionTest {
         assertEquals(1, link.closeCount)
     }
 
+
+    @Test fun manualRecordingFollowsRealtimeFileRotationAndResetsSequence() {
+        val link = Link()
+        link.handshake(recording = true)
+        link.reply(0x1b, 0x0e, byteArrayOf(-1))
+        link.reply(0x1a, 0x0e, byteArrayOf(1, 0, 42, 0, 0, 0, 8, 0, 0, 0))
+        assertEquals("1a07", link.lastCommand())
+
+        val keyA = ByteArray(32) { (it + 1).toByte() }
+        val nonceA = ByteArray(16) { (it + 3).toByte() }
+        val opusA = byteArrayOf(0xbc.toByte(), 12, 34)
+        link.header(42, keyA, nonceA)
+        link.audio(keyA, nonceA, 5, opusA)
+        assertEquals(1, link.opus.size)
+
+        link.reply(0x1a, 0x06, link.rotation(43))
+        assertEquals("1a07", link.lastCommand())
+        assertEquals(43L, D3200Protocol.u32(link.sent.last(), 13))
+
+        // The previous file's completion must not close the new file request.
+        link.reply(0x1a, 0x0a, link.complete(42))
+        val keyB = ByteArray(32) { (it + 41).toByte() }
+        val nonceB = ByteArray(16) { (it + 61).toByte() }
+        val opusB = byteArrayOf(0x91.toByte(), 23, 45)
+        link.header(43, keyB, nonceB)
+        link.audio(keyB, nonceB, 0, opusB)
+
+        assertEquals(2, link.opus.size)
+        assertArrayEquals(ByteArray(160).apply { opusA.copyInto(this) }, link.opus[0])
+        assertArrayEquals(ByteArray(160).apply { opusB.copyInto(this) }, link.opus[1])
+        assertFalse(link.closed)
+    }
+
+    @Test fun currentFileCompletionWaitsForNextRotationWithoutClosingGatt() {
+        val link = Link()
+        link.handshake(recording = true)
+        link.reply(0x1b, 0x0e, byteArrayOf(-1))
+        link.reply(0x1a, 0x0e, byteArrayOf(1, 0, 42, 0, 0, 0, 8, 0, 0, 0))
+
+        val key = ByteArray(32) { (it + 1).toByte() }
+        val nonce = ByteArray(16) { (it + 2).toByte() }
+        link.header(42, key, nonce)
+        link.audio(key, nonce, 0, byteArrayOf(0xbc.toByte(), 1, 2))
+        link.reply(0x1a, 0x0a, link.complete(42))
+
+        assertFalse(link.closed)
+        link.session.timeout()
+        assertFalse(link.closed)
+
+        link.reply(0x1a, 0x06, link.rotation(43))
+        assertEquals("1a07", link.lastCommand())
+        assertEquals(43L, D3200Protocol.u32(link.sent.last(), 13))
+    }
+
+    @Test fun rotationArrivingDuringHeaderRequestIsQueuedAndOpenedNext() {
+        val link = Link()
+        link.handshake(recording = false)
+        link.reply(0x18, 0x82)
+        link.reply(0x1a, 0x06, link.rotation(42))
+        assertEquals(42L, D3200Protocol.u32(link.sent.last(), 13))
+
+        link.reply(0x1a, 0x06, link.rotation(43))
+        val keyA = ByteArray(32) { (it + 1).toByte() }
+        val nonceA = ByteArray(16) { (it + 2).toByte() }
+        link.header(42, keyA, nonceA)
+
+        assertEquals("1a07", link.lastCommand())
+        assertEquals(43L, D3200Protocol.u32(link.sent.last(), 13))
+        val keyB = ByteArray(32) { (it + 31).toByte() }
+        val nonceB = ByteArray(16) { (it + 51).toByte() }
+        link.header(43, keyB, nonceB)
+        assertFalse(link.closed)
+    }
+
     private class Link {
         val sent = mutableListOf<ByteArray>()
         val opus = mutableListOf<ByteArray>()
@@ -178,6 +252,35 @@ class D3200SessionTest {
         val session = D3200Session({ sent.add(it) }, {}, { _, _ -> }, { opus.add(it) }, { closeCount++ })
 
         fun lastCommand() = sent.last().copyOfRange(5, 7).hex()
+
+        fun rotation(fileId: Int): ByteArray = byteArrayOf(
+            fileId.toByte(), 0, 0, 0, 0xE8.toByte(), 0x03, 0, 0, 1
+        )
+
+        fun complete(fileId: Int): ByteArray = byteArrayOf(
+            0, 0xE8.toByte(), 0x03, 0, 0, fileId.toByte(), 0, 0, 0
+        )
+
+        fun header(fileId: Int, fileKey: ByteArray, nonce: ByteArray) {
+            val sessionNonce = ByteArray(16) { (it + 5).toByte() }
+            val wrapped = D3200Crypto.ctr(
+                sessionKey, sessionNonce, "soundcored3200".toByteArray() + fileKey
+            )
+            val id = ByteArray(4) { (fileId ushr (it * 8)).toByte() }
+            val payload = id + byteArrayOf(-1, -1, -1, -1) + nonce +
+                wrapped + sessionNonce + byteArrayOf(0)
+            reply(0x1a, 0x07, payload)
+        }
+
+        fun audio(fileKey: ByteArray, nonce: ByteArray, sequence: Long, opusPrefix: ByteArray) {
+            val packet = ByteArray(160)
+            opusPrefix.copyInto(packet)
+            val encrypted = D3200Crypto.ctr(
+                fileKey, D3200Crypto.counter(nonce, sequence), packet
+            )
+            val seq = ByteArray(4) { (sequence shr (it * 8)).toByte() }
+            reply(0x1a, 0x08, seq + byteArrayOf(1) + encrypted + byteArrayOf(0))
+        }
 
         fun reply(type: Int, id: Int, payload: ByteArray = byteArrayOf(), status: Int = 1) {
             session.receive(D3200Protocol.Frame(status, type, id, payload))
