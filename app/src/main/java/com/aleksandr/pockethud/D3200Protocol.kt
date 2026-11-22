@@ -10,9 +10,14 @@ internal object D3200Protocol {
         HANDSHAKE(0x2e, 1), INFO(1, 1), START(0x18, 0x82), STOP(0x18, 0x82),
         LIST(0x1b, 0x0e), LEGACY_LIST(0x1a, 0x0e), LIVE(0x1a, 7);
 
-        fun frame(publicKey: ByteArray = byteArrayOf(), fileId: Long = 0): ByteArray {
+        fun frame(
+            publicKey: ByteArray = byteArrayOf(),
+            fileId: Long = 0,
+            realtimeFlag: Int = 1
+        ): ByteArray {
             require(this == HANDSHAKE || publicKey.isEmpty())
             require(this == LIVE || fileId == 0L)
+            require(this == LIVE || realtimeFlag == 1)
             val payload = when (this) {
                 HANDSHAKE -> publicKey.also { require(it.size == 65 && it[0] == 4.toByte()) }
                 INFO -> byteArrayOf()
@@ -21,7 +26,8 @@ internal object D3200Protocol {
                 LIST, LEGACY_LIST -> ByteArray(2)
                 LIVE -> {
                     require(fileId in 1..0xffffffffL)
-                    ByteArray(4) + ByteArray(4) { (fileId shr (it * 8)).toByte() } + byteArrayOf(1)
+                    require(realtimeFlag in 0..1)
+                    ByteArray(4) + ByteArray(4) { (fileId shr (it * 8)).toByte() } + byteArrayOf(realtimeFlag.toByte())
                 }
             }
             val length = MIN_FRAME + payload.size
