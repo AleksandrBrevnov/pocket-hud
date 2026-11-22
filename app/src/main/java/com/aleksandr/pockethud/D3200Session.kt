@@ -16,7 +16,7 @@ internal class D3200Session(
     private val close: () -> Unit,
     private val trace: (String) -> Unit = {}
 ) {
-    private enum class Phase { NEW, HANDSHAKE, INFO, START, FILE_EVENT, VERIFY_START, LIST, LEGACY_LIST, MANUAL_START, HEAD, AUDIO, WAIT_ROTATION, WAIT_STOP_FOR_OFFLINE_PROBE, STOP, CLOSED }
+    private enum class Phase { NEW, HANDSHAKE, INFO, START, FILE_EVENT, VERIFY_START, LIST, LEGACY_LIST, MANUAL_START, HEAD, AUDIO, WAIT_ROTATION, WAIT_STOP_FOR_OFFLINE_PROBE, WAIT_FILE_FLUSH, POST_STOP_LIST, POST_STOP_LEGACY_LIST, WAIT_OFFLINE_RETRY, STOP, CLOSED }
 
     private var phase = Phase.NEW
     private var keyPair: KeyPair? = null
@@ -34,6 +34,7 @@ internal class D3200Session(
     private var fileOpusCount = 0L
     private var realtimeMode = true
     private var realtimeRejected = false
+    private var offlineProbeAttempts = 0
 
     fun begin() {
         check(phase == Phase.NEW)
@@ -80,13 +81,27 @@ internal class D3200Session(
                     }
                 }
             }
-            0x1b0e -> if (phase == Phase.LIST) {
-                val id = if (frame.isRejected) null else D3200Protocol.liveFileId(payload, legacy = false)
-                if (id != null) startLive(id) else request(Phase.LEGACY_LIST, Command.LEGACY_LIST.frame())
+            0x1b0e -> when (phase) {
+                Phase.LIST -> {
+                    val id = if (frame.isRejected) null else D3200Protocol.liveFileId(payload, legacy = false)
+                    if (id != null) startLive(id) else request(Phase.LEGACY_LIST, Command.LEGACY_LIST.frame())
+                }
+                Phase.POST_STOP_LIST -> {
+                    trace("post_stop_list type=1B0E status=${frame.status} refused=${frame.isRejected} payloadLength=${payload.size}")
+                    request(Phase.POST_STOP_LEGACY_LIST, Command.LEGACY_LIST.frame())
+                }
+                else -> Unit
             }
-            0x1a0e -> if (phase == Phase.LEGACY_LIST) {
-                val id = if (frame.isRejected) null else D3200Protocol.liveFileId(payload, legacy = true)
-                if (id != null) startLive(id) else awaitManualStart(alreadyRecording = true)
+            0x1a0e -> when (phase) {
+                Phase.LEGACY_LIST -> {
+                    val id = if (frame.isRejected) null else D3200Protocol.liveFileId(payload, legacy = true)
+                    if (id != null) startLive(id) else awaitManualStart(alreadyRecording = true)
+                }
+                Phase.POST_STOP_LEGACY_LIST -> {
+                    trace("post_stop_list type=1A0E status=${frame.status} refused=${frame.isRejected} payloadLength=${payload.size}")
+                    startCompletedFileProbe()
+                }
+                else -> Unit
             }
             0x1a07 -> if (phase == Phase.HEAD) {
                 val responseCode = if (payload.isNotEmpty()) u8(payload, 0) else null
@@ -98,7 +113,13 @@ internal class D3200Session(
                         arm(Phase.WAIT_STOP_FOR_OFFLINE_PROBE, 120_000)
                         return
                     }
-                    error("D3200 отказал в 1A/07 (mode=${if (realtimeMode) "realtime" else "completed"}, status=${frame.status}, response=${responseCode?.let { "%02X".format(it) } ?: "empty"})")
+                    if (!realtimeMode && frame.explicitRefusal && offlineProbeAttempts < 2) {
+                        trace("offline_file_rejected attempt=$offlineProbeAttempts; retry_delay_ms=5000")
+                        status("Готовый файл пока недоступен, повторная проверка после паузы")
+                        arm(Phase.WAIT_OFFLINE_RETRY, 5_000)
+                        return
+                    }
+                    error("D3200 отказал в 1A/07 (mode=${if (realtimeMode) "realtime" else "completed"}, status=${frame.status}, response=${responseCode?.let { "%02X".format(it) } ?: "empty"}, offlineAttempts=$offlineProbeAttempts)")
                 }
                 check(payload.size >= 87) { "Заголовок 1A/07 короче 87 байт" }
                 val headId = u32(payload, 0)
@@ -159,9 +180,10 @@ internal class D3200Session(
                     nonce?.fill(0)
                     nonce = null
                     maxSequence = -1L
+                    val completedOpusCount = fileOpusCount
                     fileOpusCount = 0L
                     if (!realtimeMode) {
-                        status("Готовый файл получен по BLE: $fileOpusCount Opus-пакетов")
+                        status("Готовый файл получен по BLE: $completedOpusCount Opus-пакетов")
                         finish()
                     } else if (!startNextLive()) {
                         status("Realtime-сегмент завершён, ожидание следующего файла")
@@ -242,8 +264,7 @@ internal class D3200Session(
                     if (realtimeRejected && notifiedFileId != null) {
                         startedByPocketHud = false
                         stopRequested = false
-                        status("Запись остановлена. Проверяем передачу готового файла")
-                        startCompletedFileProbe()
+                        awaitFileFinalization()
                     } else {
                         status("Остановка D3200 подтверждена")
                         finish()
@@ -255,8 +276,7 @@ internal class D3200Session(
                 signal == RecordingSignal.STOPPED && (frame.successStatus || frame.payload.size >= 10)
             ) {
                 startedByPocketHud = false
-                status("Запись остановлена. Проверяем передачу готового файла")
-                startCompletedFileProbe()
+                awaitFileFinalization()
             }
             Phase.FILE_EVENT, Phase.HEAD, Phase.AUDIO, Phase.WAIT_ROTATION -> if (
                 signal == RecordingSignal.STOPPED && (frame.successStatus || frame.payload.size >= 10)
@@ -331,6 +351,19 @@ internal class D3200Session(
                 finish()
             }
             Phase.WAIT_ROTATION, Phase.CLOSED -> Unit
+            Phase.WAIT_FILE_FLUSH -> {
+                trace("post_stop_file_flush_wait_finished")
+                request(Phase.POST_STOP_LIST, Command.LIST.frame())
+            }
+            Phase.POST_STOP_LIST -> {
+                trace("post_stop_list timeout type=1B0E")
+                request(Phase.POST_STOP_LEGACY_LIST, Command.LEGACY_LIST.frame())
+            }
+            Phase.POST_STOP_LEGACY_LIST -> {
+                trace("post_stop_list timeout type=1A0E")
+                startCompletedFileProbe()
+            }
+            Phase.WAIT_OFFLINE_RETRY -> startCompletedFileProbe()
             Phase.WAIT_STOP_FOR_OFFLINE_PROBE -> {
                 status("Не дождался остановки записи для проверки готового файла")
                 finish()
@@ -379,13 +412,23 @@ internal class D3200Session(
         return true
     }
 
+    private fun awaitFileFinalization() {
+        startedByPocketHud = false
+        offlineProbeAttempts = 0
+        status("Запись остановлена. Ждём сохранения файла перед BLE-проверкой")
+        trace("post_stop_file_flush_wait fileId=$notifiedFileId delayMs=3000")
+        arm(Phase.WAIT_FILE_FLUSH, 3_000)
+    }
+
     private fun startCompletedFileProbe() {
         val fileId = notifiedFileId ?: run {
             error("ID записи D3200 отсутствует для проверки готового файла")
             return
         }
         realtimeRejected = false
-        trace("completed_file_probe fileId=$fileId realtimeFlag=0")
+        offlineProbeAttempts++
+        check(offlineProbeAttempts <= 2) { "Превышено безопасное число запросов готового файла" }
+        trace("completed_file_probe fileId=$fileId realtimeFlag=0 attempt=$offlineProbeAttempts")
         startLive(fileId, realtimeFlag = 0)
     }
 
