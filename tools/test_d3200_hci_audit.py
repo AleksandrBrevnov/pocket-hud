@@ -95,6 +95,39 @@ class AuditTest(unittest.TestCase):
         self.assertEqual("10/A2", result["events"][0]["command"])
         self.assertNotIn("PRIVATE_ACCOUNT_TOKEN", json.dumps(result))
 
+    def test_auth_result_and_audio_slice_metadata_are_redacted(self):
+        # Official-app-shaped 0B/8B: 44-byte encrypted block + 16-byte nonce.
+        auth_payload = bytes([44]) + bytes(range(44)) + bytes([16]) + bytes(range(16))
+        slices = []
+        for sequence, flags in ((0, 2), (1, 0), (2, 4)):
+            slices.append(sequence.to_bytes(4, "little") + bytes([flags]) +
+                          bytes([0xA5]) * 160 + b"\\x00")
+        packets = [
+            (0, d3200(0, 0x0B, 0x8B, auth_payload)),
+            (1, d3200(1, 0x0B, 0x8B, b"\\x00")),
+            (1, d3200(1, 0x1A, 0x08, b"".join(slices))),
+        ]
+        raw = snoop([(direction, packet)
+                     for direction, vendor in packets
+                     for packet in make_hci_packets(direction, vendor)])
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "hci.log"
+            p.write_bytes(raw)
+            result = analyze(p)
+        events = result["events"]
+        self.assertEqual(44, events[0]["auth_ciphertext_bytes"])
+        self.assertEqual(16, events[0]["auth_nonce_bytes"])
+        self.assertEqual(0, events[1]["auth_result"])
+        self.assertEqual(3, events[2]["audio_slice_count"])
+        self.assertEqual(0, events[2]["sequence_first"])
+        self.assertEqual(2, events[2]["sequence_last"])
+        self.assertEqual(2, events[2]["first_slice_flags"])
+        self.assertEqual(4, events[2]["last_slice_flags"])
+        serialized = json.dumps(result)
+        self.assertNotIn("165", serialized)  # encrypted audio byte value is not emitted
+        self.assertNotIn("UID", serialized)
+        self.assertNotIn("nonce", serialized.lower().replace("auth_nonce_bytes", ""))
+
     def test_completed_mode_and_dangerous_commands_are_only_observed(self):
         packets = [
             d3200(0, 0x1A, 7, b"\0\0\0\0" + b"\x01\x02\x03\x04" + b"\x00"),
