@@ -114,13 +114,13 @@ internal class D3200Session(
                 if (frame.isRejected) {
                     if (realtimeMode && frame.explicitRefusal) {
                         realtimeRejected = true
-                        status("D3200 отказал в live BLE. Останови запись кнопкой — проверим передачу готового файла")
+                        status("D3200 отказал в live BLE. Останови запись кнопкой D3200, но не нажимай Stop в Pocket HUD")
                         arm(Phase.WAIT_STOP_FOR_OFFLINE_PROBE, 120_000)
                         return
                     }
                     if (!realtimeMode && frame.explicitRefusal && offlineProbeAttempts < 2) {
                         trace("offline_file_rejected attempt=$offlineProbeAttempts; retry_delay_ms=5000")
-                        status("Готовый файл пока недоступен, повторная проверка после паузы")
+                        status("Файл пока недоступен. Не нажимай Stop в Pocket HUD: повтор через 5 секунд")
                         arm(Phase.WAIT_OFFLINE_RETRY, 5_000)
                         return
                     }
