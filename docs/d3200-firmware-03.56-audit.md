@@ -40,6 +40,8 @@ The redacted BTSnoop audit documented the following successful sequence:
 
 The transfer contains 8.92 seconds of audio content. It proves that the official app can retrieve audio from an active recording over BLE after pausing it. It does **not** prove an uninterrupted, unpaused realtime stream. The capture did not establish a resume command, repeated transfer cycles, or the realtime flag value for the official app's request.
 
+The vendor's [Android transfer support page](https://service.soundcore.com/article-description/How-do-I-transfer-files-to-my-phone-using-soundcore-Work) says Android users must open the Soundcore app before recording; the app then connects automatically to previously paired devices, and any unfinished transfer starts automatically. The official user guide distinguishes iPhone real-time transfer over MFi from the Android pre-open-app requirement. This confirms that Android transfer depends on an active app/device session before recording, but it does not specify whether Android transfers audio as repeated BLE chunks, pauses, or another mechanism. A longer capture that begins before recording and continues through several minutes is needed to establish that cadence.
+
 The official `0B/8B` request has a 62-byte payload: a 44-byte encrypted block and a 16-byte nonce, with length fields. No ciphertext or nonce is retained in this repository.
 
 The official-app capture contains no `2E/01`, `0B/03`, or `01/A6` command. This is a different connection path from the current Pocket HUD implementation and from several public clients.
