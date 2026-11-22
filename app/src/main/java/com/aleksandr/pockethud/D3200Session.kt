@@ -16,7 +16,7 @@ internal class D3200Session(
     private val close: () -> Unit,
     private val trace: (String) -> Unit = {}
 ) {
-    private enum class Phase { NEW, HANDSHAKE, INFO, START, FILE_EVENT, VERIFY_START, LIST, LEGACY_LIST, MANUAL_START, HEAD, AUDIO, WAIT_ROTATION, STOP, CLOSED }
+    private enum class Phase { NEW, HANDSHAKE, INFO, START, FILE_EVENT, VERIFY_START, LIST, LEGACY_LIST, MANUAL_START, HEAD, AUDIO, WAIT_ROTATION, WAIT_STOP_FOR_OFFLINE_PROBE, STOP, CLOSED }
 
     private var phase = Phase.NEW
     private var keyPair: KeyPair? = null
@@ -32,6 +32,8 @@ internal class D3200Session(
     private var maxSequence = -1L
     private var opusCount = 0L
     private var fileOpusCount = 0L
+    private var realtimeMode = true
+    private var realtimeRejected = false
 
     fun begin() {
         check(phase == Phase.NEW)
@@ -88,16 +90,26 @@ internal class D3200Session(
             }
             0x1a07 -> if (phase == Phase.HEAD) {
                 val responseCode = if (payload.isNotEmpty()) u8(payload, 0) else null
-                trace("realtime result=${if (frame.isRejected) "rejected" else "response"} status=${frame.status} payloadHex=${payload.joinToString("") { "%02X".format(it.toInt() and 0xff) }}")
-                check(!frame.isRejected) {
-                    "D3200 отказал в 1A/07 (status=${frame.status}, response=${responseCode?.let { "%02X".format(it) } ?: "empty"}). Возможны ограничения realtime для активной записи, состояния привязки или прошивки."
+                trace("file_header_response mode=${if (realtimeMode) "realtime" else "completed"} status=${frame.status} payloadHex=${payload.joinToString("") { "%02X".format(it.toInt() and 0xff) }}")
+                if (frame.isRejected) {
+                    if (realtimeMode && frame.explicitRefusal) {
+                        realtimeRejected = true
+                        status("D3200 отказал в live BLE. Останови запись кнопкой — проверим передачу готового файла")
+                        arm(Phase.WAIT_STOP_FOR_OFFLINE_PROBE, 120_000)
+                        return
+                    }
+                    error("D3200 отказал в 1A/07 (mode=${if (realtimeMode) "realtime" else "completed"}, status=${frame.status}, response=${responseCode?.let { "%02X".format(it) } ?: "empty"})")
                 }
-                check(payload.size >= 87 && u8(payload, 86) == 0 && u32(payload, 4) == 0xffffffffL) {
-                    "Устройство отказало в realtime BLE-запросе (заголовок)"
-                }
+                check(payload.size >= 87) { "Заголовок 1A/07 короче 87 байт" }
                 val headId = u32(payload, 0)
+                val fileSize = u32(payload, 4)
+                val errorCode = u8(payload, 86)
+                check(errorCode == 0) { "Ошибка заголовка 1A/07: code=$errorCode size=$fileSize" }
+                check(if (realtimeMode) fileSize == 0xffffffffL else fileSize in 1..0xfffffffeL) {
+                    "Неверный размер 1A/07 для режима ${if (realtimeMode) "realtime" else "completed"}: $fileSize"
+                }
                 check(headId != 0L && headId == notifiedFileId) {
-                    "Идентификатор realtime-записи не совпадает с запрошенным"
+                    "Идентификатор файла D3200 не совпадает с запрошенным"
                 }
                 fileKey?.fill(0)
                 fileKey = D3200Crypto.unwrap(requireNotNull(sessionKey), payload.copyOfRange(70, 86),
@@ -106,12 +118,17 @@ internal class D3200Session(
                 nonce = payload.copyOfRange(8, 24)
                 maxSequence = -1L
                 fileOpusCount = 0L
-                trace("realtime result=accepted fileId=$headId")
-                if (!startNextLive()) {
-                    status("Realtime открыт, file ID=$headId. Ожидание Opus")
-                    arm(Phase.AUDIO, 6000)
+                trace("file_header_accepted mode=${if (realtimeMode) "realtime" else "completed"} fileId=$headId size=$fileSize")
+                if (realtimeMode) {
+                    if (!startNextLive()) {
+                        status("Realtime открыт, file ID=$headId. Ожидание Opus")
+                        arm(Phase.AUDIO, 6000)
+                    } else {
+                        trace("realtime_header_followed_by_queued_rotation fileId=$headId")
+                    }
                 } else {
-                    trace("realtime_header_followed_by_queued_rotation fileId=$headId")
+                    status("Обычная BLE-передача готового файла началась")
+                    arm(Phase.AUDIO, 6000)
                 }
             }
             0x1a08, 0x1a12 -> if (phase == Phase.AUDIO && !frame.isRejected &&
@@ -143,7 +160,10 @@ internal class D3200Session(
                     nonce = null
                     maxSequence = -1L
                     fileOpusCount = 0L
-                    if (!startNextLive()) {
+                    if (!realtimeMode) {
+                        status("Готовый файл получен по BLE: $fileOpusCount Opus-пакетов")
+                        finish()
+                    } else if (!startNextLive()) {
                         status("Realtime-сегмент завершён, ожидание следующего файла")
                         arm(Phase.WAIT_ROTATION, 60_000)
                     }
@@ -219,10 +239,24 @@ internal class D3200Session(
                     finish()
                 }
                 RecordingSignal.ACK, RecordingSignal.STOPPED -> {
-                    status("Остановка D3200 подтверждена")
-                    finish()
+                    if (realtimeRejected && notifiedFileId != null) {
+                        startedByPocketHud = false
+                        stopRequested = false
+                        status("Запись остановлена. Проверяем передачу готового файла")
+                        startCompletedFileProbe()
+                    } else {
+                        status("Остановка D3200 подтверждена")
+                        finish()
+                    }
                 }
                 else -> Unit
+            }
+            Phase.WAIT_STOP_FOR_OFFLINE_PROBE -> if (
+                signal == RecordingSignal.STOPPED && (frame.successStatus || frame.payload.size >= 10)
+            ) {
+                startedByPocketHud = false
+                status("Запись остановлена. Проверяем передачу готового файла")
+                startCompletedFileProbe()
             }
             Phase.FILE_EVENT, Phase.HEAD, Phase.AUDIO, Phase.WAIT_ROTATION -> if (
                 signal == RecordingSignal.STOPPED && (frame.successStatus || frame.payload.size >= 10)
@@ -297,6 +331,10 @@ internal class D3200Session(
                 finish()
             }
             Phase.WAIT_ROTATION, Phase.CLOSED -> Unit
+            Phase.WAIT_STOP_FOR_OFFLINE_PROBE -> {
+                status("Не дождался остановки записи для проверки готового файла")
+                finish()
+            }
             else -> {
                 if ((phase == Phase.HEAD || phase == Phase.AUDIO) && startNextLive()) {
                     trace("rotation_recovered_after_timeout phase=$phase")
@@ -341,18 +379,30 @@ internal class D3200Session(
         return true
     }
 
-    private fun startLive(fileId: Long) {
+    private fun startCompletedFileProbe() {
+        val fileId = notifiedFileId ?: run {
+            error("ID записи D3200 отсутствует для проверки готового файла")
+            return
+        }
+        realtimeRejected = false
+        trace("completed_file_probe fileId=$fileId realtimeFlag=0")
+        startLive(fileId, realtimeFlag = 0)
+    }
+
+    private fun startLive(fileId: Long, realtimeFlag: Int = 1) {
         require(fileId in 1..0xffffffffL) { "Некорректный ID realtime-файла D3200" }
+        require(realtimeFlag in 0..1)
         notifiedFileId = fileId
+        realtimeMode = realtimeFlag == 1
         fileKey?.fill(0)
         fileKey = null
         nonce?.fill(0)
         nonce = null
         maxSequence = -1L
         fileOpusCount = 0L
-        status("Запрос realtime, file ID=$fileId")
-        trace("realtime_request fileId=$fileId")
-        request(Phase.HEAD, Command.LIVE.frame(fileId = fileId))
+        status(if (realtimeMode) "Запрос realtime, file ID=$fileId" else "Запрос готового файла по BLE, file ID=$fileId")
+        trace("file_transfer_request fileId=$fileId realtimeFlag=$realtimeFlag offset=0")
+        request(Phase.HEAD, Command.LIVE.frame(fileId = fileId, realtimeFlag = realtimeFlag))
     }
 
     private fun request(next: Phase, request: ByteArray, ms: Long = 6000) {
