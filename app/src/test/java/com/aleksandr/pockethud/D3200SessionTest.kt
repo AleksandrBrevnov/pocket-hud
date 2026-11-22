@@ -142,7 +142,7 @@ class D3200SessionTest {
         assertEquals("1a0e", link.lastCommand())
         link.session.timeout()
         assertEquals("1a07", link.lastCommand())
-        assertEquals(0, link.sent.last()[17].toInt())
+        assertEquals(18, D3200Protocol.u16(link.sent.last(), 7))
         assertFalse(link.closed)
     }
 
