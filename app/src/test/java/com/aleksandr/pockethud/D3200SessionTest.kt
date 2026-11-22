@@ -77,7 +77,7 @@ class D3200SessionTest {
         assertEquals(1, link.sent.last()[17].toInt())
         link.postStopLists()
         assertEquals("completed-file request must omit realtime flag", 18, D3200Protocol.u16(link.sent.last(), 7))
-        assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in listOf("0b87", "0b8b", "0b8c") })
+        assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in listOf("0b87", "0b8b", "0b8c", "1a10") })
     }
 
     @Test fun completedFileProbeDecryptsOpusAndFinishesWithoutBindingCommands() {
