@@ -112,7 +112,7 @@ Source: user-provided `pockethud-soundcore(6).log`. This summary is redacted; no
 
 ## 8. Binding-state comparison and command naming
 
-The [tacshi/Soundcore protocol notes](https://github.com/tacshi/Soundcore/blob/main/PROTOCOL.md) report hardware tests on firmware 04.73 in which completed-file export and realtime audio worked over BLE **after unbinding**. Those tests used `2E/01` and `1A/07`, without `0B/87) binding commands or a Feishu account token. The same notes explicitly say those observations are not guaranteed for other firmware or account-binding states and leave local-only binding requirements open.
+The [tacshi/Soundcore protocol notes](https://github.com/tacshi/Soundcore/blob/main/PROTOCOL.md) report hardware tests on firmware 04.73 in which completed-file export and realtime audio worked over BLE **after unbinding**. Those tests used `2E/01` and `1A/07`, without `0B/87` binding commands or a Feishu account token. The same notes explicitly say those observations are not guaranteed for other firmware or account-binding states and leave local-only binding requirements open.
 
 The same public notes identify `0B/87` as the stock bind/unbind command and `0B/88` as a bind confirmation. The official-app capture discussed here contains a different command, `0B/8B`. Do not conflate `0B/8B` with `0B/87`, and do not send either bind/unbind operation during this investigation.
 
