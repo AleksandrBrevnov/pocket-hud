@@ -125,7 +125,8 @@ class AuditTest(unittest.TestCase):
         self.assertEqual(4, events[2]["last_slice_flags"])
         serialized = json.dumps(result)
         self.assertNotIn("165", serialized)  # encrypted audio byte value is not emitted
-        self.assertNotIn("UID", serialized)
+        self.assertNotIn(bytes(range(44)).hex(), serialized)
+        self.assertNotIn(bytes(range(16)).hex(), serialized)
         self.assertNotIn("nonce", serialized.lower().replace("auth_nonce_bytes", ""))
 
     def test_completed_mode_and_dangerous_commands_are_only_observed(self):
