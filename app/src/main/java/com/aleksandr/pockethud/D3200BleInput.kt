@@ -324,6 +324,7 @@ internal class D3200BleInput(
 
     private fun finish() {
         if (finished) return
+        onTrace("ble_finish shuttingDown=$shuttingDown")
         finished = true
         handler.removeCallbacksAndMessages(null)
         session.discard()
