@@ -6,6 +6,7 @@ import com.aleksandr.pockethud.D3200Protocol.u32
 import com.aleksandr.pockethud.D3200Protocol.u8
 import java.security.KeyPair
 import java.security.interfaces.ECPublicKey
+import java.util.ArrayDeque
 
 internal class D3200Session(
     private val send: (ByteArray) -> Unit,
@@ -15,7 +16,7 @@ internal class D3200Session(
     private val close: () -> Unit,
     private val trace: (String) -> Unit = {}
 ) {
-    private enum class Phase { NEW, HANDSHAKE, INFO, START, FILE_EVENT, VERIFY_START, LIST, LEGACY_LIST, MANUAL_START, HEAD, AUDIO, STOP, CLOSED }
+    private enum class Phase { NEW, HANDSHAKE, INFO, START, FILE_EVENT, VERIFY_START, LIST, LEGACY_LIST, MANUAL_START, HEAD, AUDIO, WAIT_ROTATION, STOP, CLOSED }
 
     private var phase = Phase.NEW
     private var keyPair: KeyPair? = null
@@ -23,12 +24,14 @@ internal class D3200Session(
     private var fileKey: ByteArray? = null
     private var nonce: ByteArray? = null
     private var notifiedFileId: Long? = null
+    private val pendingFileIds = ArrayDeque<Long>()
     private var startedByPocketHud = false
     private var stopRequested = false
     private var startProbeReason = ""
     private var sawUnconfirmedRecording = false
     private var maxSequence = -1L
     private var opusCount = 0L
+    private var fileOpusCount = 0L
 
     fun begin() {
         check(phase == Phase.NEW)
@@ -51,23 +54,28 @@ internal class D3200Session(
             }
             0x0101 -> if (phase == Phase.INFO || phase == Phase.VERIFY_START) handleInfo(frame)
             0x1882 -> handleRecordingSignal(frame)
-            0x1a06 -> if (!frame.explicitRefusal && payload.size >= 4) {
-                val id = u32(payload, 0)
-                if (id != 0L) when (phase) {
-                    Phase.HANDSHAKE, Phase.INFO, Phase.VERIFY_START -> notifiedFileId = id
-                    Phase.START -> {
-                        notifiedFileId = id
-                        if (!stopRequested && sawUnconfirmedRecording) probeStart("file_event_without_confirmed_ack")
+            0x1a06 -> if (!frame.explicitRefusal) {
+                val event = D3200Protocol.recordingRotation(payload)
+                if (event != null) {
+                    val id = event.fileId
+                    trace("recording_rotation fileId=$id durationMs=${event.durationMs} appendPreAudio=${event.appendPreAudio} phase=$phase")
+                    when (phase) {
+                        Phase.HANDSHAKE, Phase.INFO, Phase.VERIFY_START -> notifiedFileId = id
+                        Phase.START -> {
+                            notifiedFileId = id
+                            if (!stopRequested && sawUnconfirmedRecording) probeStart("file_event_without_confirmed_ack")
+                        }
+                        Phase.FILE_EVENT, Phase.LIST, Phase.LEGACY_LIST, Phase.MANUAL_START -> {
+                            pendingFileIds.clear()
+                            startLive(id)
+                        }
+                        Phase.HEAD -> queueRotation(id)
+                        Phase.AUDIO, Phase.WAIT_ROTATION -> {
+                            if (id != notifiedFileId) startLive(id)
+                            else trace("duplicate_rotation_ignored fileId=$id")
+                        }
+                        else -> Unit
                     }
-                    Phase.FILE_EVENT, Phase.LIST, Phase.LEGACY_LIST, Phase.MANUAL_START -> {
-                        notifiedFileId = id
-                        startLive(id)
-                    }
-                    Phase.HEAD, Phase.AUDIO -> if (startedByPocketHud && id != notifiedFileId) {
-                        startedByPocketHud = false
-                        error("На D3200 началась другая запись")
-                    }
-                    else -> Unit
                 }
             }
             0x1b0e -> if (phase == Phase.LIST) {
@@ -85,15 +93,23 @@ internal class D3200Session(
                     "Устройство отказало в realtime BLE-запросе (заголовок)"
                 }
                 val headId = u32(payload, 0)
-                check(headId != 0L && (!startedByPocketHud || headId == notifiedFileId)) {
-                    "Идентификатор записи D3200 изменился"
+                check(headId != 0L && headId == notifiedFileId) {
+                    "Идентификатор realtime-записи не совпадает с запрошенным"
                 }
+                fileKey?.fill(0)
                 fileKey = D3200Crypto.unwrap(requireNotNull(sessionKey), payload.copyOfRange(70, 86),
                     payload.copyOfRange(24, 70))
+                nonce?.fill(0)
                 nonce = payload.copyOfRange(8, 24)
+                maxSequence = -1L
+                fileOpusCount = 0L
                 trace("realtime result=accepted fileId=$headId")
-                status("Realtime открыт, file ID=$headId. Ожидание Opus")
-                arm(Phase.AUDIO, 6000)
+                if (!startNextLive()) {
+                    status("Realtime открыт, file ID=$headId. Ожидание Opus")
+                    arm(Phase.AUDIO, 6000)
+                } else {
+                    trace("realtime_header_followed_by_queued_rotation fileId=$headId")
+                }
             }
             0x1a08, 0x1a12 -> if (phase == Phase.AUDIO && !frame.isRejected &&
                 (frame.id == 8 || (payload.isNotEmpty() && payload.size % 166 == 0))) {
@@ -102,14 +118,35 @@ internal class D3200Session(
                     val iv = D3200Crypto.counter(requireNotNull(nonce), slice.sequence)
                     val packet = D3200Crypto.ctr(requireNotNull(fileKey), iv, slice.ciphertext)
                     maxSequence = slice.sequence
+                    fileOpusCount++
                     if (opusCount++ == 0L) status("Получен Opus")
                     onOpus(packet)
                 }
                 arm(Phase.AUDIO, 6000)
             }
             0x1a0a -> if (phase == Phase.AUDIO && !frame.isRejected) {
-                startedByPocketHud = false
-                error("D3200 завершил поток")
+                val completion = D3200Protocol.fileCompletion(payload)
+                val currentFileId = notifiedFileId
+                val matchesCurrent = completion.fileId != 0L && completion.fileId == currentFileId
+                val untargetedCurrent = completion.fileId == 0L && fileOpusCount > 0L
+                if (matchesCurrent || untargetedCurrent) {
+                    trace("realtime_complete result=${completion.result} durationMs=${completion.durationMs} fileId=${completion.fileId} currentFileId=$currentFileId")
+                    check(completion.result == 0) {
+                        "D3200 завершил realtime с ошибкой ${completion.result}"
+                    }
+                    fileKey?.fill(0)
+                    fileKey = null
+                    nonce?.fill(0)
+                    nonce = null
+                    maxSequence = -1L
+                    fileOpusCount = 0L
+                    if (!startNextLive()) {
+                        status("Realtime-сегмент завершён, ожидание следующего файла")
+                        arm(Phase.WAIT_ROTATION, 60_000)
+                    }
+                } else {
+                    trace("stale_or_empty_realtime_complete ignored fileId=${completion.fileId} currentFileId=$currentFileId opus=$fileOpusCount")
+                }
             }
         }
     }
@@ -184,11 +221,12 @@ internal class D3200Session(
                 }
                 else -> Unit
             }
-            Phase.FILE_EVENT, Phase.HEAD, Phase.AUDIO -> if (
+            Phase.FILE_EVENT, Phase.HEAD, Phase.AUDIO, Phase.WAIT_ROTATION -> if (
                 signal == RecordingSignal.STOPPED && (frame.successStatus || frame.payload.size >= 10)
             ) {
                 startedByPocketHud = false
-                error("Запись остановлена на Soundcore Work")
+                status("Запись остановлена на Soundcore Work")
+                finish()
             }
             else -> Unit
         }
@@ -255,10 +293,14 @@ internal class D3200Session(
                 status("Подтверждение остановки D3200 не получено")
                 finish()
             }
-            Phase.CLOSED -> Unit
+            Phase.WAIT_ROTATION, Phase.CLOSED -> Unit
             else -> {
-                status(if (phase == Phase.AUDIO) "Нет аудио от D3200" else "Истекло ожидание D3200 ($phase)")
-                stop()
+                if ((phase == Phase.HEAD || phase == Phase.AUDIO) && startNextLive()) {
+                    trace("rotation_recovered_after_timeout phase=$phase")
+                } else {
+                    status(if (phase == Phase.AUDIO) "Нет аудио от D3200" else "Истекло ожидание D3200 ($phase)")
+                    stop()
+                }
             }
         }
     }
@@ -271,11 +313,42 @@ internal class D3200Session(
         sessionKey = null
         fileKey?.fill(0)
         fileKey = null
+        nonce?.fill(0)
         nonce = null
+        pendingFileIds.clear()
+        fileOpusCount = 0L
+    }
+
+    private fun queueRotation(fileId: Long) {
+        if (fileId == notifiedFileId || pendingFileIds.contains(fileId)) {
+            trace("duplicate_rotation_ignored fileId=$fileId")
+            return
+        }
+        if (pendingFileIds.size >= 8) {
+            val dropped = pendingFileIds.removeFirst()
+            trace("rotation_queue_overflow droppedFileId=$dropped")
+        }
+        pendingFileIds.addLast(fileId)
+        trace("rotation_queued fileId=$fileId pending=${pendingFileIds.size}")
+    }
+
+    private fun startNextLive(): Boolean {
+        val nextFileId = pendingFileIds.pollFirst() ?: return false
+        startLive(nextFileId)
+        return true
     }
 
     private fun startLive(fileId: Long) {
+        require(fileId in 1..0xffffffffL) { "Некорректный ID realtime-файла D3200" }
+        notifiedFileId = fileId
+        fileKey?.fill(0)
+        fileKey = null
+        nonce?.fill(0)
+        nonce = null
+        maxSequence = -1L
+        fileOpusCount = 0L
         status("Запрос realtime, file ID=$fileId")
+        trace("realtime_request fileId=$fileId")
         request(Phase.HEAD, Command.LIVE.frame(fileId = fileId))
     }
 
