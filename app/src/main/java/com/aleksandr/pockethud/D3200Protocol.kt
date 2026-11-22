@@ -53,6 +53,18 @@ internal object D3200Protocol {
 
     data class Slice(val sequence: Long, val flags: Int, val ciphertext: ByteArray)
 
+    data class RecordingRotation(
+        val fileId: Long,
+        val durationMs: Long?,
+        val appendPreAudio: Boolean
+    )
+
+    data class FileCompletion(
+        val result: Int,
+        val durationMs: Long,
+        val fileId: Long
+    )
+
     class Parser {
         private var tail = byteArrayOf()
 
@@ -91,6 +103,39 @@ internal object D3200Protocol {
         return (payload.indices step SLICE_SIZE).map {
             Slice(u32(payload, it), u8(payload, it + 4), payload.copyOfRange(it + 5, it + 165))
         }
+    }
+
+    /**
+     * Parse the 1A/06 new-file event.
+     *
+     * Legacy payload: fileId:u32le + appendPreAudio:u8.
+     * Current payload: fileId:u32le + durationMs:u32le + appendPreAudio:u8.
+     */
+    fun recordingRotation(payload: ByteArray): RecordingRotation? {
+        if (payload.size < 4) return null
+        val fileId = u32(payload, 0)
+        if (fileId == 0L) return null
+        val durationMs = if (payload.size >= 8) u32(payload, 4) else null
+        val appendIndex = when {
+            payload.size >= 9 -> 8
+            payload.size == 5 -> 4
+            else -> -1
+        }
+        return RecordingRotation(
+            fileId = fileId,
+            durationMs = durationMs,
+            appendPreAudio = appendIndex >= 0 && u8(payload, appendIndex) == 1
+        )
+    }
+
+    /**
+     * Parse 1A/0A: result:u8 + durationMs:u32le + fileId:u32le.
+     * Older devices may send only the result byte.
+     */
+    fun fileCompletion(payload: ByteArray): FileCompletion {
+        val result = payload.firstOrNull()?.let { it.toInt() and 255 } ?: 0
+        if (payload.size < 9) return FileCompletion(result, 0L, 0L)
+        return FileCompletion(result, u32(payload, 1), u32(payload, 5))
     }
 
     fun liveFileId(payload: ByteArray, legacy: Boolean): Long? {
