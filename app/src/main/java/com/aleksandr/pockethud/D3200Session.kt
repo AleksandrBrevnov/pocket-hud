@@ -87,8 +87,11 @@ internal class D3200Session(
                 if (id != null) startLive(id) else awaitManualStart(alreadyRecording = true)
             }
             0x1a07 -> if (phase == Phase.HEAD) {
-                trace("realtime result=${if (frame.isRejected) "rejected" else "response"} status=${frame.status}")
-                check(!frame.isRejected) { "Устройство отказало в realtime BLE-запросе" }
+                val responseCode = payload.firstOrNull()?.let { u8(payload, 0) }
+                trace("realtime result=${if (frame.isRejected) "rejected" else "response"} status=${frame.status} payloadHex=${payload.joinToString("") { "%02X".format(it) }}")
+                check(!frame.isRejected) {
+                    "D3200 отказал в 1A/07 (status=${frame.status}, response=${responseCode?.let { "%02X".format(it) } ?: "empty"}). Возможны ограничения realtime для активной записи, состояния привязки или прошивки."
+                }
                 check(payload.size >= 87 && u8(payload, 86) == 0 && u32(payload, 4) == 0xffffffffL) {
                     "Устройство отказало в realtime BLE-запросе (заголовок)"
                 }
