@@ -1950,6 +1950,7 @@ class PocketService : Service() {
                         val m = Regex("""\b(400|401|403)\b""").find(msg)
                         m?.value?.toIntOrNull()
                     }
+                    logD3200("gemini_ws_failure httpCode=${httpCode ?: "unknown"} running=$isRunning")
                     if (httpCode == 400 || httpCode == 401 || httpCode == 403) {
                         val errorLabel = if (httpCode == 400) {
                             "Некорректный запрос (HTTP 400)"
@@ -2002,6 +2003,7 @@ class PocketService : Service() {
                         return@post
                     }
                     Log.d(tag, "WebSocket закрыт ($code: $reason)")
+                    logD3200("gemini_ws_closed code=$code running=$isRunning")
                     isSetupComplete = false
                     setupWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
                     setupWatchdogRunnable = null
