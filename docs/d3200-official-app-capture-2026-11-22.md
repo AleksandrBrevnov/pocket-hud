@@ -44,13 +44,13 @@ The 446 × 20 ms units represent 8.92 seconds of audio content by the protocol's
 - The official app downloads a complete audio file over BLE using `1A/07`, `1A/08`, and `1A/0A`.
 
 **Not yet proven:**
-- That the captured transfer was realtime streaming. The 8-byte `1A/07` request has no realtime flag and is consistent with a completed-file pull. It must not be described as a live-stream success.
+- That the captured transfer was uninterrupted realtime streaming. The 8-byte `1A/07` request has no realtime flag; the header describes an open recording, and the app pauses it before the slice burst. It proves an active-file BLE transfer path, not continuous unpaused streaming.
 - That Pocket HUD can reuse the official app's authentication. The 62-byte request depends on a secret binding credential and fresh nonce; replaying captured ciphertext is not a valid authentication strategy.
 - The source or exact meaning of the 44-byte encrypted block. It may encode a longer UID/identity and timestamp or a different legacy auth structure; the capture alone does not reveal its plaintext.
 
 ## Consequences for Pocket HUD
 
-1. Current Pocket HUD performs `2E/01` ECDH and device-info read but does not perform the successful official-app `0B/8B` proof. This is now the leading concrete difference to investigate.
+1. Current Pocket HUD performs `2E/01` ECDH and device-info read but does not perform the successful official-app `0B/8B` proof. This is now the leading concrete difference to investigate. The official app's completed-file/active-file header request is also 8 bytes, while Pocket HUD previously sent 9 bytes even for its completed-file fallback.
 2. Do not send `0B/87`, `0B/8C`, `01/B8`, `1A/10`, OTA, unbind, or factory reset.
 3. Do not hardcode or replay the captured 62-byte authentication request. It contains session-specific encrypted material and a nonce.
 4. Next research task: establish where Soundcore App stores/derives its existing binding credential and why its 03.56 auth request uses a 44-byte encrypted block. Compare the official app's 01/01 identity fields with the documented UID input without publishing those values.
