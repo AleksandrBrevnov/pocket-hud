@@ -105,6 +105,22 @@
 - https://github.com/tacshi/Soundcore
 - https://github.com/ws/soundcore
 
+## Отдельный альтернативный транспорт: Dictation Mode
+
+Официальная документация soundcore / Typeless (проверено 2026-11-22):
+
+- Dictation Mode превращает D3200 во внешний Bluetooth-микрофон (audio input only); аудиовыход не поддерживается.
+- Для уже проданных устройств официальная статья требует firmware 03.58 или новее.
+- Вход в режим: три быстрых нажатия боковой кнопки; синяя индикация; затем сопряжение в системных Bluetooth settings.
+- В режиме Dictation устройство подключается только к одному телефону/компьютеру одновременно; выход из режима — отпускание боковой кнопки.
+- Официальное объявление Anker Japan сообщает, что firmware v03.66 rollout был приостановлен 17 ноября 2026 из-за дефекта; более свежего подтверждения возобновления в доступных источниках на 22 ноября не найдено.
+
+Источники:
+- https://service.soundcore.com/article-description/How-to-Use-soundcore-Work-with-Typeless
+- https://service.soundcore.com/article-description/How-to-Connect-soundcore-Work-to-Typeless
+- https://prtimes.jp/main/html/rd/p/000000691.000016775.html
+
+На пользовательском D3200 установлена 03.56, поэтому Dictation Mode пока не является доступным тестовым путём. Не запускать OTA. Если Anker возобновит исправленную прошивку, можно будет отдельно реализовать и проверить стандартный Android Bluetooth microphone input path в Pocket HUD — это будет альтернативой BLE 1A/07, а не частью текущего протокола.
 ## Автоматические тесты
 
 Добавлены проверки:
