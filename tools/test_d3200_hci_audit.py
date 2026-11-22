@@ -101,10 +101,10 @@ class AuditTest(unittest.TestCase):
         slices = []
         for sequence, flags in ((0, 2), (1, 0), (2, 4)):
             slices.append(sequence.to_bytes(4, "little") + bytes([flags]) +
-                          bytes([0xA5]) * 160 + b"\\x00")
+                          bytes([0xA5]) * 160 + bytes([0]))
         packets = [
             (0, d3200(0, 0x0B, 0x8B, auth_payload)),
-            (1, d3200(1, 0x0B, 0x8B, b"\\x00")),
+            (1, d3200(1, 0x0B, 0x8B, bytes([0]))),
             (1, d3200(1, 0x1A, 0x08, b"".join(slices))),
         ]
         raw = snoop([(direction, packet)
