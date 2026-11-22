@@ -172,11 +172,35 @@ class Audit:
             entry["status_low_nibble"] = status & 15
             if len(payload) == 1 and payload[0] == 255:
                 entry["response"] = "FF"
-        if direction == 0 and (command_type, command_id) == (0x1A, 0x07) and len(payload) == 9:
-            entry["transfer_mode"] = "realtime" if payload[8] == 1 else (
-                "completed" if payload[8] == 0 else "unknown")
-        if direction == 0 and (command_type, command_id) == (0x18, 0x82) and len(payload) == 1:
+        if direction == 0 and (command_type, command_id) == (0x1A, 0x07):
+            if len(payload) == 9:
+                entry["transfer_mode"] = "realtime" if payload[8] == 1 else (
+                    "completed" if payload[8] == 0 else "unknown")
+            elif len(payload) == 8:
+                entry["transfer_mode"] = "completed_file_request_without_mode_byte"
+        if direction == 0 and (command_type, command_id) == (0x18, 0x82) and payload:
             entry["record_control"] = {0: "stop", 1: "start", 2: "pause"}.get(payload[0], "other")
+        if (command_type, command_id) == (0x0B, 0x8B):
+            if direction == 0 and len(payload) >= 2:
+                encrypted_length = payload[0]
+                nonce_offset = 1 + encrypted_length
+                if nonce_offset < len(payload):
+                    nonce_length = payload[nonce_offset]
+                    if nonce_offset + 1 + nonce_length == len(payload):
+                        entry["auth_ciphertext_bytes"] = encrypted_length
+                        entry["auth_nonce_bytes"] = nonce_length
+            elif direction == 1 and len(payload) == 1:
+                entry["auth_result"] = payload[0]
+        if direction == 1 and (command_type, command_id) in ((0x1A, 0x08), (0x1A, 0x12)):
+            # Each transport unit is sequence:u32, flags:u8, encrypted Opus:160, pad:u8.
+            if payload and len(payload) % 166 == 0:
+                units = [payload[i:i + 166] for i in range(0, len(payload), 166)]
+                sequences = [int.from_bytes(unit[:4], "little") for unit in units]
+                entry["audio_slice_count"] = len(units)
+                entry["sequence_first"] = sequences[0]
+                entry["sequence_last"] = sequences[-1]
+                entry["first_slice_flags"] = units[0][4]
+                entry["last_slice_flags"] = units[-1][4]
         if (command_type, command_id) in ((0x0B, 0x87), (0x0B, 0x8C), (0x01, 0xB8), (0x1A, 0x10)):
             entry["caution"] = "state_changing_command_observed"
         self.entries.append(entry)
