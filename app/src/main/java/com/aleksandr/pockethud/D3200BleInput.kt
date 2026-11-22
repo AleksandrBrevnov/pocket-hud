@@ -195,7 +195,8 @@ internal class D3200BleInput(
      * without logging its MAC address or the rest of the manufacturer data.
      */
     private fun readAdvertisementBoundState(record: android.bluetooth.le.ScanRecord): String {
-        val data = record.manufacturerSpecificData ?: return "unknown"
+        val data = record.manufacturerSpecificData ?: return "unknown(no_manufacturer_data)"
+        if (data.size() == 0) return "unknown(no_manufacturer_data)"
         for (index in 0 until data.size()) {
             val bytes = data.valueAt(index) ?: continue
             if (bytes.size < 12) continue
@@ -205,7 +206,8 @@ internal class D3200BleInput(
                 return if ((flags and 0x80) != 0) "bound_bit_set" else "bound_bit_clear"
             }
         }
-        return "unknown"
+        val lengths = (0 until data.size()).joinToString(",") { data.valueAt(it)?.size?.toString() ?: "null" }
+        return "unknown(vendor_payload_lengths=$lengths)"
     }
 
     private fun traceReceived(frame: D3200Protocol.Frame) {
