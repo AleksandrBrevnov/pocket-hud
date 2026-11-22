@@ -48,6 +48,43 @@ class D3200ProtocolTest {
         }
     }
 
+
+    @Test fun parsesLegacyAndCurrentRealtimeRotationEvents() {
+        val legacy = D3200Protocol.recordingRotation(byteArrayOf(7, 0, 0, 0, 1))!!
+        assertEquals(7L, legacy.fileId)
+        assertNull(legacy.durationMs)
+        assertTrue(legacy.appendPreAudio)
+
+        val current = D3200Protocol.recordingRotation(
+            byteArrayOf(8, 0, 0, 0, 0xB8.toByte(), 0x0B, 0, 0, 1)
+        )!!
+        assertEquals(8L, current.fileId)
+        assertEquals(3000L, current.durationMs)
+        assertTrue(current.appendPreAudio)
+
+        assertFalse(D3200Protocol.recordingRotation(byteArrayOf(9, 0, 0, 0, 0))!!.appendPreAudio)
+        assertNull(D3200Protocol.recordingRotation(byteArrayOf(1, 2, 3)))
+        assertNull(D3200Protocol.recordingRotation(byteArrayOf(0, 0, 0, 0)))
+    }
+
+    @Test fun parsesTargetedAndLegacyRealtimeCompletionEvents() {
+        val complete = D3200Protocol.fileCompletion(
+            byteArrayOf(0, 0xE8.toByte(), 0x03, 0, 0, 42, 0, 0, 0)
+        )
+        assertEquals(0, complete.result)
+        assertEquals(1000L, complete.durationMs)
+        assertEquals(42L, complete.fileId)
+
+        val legacy = D3200Protocol.fileCompletion(byteArrayOf(1))
+        assertEquals(1, legacy.result)
+        assertEquals(0L, legacy.durationMs)
+        assertEquals(0L, legacy.fileId)
+
+        val empty = D3200Protocol.fileCompletion(byteArrayOf())
+        assertEquals(0, empty.result)
+        assertEquals(0L, empty.fileId)
+    }
+
     companion object {
         fun rx(type: Int, id: Int, payload: ByteArray, status: Int = 1): ByteArray {
             val size = 10 + payload.size
