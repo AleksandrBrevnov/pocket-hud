@@ -87,8 +87,8 @@ internal class D3200Session(
                 if (id != null) startLive(id) else awaitManualStart(alreadyRecording = true)
             }
             0x1a07 -> if (phase == Phase.HEAD) {
-                val responseCode = payload.firstOrNull()?.let { u8(payload, 0) }
-                trace("realtime result=${if (frame.isRejected) "rejected" else "response"} status=${frame.status} payloadHex=${payload.joinToString("") { "%02X".format(it) }}")
+                val responseCode = if (payload.isNotEmpty()) u8(payload, 0) else null
+                trace("realtime result=${if (frame.isRejected) "rejected" else "response"} status=${frame.status} payloadHex=${payload.joinToString("") { "%02X".format(it.toInt() and 0xff) }}")
                 check(!frame.isRejected) {
                     "D3200 отказал в 1A/07 (status=${frame.status}, response=${responseCode?.let { "%02X".format(it) } ?: "empty"}). Возможны ограничения realtime для активной записи, состояния привязки или прошивки."
                 }
