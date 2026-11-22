@@ -85,6 +85,16 @@ class AuditTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 analyze(p)
 
+    def test_unknown_vendor_initialization_opcode_is_visible_but_payload_redacted(self):
+        unknown = d3200(0, 0x10, 0xA2, b"PRIVATE_ACCOUNT_TOKEN")
+        raw = snoop([(0, p) for p in make_hci_packets(0, unknown)])
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "hci.log"
+            p.write_bytes(raw)
+            result = analyze(p)
+        self.assertEqual("10/A2", result["events"][0]["command"])
+        self.assertNotIn("PRIVATE_ACCOUNT_TOKEN", json.dumps(result))
+
     def test_completed_mode_and_dangerous_commands_are_only_observed(self):
         packets = [
             d3200(0, 0x1A, 7, b"\0\0\0\0" + b"\x01\x02\x03\x04" + b"\x00"),
