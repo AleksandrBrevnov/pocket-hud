@@ -25,6 +25,20 @@ class D3200ProtocolTest {
         }
     }
 
+    @Test fun officialAppCompletedFilePullUsesEightBytePayload() {
+        val request = D3200Protocol.Command.FILE_PULL.frame(fileId = 42)
+        assertEquals(18, request.size)
+        assertEquals(18, D3200Protocol.u16(request, 7))
+        assertEquals(42L, D3200Protocol.u32(request, 13))
+        assertEquals(0x08, request[0].toInt() and 0xff)
+        assertEquals(0xEE, request[1].toInt() and 0xff)
+        assertEquals((request.take(request.lastIndex).sumOf { it.toInt() and 0xff } and 0xff),
+            request.last().toInt() and 0xff)
+        assertThrows(IllegalArgumentException::class.java) {
+            D3200Protocol.Command.FILE_PULL.frame()
+        }
+    }
+
     @Test fun splitJoinedAndCorruptNotifications() {
         val parser = D3200Protocol.Parser()
         val rejected = rx(0x1a, 7, byteArrayOf(-1))
