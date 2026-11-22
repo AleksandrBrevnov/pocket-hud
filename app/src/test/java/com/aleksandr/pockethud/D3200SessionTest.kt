@@ -76,7 +76,7 @@ class D3200SessionTest {
         assertEquals("1a07", link.lastCommand()) // Still the rejected realtime request
         assertEquals(1, link.sent.last()[17].toInt())
         link.postStopLists()
-        assertEquals("completed-file request must use realtimeFlag=0", 0, link.sent.last()[17].toInt())
+        assertEquals("completed-file request must omit realtime flag", 18, D3200Protocol.u16(link.sent.last(), 7))
         assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in listOf("0b87", "0b8b", "0b8c") })
     }
 
@@ -118,7 +118,7 @@ class D3200SessionTest {
         link.session.timeout()
         assertEquals(count + 1, link.sent.size)
         assertEquals("1a07", link.lastCommand())
-        assertEquals(0, link.sent.last()[17].toInt())
+        assertEquals(18, D3200Protocol.u16(link.sent.last(), 7))
 
         val error = assertThrows(IllegalStateException::class.java) {
             link.reply(0x1a, 7, byteArrayOf(-1))
@@ -335,7 +335,7 @@ class D3200SessionTest {
             assertEquals("1a0e", lastCommand())
             reply(0x1a, 0x0e, byteArrayOf(-1))
             assertEquals("1a07", lastCommand())
-            assertEquals(0, sent.last()[17].toInt())
+            assertEquals(18, D3200Protocol.u16(sent.last(), 7))
         }
 
         fun rotation(fileId: Int): ByteArray = byteArrayOf(
