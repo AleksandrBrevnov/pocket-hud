@@ -177,7 +177,7 @@ class Audit:
                 entry["transfer_mode"] = "realtime" if payload[8] == 1 else (
                     "completed" if payload[8] == 0 else "unknown")
             elif len(payload) == 8:
-                entry["transfer_mode"] = "completed_file_request_without_mode_byte"
+                entry["transfer_mode"] = "legacy_file_header_request_without_mode_byte"
         if direction == 0 and (command_type, command_id) == (0x18, 0x82) and payload:
             entry["record_control"] = {0: "stop", 1: "start", 2: "pause"}.get(payload[0], "other")
         if (command_type, command_id) == (0x0B, 0x8B):
