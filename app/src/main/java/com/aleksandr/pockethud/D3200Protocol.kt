@@ -8,7 +8,7 @@ internal object D3200Protocol {
 
     enum class Command(val type: Int, val id: Int) {
         HANDSHAKE(0x2e, 1), INFO(1, 1), START(0x18, 0x82), STOP(0x18, 0x82),
-        LIST(0x1b, 0x0e), LEGACY_LIST(0x1a, 0x0e), LIVE(0x1a, 7);
+        LIST(0x1b, 0x0e), LEGACY_LIST(0x1a, 0x0e), LIVE(0x1a, 7), FILE_PULL(0x1a, 7);
 
         fun frame(
             publicKey: ByteArray = byteArrayOf(),
@@ -16,7 +16,7 @@ internal object D3200Protocol {
             realtimeFlag: Int = 1
         ): ByteArray {
             require(this == HANDSHAKE || publicKey.isEmpty())
-            require(this == LIVE || fileId == 0L)
+            require(this == LIVE || this == FILE_PULL || fileId == 0L)
             require(this == LIVE || realtimeFlag == 1)
             val payload = when (this) {
                 HANDSHAKE -> publicKey.also { require(it.size == 65 && it[0] == 4.toByte()) }
@@ -28,6 +28,10 @@ internal object D3200Protocol {
                     require(fileId in 1..0xffffffffL)
                     require(realtimeFlag in 0..1)
                     ByteArray(4) + ByteArray(4) { (fileId shr (it * 8)).toByte() } + byteArrayOf(realtimeFlag.toByte())
+                }
+                FILE_PULL -> {
+                    require(fileId in 1..0xffffffffL)
+                    ByteArray(4) + ByteArray(4) { (fileId shr (it * 8)).toByte() }
                 }
             }
             val length = MIN_FRAME + payload.size
