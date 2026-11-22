@@ -921,7 +921,7 @@ class PocketService : Service() {
         d3200Attempt = epoch
         d3200PcmSent.set(0)
         d3200PcmDropped.set(0)
-        logD3200("--- START PocketHUD ${BuildConfig.VERSION_NAME} ---")
+        logD3200("--- START PocketHUD 1.0.61-d3200-continuous ---")
         activeAudioSource = "Soundcore Work BLE"
         d3200Input = D3200BleInput(applicationContext, { status ->
             if (d3200Epoch == epoch && isRunning) {
