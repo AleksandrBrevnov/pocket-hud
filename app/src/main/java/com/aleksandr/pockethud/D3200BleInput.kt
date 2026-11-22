@@ -20,7 +20,6 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
 import java.util.ArrayDeque
-import java.util.Locale
 import java.util.UUID
 
 @SuppressLint("MissingPermission")
