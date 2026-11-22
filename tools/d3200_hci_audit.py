@@ -180,6 +180,15 @@ class Audit:
                 entry["transfer_mode"] = "legacy_file_header_request_without_mode_byte"
         if direction == 0 and (command_type, command_id) == (0x18, 0x82) and payload:
             entry["record_control"] = {0: "stop", 1: "start", 2: "pause"}.get(payload[0], "other")
+        if (command_type, command_id) == (0x1A, 0xA7):
+            # The official 03.56 app repeatedly writes one safe-to-report flag byte,
+            # followed by an empty successful ACK. Its meaning is not yet known.
+            if direction == 0:
+                entry["official_a7_request"] = (
+                    "01_observed" if payload == b"\x01" else "other_redacted")
+            else:
+                entry["official_a7_ack"] = bool(not payload and status is not None and
+                                                (status & 15) == 1)
         if (command_type, command_id) == (0x0B, 0x8B):
             if direction == 0 and len(payload) >= 2:
                 encrypted_length = payload[0]

@@ -129,6 +129,23 @@ class AuditTest(unittest.TestCase):
         self.assertNotIn(bytes(range(16)).hex(), serialized)
         self.assertNotIn("nonce", serialized.lower().replace("auth_nonce_bytes", ""))
 
+    def test_official_a7_observation_redacts_unknown_payload(self):
+        packets = [
+            (0, d3200(0, 0x1A, 0xA7, b"\x01")),
+            (1, d3200(1, 0x1A, 0xA7)),
+            (0, d3200(0, 0x1A, 0xA7, b"PRIVATE")),
+        ]
+        raw = snoop([(direction, chunk) for direction, frame in packets
+                     for chunk in make_hci_packets(direction, frame)])
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "hci.log"
+            p.write_bytes(raw)
+            events = analyze(p)["events"]
+        self.assertEqual("01_observed", events[0]["official_a7_request"])
+        self.assertTrue(events[1]["official_a7_ack"])
+        self.assertEqual("other_redacted", events[2]["official_a7_request"])
+        self.assertNotIn("PRIVATE", json.dumps(events))
+
     def test_legacy_eight_byte_file_header_request_is_not_mislabeled_realtime(self):
         request = d3200(0, 0x1A, 0x07, bytes(4) + (42).to_bytes(4, "little"))
         raw = snoop([(0, packet) for packet in make_hci_packets(0, request)])

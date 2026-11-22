@@ -118,19 +118,29 @@ The same public notes identify `0B/87` as the stock bind/unbind command and `0B/
 
 This gives one new hypothesis to investigate, not a conclusion: firmware 03.56 in a bound state may require an official-app-specific authenticated session before file transport, whereas the public 04.73 test succeeded after unbinding. The available evidence does not prove this relationship. No unbind test is permitted.
 
-## 9. Exact data still missing for safe 03.56 implementation
+## 9. Verified original BTSnoop and remaining auth unknowns
 
-The earlier analysis of the official-app BTSnoop recorded only:
-- `0B/8B` payload length 62 bytes, comprising a 44-byte encrypted block and a 16-byte nonce; response result was reported as `00`.
-- `1A/A7` was sent three times and acknowledged each time.
-- No exact byte-level field offsets, length-prefix values, UID representation, timestamp fields, payload bytes, or acknowledgement payloads were retained.
+The user supplied the complete original Android Bug Report ZIP; its
+BTSnoop trace has now been re-parsed. See
+[the verified 2026-11-22 official capture](d3200-official-app-capture-2026-11-22-verified.md).
 
-Therefore, the exact `0B/8B` builder and `1A/A7` setup payload cannot be reconstructed from the recorded summary. Do not guess the missing fields, replay ciphertext/nonces, or synthesize credentials. A fresh sanitized extraction from the original BTSnoop, or static analysis of the official Soundcore App 5.0.39 implementation, is required before implementing these commands.
+- `0B/8B`: 62-byte request = length byte `2C`, 44 ciphertext bytes,
+  length byte `10`, 16 nonce bytes. RX result byte `00`; successful status.
+- `1A/A7`: 1-byte request `01`, 0-byte successful ACK; observed three times.
+- `1A/0E` succeeds after authentication; `1A/07` returns an 87-byte header;
+  the app requests pause `18/82` with `02 01`, then 446 contiguous slices.
+- The official app issued `1A/10` delete after the transfer. Do not copy this.
+
+The exact plaintext of the 44-byte auth field, source of the **existing**
+binding credential, semantics of `1A/A7`, and file-key unwrap path are
+still unresolved. We have precise ciphertext/nonce boundaries **but not
+authorization material**. Replaying captured ciphertext, guessing a key,
+or modifying the binding is prohibited.
 
 ## 6. Next steps
 
-1. Recover a sanitized command timeline from the original BTSnoop (or create a fresh official-app capture). Keep raw HCI and all secret fields local; share only the redacted audit JSON.
-2. Inspect the official app 5.0.39 implementation or a second capture to identify the `1A/A7` payload/semantics and the exact `0B/8B` field layout without publishing ciphertext or nonces.
+1. Completed: recover and validate the original BTSnoop timeline and document the redacted command layouts. Keep raw HCI and all secret fields local.
+2. Research the remaining semantics of `1A/A7` and the 44-byte plaintext/auth key generation; the exact observed payload shapes are documented.
 3. Establish a safe source for the already-existing binding credential. Do not rotate it.
 4. Implement a firmware-specific 03.56 profile only after the authentication and file-key derivation are supported by evidence.
 5. Test paused-file BLE retrieval first. Then separately test whether repeated pause/pull/resume cycles exist and whether a true unpaused realtime path is available.

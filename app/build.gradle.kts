@@ -11,8 +11,8 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 72
-        versionName = "1.0.68-d3200-safe-diagnostics"
+        versionCode = 73
+        versionName = "1.0.69-d3200-capture-audit"
     }
 
     signingConfigs {
