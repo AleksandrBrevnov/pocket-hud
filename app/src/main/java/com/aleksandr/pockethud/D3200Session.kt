@@ -105,7 +105,12 @@ internal class D3200Session(
             }
             0x1a07 -> if (phase == Phase.HEAD) {
                 val responseCode = if (payload.isNotEmpty()) u8(payload, 0) else null
-                trace("file_header_response mode=${if (realtimeMode) "realtime" else "completed"} status=${frame.status} payloadHex=${payload.joinToString("") { "%02X".format(it.toInt() and 0xff) }}")
+                val responsePayloadDescription = if (payload.size <= 16) {
+                    payload.joinToString("") { "%02X".format(it.toInt() and 0xff) }
+                } else {
+                    "redacted(length=${payload.size})"
+                }
+                trace("file_header_response mode=${if (realtimeMode) "realtime" else "completed"} status=${frame.status} payloadInfo=$responsePayloadDescription")
                 if (frame.isRejected) {
                     if (realtimeMode && frame.explicitRefusal) {
                         realtimeRejected = true
