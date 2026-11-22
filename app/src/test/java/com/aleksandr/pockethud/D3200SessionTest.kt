@@ -61,15 +61,42 @@ class D3200SessionTest {
         assertEquals(listOf("2e01", "0101"), link.sent.map { it.copyOfRange(5, 7).hex() })
     }
 
-    @Test fun realtimeRejectionCanStopOnlyOwnRecording() {
+    @Test fun realtimeRejectionWaitsForStopThenRequestsCompletedFile() {
         val link = Link()
         link.handshake(recording = false)
         link.reply(0x18, 0x82)
         link.reply(0x1a, 6, byteArrayOf(42, 0, 0, 0))
-        val error = assertThrows(IllegalStateException::class.java) { link.reply(0x1a, 7, byteArrayOf(-1)) }
-        assertTrue(error.message!!.contains("realtime BLE"))
-        link.session.stop()
-        assertEquals(0, link.sent.last()[9].toInt())
+        link.reply(0x1a, 7, byteArrayOf(-1))
+
+        assertFalse(link.closed)
+        assertEquals("1a07", link.lastCommand())
+        link.reply(0x18, 0x82, byteArrayOf(0))
+
+        assertFalse(link.closed)
+        assertEquals("1a07", link.lastCommand())
+        assertEquals("completed-file request must use realtimeFlag=0", 0, link.sent.last()[17].toInt())
+        assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in listOf("0b87", "0b8b", "0b8c") })
+    }
+
+    @Test fun completedFileProbeDecryptsOpusAndFinishesWithoutBindingCommands() {
+        val link = Link()
+        link.handshake(recording = false)
+        link.reply(0x18, 0x82)
+        link.reply(0x1a, 6, byteArrayOf(42, 0, 0, 0))
+        link.reply(0x1a, 7, byteArrayOf(-1))
+        link.reply(0x18, 0x82, byteArrayOf(0))
+
+        val fileKey = ByteArray(32) { (it + 1).toByte() }
+        val nonce = ByteArray(16) { (it + 3).toByte() }
+        link.header(42, fileKey, nonce, fileSize = 166)
+        val opus = byteArrayOf(0xbc.toByte(), 12, 34).copyOf(160)
+        link.audio(fileKey, nonce, 0, opus.copyOfRange(0, 3))
+        link.reply(0x1a, 0x0a, link.complete(42))
+
+        assertEquals(1, link.opus.size)
+        assertArrayEquals(opus, link.opus.single())
+        assertTrue(link.closed)
+        assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in listOf("0b87", "0b8b", "0b8c") })
     }
 
     @Test fun decryptsLiveAudioAndSuppressesRepeatedSlices() {
@@ -261,14 +288,14 @@ class D3200SessionTest {
             0, 0xE8.toByte(), 0x03, 0, 0, fileId.toByte(), 0, 0, 0
         )
 
-        fun header(fileId: Int, fileKey: ByteArray, nonce: ByteArray) {
+        fun header(fileId: Int, fileKey: ByteArray, nonce: ByteArray, fileSize: Long = 0xffffffffL) {
             val sessionNonce = ByteArray(16) { (it + 5).toByte() }
             val wrapped = D3200Crypto.ctr(
                 sessionKey, sessionNonce, "soundcored3200".toByteArray() + fileKey
             )
             val id = ByteArray(4) { (fileId ushr (it * 8)).toByte() }
-            val payload = id + byteArrayOf(-1, -1, -1, -1) + nonce +
-                wrapped + sessionNonce + byteArrayOf(0)
+            val size = ByteArray(4) { (fileSize shr (it * 8)).toByte() }
+            val payload = id + size + nonce + wrapped + sessionNonce + byteArrayOf(0)
             reply(0x1a, 0x07, payload)
         }
 
