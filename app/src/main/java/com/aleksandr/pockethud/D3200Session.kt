@@ -330,6 +330,7 @@ internal class D3200Session(
     }
 
     fun stop() {
+        trace("session_stop_requested phase=$phase ownership=$startedByPocketHud offlineAttempts=$offlineProbeAttempts")
         stopRequested = true
         when {
             phase == Phase.STOP || phase == Phase.CLOSED -> return
