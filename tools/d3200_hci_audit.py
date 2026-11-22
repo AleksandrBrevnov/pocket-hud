@@ -25,7 +25,6 @@ RX_MAGIC = b"\x09\xff\x00\x00"
 TX_MAGIC = b"\x08\xee\x00\x00\x00"
 MAX_RECORD = 1024 * 1024
 MAX_FRAME = 65535
-D3200_TYPES = {0x01, 0x0B, 0x18, 0x1A, 0x1B, 0x2E}
 
 
 @contextmanager
@@ -156,8 +155,6 @@ class Audit:
                 del buffer[0]
                 continue
             del buffer[:length]
-            if frame[5] not in D3200_TYPES:
-                continue
             self.add_entry(ts, direction, frame[4] if direction else None,
                            frame[5], frame[6], frame[9:-1])
 
