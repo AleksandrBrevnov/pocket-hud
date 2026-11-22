@@ -28,7 +28,7 @@ The 1.0.67 completed-file request length is therefore correct, but the device st
 The redacted BTSnoop audit documented the following successful sequence:
 
 1. `01/01` device information.
-2. `0B/8B` connection authentication; device result byte is `00`.
+2. `0B/8B` authentication-like pre-transfer step (previously interpreted as connection authentication); device result byte is `00`. Its exact semantics are not yet independently established.
 3. `1A/A7` setup command, sent three times and acknowledged each time.
 4. `1A/0E` file-list request.
 5. `1A/06` recording event.
@@ -67,7 +67,7 @@ Do not guess a longer UID, replay captured ciphertext, reuse a nonce, or send bi
 
 - `D3200BleInput`: BLE scan, GATT connect, service/characteristic discovery, CCCD notification subscription, serialized writes, frame parsing, and session lifecycle. The latest device log confirms these transport steps work.
 - `D3200Protocol`: RCSP-style frame parser, additive checksum, `1A/06` event parsing, `1A/07` request builders, and 166-byte slice parsing. The completed-file request is eight payload bytes.
-- `D3200Session`: current state machine starts with `2E/01` ECDH, then `01/01`, attempts recording control, and requests `1A/07`. It does not implement the successful official `0B/8B` authentication or `1A/A7` setup sequence. It also does not reproduce the official pause-before-slice-transfer step.
+- `D3200Session`: current state machine starts with `2E/01` ECDH, then `01/01`, attempts recording control, and requests `1A/07`. It does not implement the official `0B/8B` authentication-like step or `1A/A7` setup sequence. It also does not reproduce the official pause-before-slice-transfer step.
 - `D3200Crypto`: assumes the ECDH-derived session key unwraps the file key. The official-app capture has no `2E/01`; its header-key derivation path must be established before using this crypto path on 03.56.
 - `D3200OpusDecoder` and `D3200Pcm`: the intended path is encrypted 160-byte Opus slot → AES-CTR decrypt → Android Opus decoder → mono PCM16 → 16 kHz resampling/framing. This has unit-test coverage but is not yet validated against actual 03.56 audio because no slices have reached Pocket HUD.
 - `PocketService`: D3200 PCM is offered to the existing 16 kHz mono Gemini Live queue. Gemini Live setup and playback are separate from the observed BLE refusal; no evidence currently points to the Gemini pipeline as the blocker.
@@ -76,7 +76,7 @@ Do not guess a longer UID, replay captured ciphertext, reuse a nonce, or send bi
 ## 5. Current conclusions
 
 1. BLE transport is operational; protocol authorization/initialization is the leading unresolved difference.
-2. The official 03.56 app's `0B/8B` and `1A/A7` sequence must be understood before changing the transfer state machine.
+2. The official 03.56 app's `0B/8B` authentication-like step and `1A/A7` sequence must be understood before changing the transfer state machine.
 3. The `0B/8B` payload is not compatible with the 23-byte-UID builder currently published in `ws/soundcore`.
 4. The existing binding key must be obtained through a legitimate, non-destructive source. No bind, unbind, silent reset, factory reset, or OTA is acceptable.
 5. The official capture proves paused active-file retrieval, not continuous live BLE streaming.
