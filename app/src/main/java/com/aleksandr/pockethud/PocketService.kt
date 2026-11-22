@@ -669,6 +669,7 @@ class PocketService : Service() {
                     return START_STICKY
                 }
                 ACTION_STOP_SERVICE -> {
+                    logD3200("stop_service_intent reason=wearable_action")
                     triggerWearHapticFeedback()
                     logEvent("WEAR_ACTION_STOP_SERVICE")
                     stopSelf()
@@ -887,7 +888,7 @@ class PocketService : Service() {
             if (selectedEngine == TranslationEngine.CASCADED_REST) {
                 restartSpeechRecognizer()
             } else {
-                stopD3200()
+                stopD3200("microphone_source_change")
                 stopAndroidCapture()
                 audioSendQueue.clear()
                 if (newSource == MicSource.SOUNDCORE_D3200) stopLiveArchive()
@@ -942,7 +943,11 @@ class PocketService : Service() {
         }, ::logD3200).also { it.start() }
     }
 
-    private fun stopD3200() {
+    private fun stopD3200(reason: String) {
+        val active = d3200Input != null
+        logD3200("stop_d3200_requested reason=$reason epoch=$d3200Epoch active=$active " +
+            "running=$isRunning engine=$selectedEngine mic=$selectedMicSource " +
+            "socket=$connectionState setup=$isSetupComplete")
         d3200Epoch++
         d3200Input?.stop()
     }
@@ -2770,7 +2775,7 @@ class PocketService : Service() {
                 isSetupComplete = false
                 isRotationPending = false
 
-                stopD3200()
+                stopD3200("translation_engine_change")
                 stopAndroidCapture()
                 sendThread?.interrupt()
                 sendThread = null
@@ -3787,8 +3792,9 @@ class PocketService : Service() {
     }
 
     override fun onDestroy() {
+        logD3200("service_on_destroy engine=$selectedEngine mic=$selectedMicSource state=$connectionState running=$isRunning")
         isRunning = false
-        stopD3200()
+        stopD3200("service_destroy")
         isServiceActive = false
         isSetupComplete = false
         liveSocketGate.begin()
