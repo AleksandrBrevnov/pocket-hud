@@ -25,6 +25,9 @@ jobs:
       - name: Test privacy-safe D3200 HCI command analyzer
         run: python3 -m unittest discover -s tools -p 'test_d3200_hci_audit.py' -v
 
+      - name: Test D3200 keystore metadata probe with synthetic fixtures
+        run: python3 -m unittest discover -s tools -p 'test_d3200_keystore_metadata_probe.py' -v
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
