@@ -5,6 +5,42 @@ import org.junit.Test
 import java.security.interfaces.ECPublicKey
 
 class D3200SessionTest {
+    @Test fun optInAuthenticationSendsOneProofBeforeRecordingControl() {
+        val uid = "0123456789abcdef".repeat(2) + "01234567"
+        val bindingKey = ByteArray(32) { (it + 1).toByte() }
+        val link = Link { D3200AuthCredentials(uid, bindingKey) }
+        link.handshake(recording = false)
+        assertEquals("0b8b", link.lastCommand())
+        val authFrame = link.sent.last()
+        assertEquals(72, authFrame.size)
+
+        val nonce = authFrame.copyOfRange(55, 71)
+        val ciphertext = authFrame.copyOfRange(10, 54)
+        val plain = D3200Crypto.ctr(bindingKey, nonce, ciphertext)
+        assertArrayEquals(uid.toByteArray(Charsets.US_ASCII), plain.copyOfRange(0, 40))
+        assertArrayEquals(byteArrayOf(0x78, 0x56, 0x34, 0x12),
+            plain.copyOfRange(40, 44))
+
+        link.reply(0x0b, 0x8b, byteArrayOf(0))
+        assertEquals("1882", link.lastCommand())
+        assertTrue(link.trace.any { it.contains("auth_status=ACCEPTED") })
+        assertFalse(link.trace.any { it.contains(uid) })
+        assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in listOf("0b87", "0b8c", "1a10") })
+    }
+
+    @Test fun rejectedOptInAuthNeverStartsRecordingOrChangesDeviceBinding() {
+        val uid = "0123456789abcdef".repeat(2) + "01234567"
+        val link = Link { D3200AuthCredentials(uid, ByteArray(32) { 0x22 }) }
+        link.handshake(recording = false)
+        assertEquals("0b8b", link.lastCommand())
+        val before = link.sent.size
+        link.reply(0x0b, 0x8b, byteArrayOf(-1))
+        assertTrue(link.closed)
+        assertEquals(before, link.sent.size)
+        assertTrue(link.trace.any { it.contains("auth_status=REJECTED") })
+        assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in listOf("0b87", "0b8c", "1882", "1a10") })
+    }
+
     @Test fun onlyLiveEngineAcceptsSoundcore() {
         assertEquals(TranslationEngine.LIVE_WEBSOCKET,
             MicSource.SOUNDCORE_D3200.resolveEngine(TranslationEngine.CASCADED_REST))
@@ -345,14 +381,14 @@ class D3200SessionTest {
         assertFalse(link.closed)
     }
 
-    private class Link {
+    private class Link(private val credentials: (() -> D3200AuthCredentials?)? = null) {
         val sent = mutableListOf<ByteArray>()
         val opus = mutableListOf<ByteArray>()
         val trace = mutableListOf<String>()
         lateinit var sessionKey: ByteArray
         var closeCount = 0
         val closed get() = closeCount != 0
-        val session = D3200Session({ sent.add(it) }, {}, { _, _ -> }, { opus.add(it) }, { closeCount++ }, trace::add)
+        val session = D3200Session({ sent.add(it) }, {}, { _, _ -> }, { opus.add(it) }, { closeCount++ }, trace::add, credentials, { 0x1234_5678L })
 
         fun lastCommand() = sent.last().copyOfRange(5, 7).hex()
 
