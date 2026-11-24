@@ -14,9 +14,11 @@ internal class D3200Session(
     private val deadline: (String, Long) -> Unit,
     private val onOpus: (ByteArray) -> Unit,
     private val close: () -> Unit,
-    private val trace: (String) -> Unit = {}
+    private val trace: (String) -> Unit = {},
+    private val authCredentials: (() -> D3200AuthCredentials?)? = null,
+    private val timestampSeconds: () -> Long = { System.currentTimeMillis() / 1000L }
 ) {
-    private enum class Phase { NEW, HANDSHAKE, INFO, START, FILE_EVENT, VERIFY_START, LIST, LEGACY_LIST, MANUAL_START, HEAD, AUDIO, WAIT_ROTATION, WAIT_STOP_FOR_OFFLINE_PROBE, WAIT_FILE_FLUSH, POST_STOP_LIST, POST_STOP_LEGACY_LIST, WAIT_OFFLINE_RETRY, STOP, CLOSED }
+    private enum class Phase { NEW, HANDSHAKE, INFO, AUTH, START, FILE_EVENT, VERIFY_START, LIST, LEGACY_LIST, MANUAL_START, HEAD, AUDIO, WAIT_ROTATION, WAIT_STOP_FOR_OFFLINE_PROBE, WAIT_FILE_FLUSH, POST_STOP_LIST, POST_STOP_LEGACY_LIST, WAIT_OFFLINE_RETRY, STOP, CLOSED }
 
     private var phase = Phase.NEW
     private var keyPair: KeyPair? = null
@@ -40,10 +42,11 @@ internal class D3200Session(
     private var realtimeMode = true
     private var realtimeRejected = false
     private var offlineProbeAttempts = 0
+    private var pendingAuthenticatedRecordingState: Int? = null
 
     fun begin() {
         check(phase == Phase.NEW)
-        trace("auth_status=NOT_ATTEMPTED reason=firmware_03_56_auth_format_unverified")
+        trace(if (authCredentials == null) "auth_status=NOT_ATTEMPTED reason=no_local_binding_credentials" else "auth_status=PROVISIONED_LOCALLY_NOT_YET_ATTEMPTED")
         val pair = D3200Crypto.generate()
         keyPair = pair
         status("Обмен ключами ECDH")
@@ -62,6 +65,19 @@ internal class D3200Session(
                 request(Phase.INFO, Command.INFO.frame())
             }
             0x0101 -> if (phase == Phase.INFO || phase == Phase.VERIFY_START) handleInfo(frame)
+            0x0b8b -> if (phase == Phase.AUTH) {
+                if (!D3200OfficialCapture.isSuccessfulAuthResult(frame)) {
+                    trace("auth_status=REJECTED")
+                    status("D3200 отклонил авторизацию. Привязка и записи не изменены")
+                    finish()
+                } else {
+                    trace("auth_status=ACCEPTED")
+                    status("D3200 подтвердил авторизацию")
+                    val state = checkNotNull(pendingAuthenticatedRecordingState)
+                    pendingAuthenticatedRecordingState = null
+                    continueFromInfo(state)
+                }
+            }
             0x1882 -> handleRecordingSignal(frame)
             0x1a06 -> if (!frame.explicitRefusal) {
                 val event = D3200Protocol.recordingRotation(payload)
@@ -69,7 +85,7 @@ internal class D3200Session(
                     val id = event.fileId
                     trace("recording_rotation durationMs=${event.durationMs} appendPreAudio=${event.appendPreAudio} phase=$phase")
                     when (phase) {
-                        Phase.HANDSHAKE, Phase.INFO, Phase.VERIFY_START -> notifiedFileId = id
+                        Phase.HANDSHAKE, Phase.INFO, Phase.AUTH, Phase.VERIFY_START -> notifiedFileId = id
                         Phase.START -> {
                             notifiedFileId = id
                             if (!stopRequested && sawUnconfirmedRecording) probeStart("file_event_without_confirmed_ack")
@@ -247,6 +263,24 @@ internal class D3200Session(
             followActiveRecording()
             return
         }
+        if (phase == Phase.INFO && authCredentials != null) {
+            val credential = authCredentials.invoke()
+            if (credential != null) {
+                val frame = try {
+                    credential.createRequest(timestampSeconds())
+                } finally {
+                    credential.close()
+                }
+                pendingAuthenticatedRecordingState = state
+                status("Проверка привязки D3200")
+                request(Phase.AUTH, frame)
+                return
+            }
+        }
+        continueFromInfo(state)
+    }
+
+    private fun continueFromInfo(state: Int) {
         when (state) {
             0 -> if (notifiedFileId == null) request(Phase.START, Command.START.frame())
                  else probeStart("file_event_before_idle_info")
@@ -423,6 +457,7 @@ internal class D3200Session(
         nonce?.fill(0)
         nonce = null
         pendingFileIds.clear()
+        pendingAuthenticatedRecordingState = null
         fileOpusCount = 0L
     }
 
