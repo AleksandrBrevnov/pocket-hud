@@ -109,3 +109,33 @@ internal object D3200Authentication {
         }
     }
 }
+
+/**
+ * Ephemeral credentials supplied explicitly by an authorized local provider.
+ *
+ * The official Soundcore application's Android Keystore is not readable by
+ * Pocket HUD. This class does not extract, log, store or provision keys.
+ * Call close() after building a single proof to wipe its private key copy.
+ */
+internal class D3200AuthCredentials(
+    val accountId: String,
+    bindingKey: ByteArray
+) : AutoCloseable {
+    private val key = bindingKey.copyOf()
+    private var closed = false
+
+    fun createRequest(timestampSeconds: Long): ByteArray {
+        check(!closed) { "D3200 auth credentials already closed" }
+        return D3200Authentication.requestFrameWithFreshNonce(
+            accountId, key, timestampSeconds
+        )
+    }
+
+    override fun close() {
+        if (closed) return
+        closed = true
+        key.fill(0)
+    }
+
+    override fun toString(): String = "D3200AuthCredentials([redacted])"
+}
