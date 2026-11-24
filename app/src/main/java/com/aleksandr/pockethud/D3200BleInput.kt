@@ -29,7 +29,9 @@ internal class D3200BleInput(
     private val onStatus: (String) -> Unit,
     private val onPcm: (ByteArray) -> Boolean,
     private val onClosed: () -> Unit,
-    private val onTrace: (String) -> Unit
+    private val onTrace: (String) -> Unit,
+    /** Optional authorized, local-only provider. No credentials are bundled or auto-extracted. */
+    private val authCredentials: (() -> D3200AuthCredentials?)? = null
 ) {
     private val thread = HandlerThread("PocketHUD-D3200").apply { start() }
     private val handler = Handler(thread.looper)
@@ -67,7 +69,7 @@ internal class D3200BleInput(
 
     private val session = D3200Session(::enqueue, ::report, { _, ms ->
         setDeadline(ms, ::sessionTimeout)
-    }, ::decode, ::finish, onTrace)
+    }, ::decode, ::finish, onTrace, authCredentials)
 
     fun start() = post {
         val adapter = checkNotNull(context.getSystemService(BluetoothManager::class.java)?.adapter) {
