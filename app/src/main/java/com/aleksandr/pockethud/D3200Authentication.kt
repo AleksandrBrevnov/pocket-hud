@@ -51,6 +51,50 @@ internal object D3200Authentication {
         }
     }
 
+    /**
+     * Builds a complete 0B/8B request frame for OFFLINE verification.
+     * It is intentionally not called by the BLE transport/session.
+     */
+    fun requestFrame(
+        accountId: String,
+        bindingKey: ByteArray,
+        timestampSeconds: Long,
+        nonce: ByteArray
+    ): ByteArray {
+        val payload = envelope(accountId, bindingKey, timestampSeconds, nonce)
+        try {
+            val totalLength = 10 + payload.size
+            check(totalLength == 72) { "Unexpected D3200 authentication frame length" }
+            val header = byteArrayOf(
+                0x08, 0xee.toByte(), 0, 0, 0,
+                0x0b, 0x8b.toByte(),
+                totalLength.toByte(), (totalLength ushr 8).toByte()
+            )
+            val bytesWithoutChecksum = header + payload
+            val checksum = bytesWithoutChecksum.fold(0) { sum, value ->
+                (sum + (value.toInt() and 0xff)) and 0xff
+            }.toByte()
+            return bytesWithoutChecksum + checksum
+        } finally {
+            payload.fill(0)
+        }
+    }
+
+    /** Create one fresh random nonce per request, never replay a captured nonce. */
+    fun requestFrameWithFreshNonce(
+        accountId: String,
+        bindingKey: ByteArray,
+        timestampSeconds: Long
+    ): ByteArray {
+        val nonce = ByteArray(NONCE_BYTES)
+        SecureRandom().nextBytes(nonce)
+        return try {
+            requestFrame(accountId, bindingKey, timestampSeconds, nonce)
+        } finally {
+            nonce.fill(0)
+        }
+    }
+
     fun envelopeWithFreshNonce(
         accountId: String,
         bindingKey: ByteArray,
