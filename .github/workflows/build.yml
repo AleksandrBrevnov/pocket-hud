@@ -6,6 +6,12 @@ on:
     tags: [ "v*" ]
   workflow_dispatch:
 
+# Only the newest commit on a branch needs an APK. This prevents simultaneous
+# Maven Central dependency downloads and reduces HTTP 429 rate limiting.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
