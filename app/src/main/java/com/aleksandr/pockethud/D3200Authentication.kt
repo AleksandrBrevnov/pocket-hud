@@ -1,0 +1,67 @@
+package com.aleksandr.pockethud
+
+import java.security.SecureRandom
+
+/**
+ * Builds the 0B/8B possession-proof envelope described for D3200 firmware 03.66.
+ *
+ * The user's official Soundcore 5.0.39 capture on firmware 03.56 has the same
+ * ciphertext/nonce lengths (44/16), but its plaintext/key semantics have NOT
+ * yet been independently validated. This helper is deliberately not wired to
+ * D3200Session: it must not transmit until the existing binding credential
+ * has been legitimately provisioned and the proof checked on the device.
+ *
+ * Never log accountId, bindingKey, nonce or the resulting envelope.
+ */
+internal object D3200Authentication {
+    private const val UID_BYTES = 40
+    private const val KEY_BYTES = 32
+    private const val NONCE_BYTES = 16
+
+    fun envelope(
+        accountId: String,
+        bindingKey: ByteArray,
+        timestampSeconds: Long,
+        nonce: ByteArray
+    ): ByteArray {
+        require(accountId.length == UID_BYTES && accountId.all { c ->
+            c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F'
+        }) { "D3200 account identifier must be 40 hexadecimal ASCII characters" }
+        require(bindingKey.size == KEY_BYTES) { "D3200 binding-key length must be 32 bytes" }
+        require(nonce.size == NONCE_BYTES) { "D3200 authentication nonce must be 16 bytes" }
+        require(timestampSeconds in 0..0xffff_ffffL) { "D3200 timestamp must fit uint32" }
+
+        val plain = accountId.toByteArray(Charsets.US_ASCII) + byteArrayOf(
+            timestampSeconds.toByte(),
+            (timestampSeconds ushr 8).toByte(),
+            (timestampSeconds ushr 16).toByte(),
+            (timestampSeconds ushr 24).toByte()
+        )
+        try {
+            // AES-CTR encryption/decryption are the same operation.
+            val encrypted = D3200Crypto.ctr(bindingKey, nonce, plain)
+            try {
+                return byteArrayOf(encrypted.size.toByte()) + encrypted +
+                    byteArrayOf(nonce.size.toByte()) + nonce
+            } finally {
+                encrypted.fill(0)
+            }
+        } finally {
+            plain.fill(0)
+        }
+    }
+
+    fun envelopeWithFreshNonce(
+        accountId: String,
+        bindingKey: ByteArray,
+        timestampSeconds: Long
+    ): ByteArray {
+        val nonce = ByteArray(NONCE_BYTES)
+        SecureRandom().nextBytes(nonce)
+        return try {
+            envelope(accountId, bindingKey, timestampSeconds, nonce)
+        } finally {
+            nonce.fill(0)
+        }
+    }
+}
