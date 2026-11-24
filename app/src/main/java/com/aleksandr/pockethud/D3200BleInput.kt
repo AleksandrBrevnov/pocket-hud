@@ -40,6 +40,8 @@ internal class D3200BleInput(
     private var gatt: BluetoothGatt? = null
     private var writer: BluetoothGattCharacteristic? = null
     private var mtu = 23
+    /** This flag contains no identifying advertisement bytes. */
+    private var boundAdvertised = false
     private var discovering = false
     private var subscribed = false
     private var finished = false
@@ -69,7 +71,8 @@ internal class D3200BleInput(
 
     private val session = D3200Session(::enqueue, ::report, { _, ms ->
         setDeadline(ms, ::sessionTimeout)
-    }, ::decode, ::finish, onTrace, authCredentials)
+    }, ::decode, ::finish, onTrace, authCredentials = authCredentials,
+        boundInAdvertisement = { boundAdvertised })
 
     fun start() = post {
         val adapter = checkNotNull(context.getSystemService(BluetoothManager::class.java)?.adapter) {
@@ -95,6 +98,7 @@ internal class D3200BleInput(
             if (record.serviceUuids.orEmpty().none { it.uuid == SERVICE } &&
                 record.serviceData.orEmpty().keys.none { it.uuid == SERVICE }) return@post
             val boundState = readAdvertisementBoundState(record)
+            boundAdvertised = boundState == "bound_bit_set"
             report("D3200 advertisement binding=$boundState")
             stopScan()
             report("Подключение GATT")

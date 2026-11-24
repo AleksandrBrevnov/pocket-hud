@@ -16,7 +16,9 @@ internal class D3200Session(
     private val close: () -> Unit,
     private val trace: (String) -> Unit = {},
     private val authCredentials: (() -> D3200AuthCredentials?)? = null,
-    private val timestampSeconds: () -> Long = { System.currentTimeMillis() / 1000L }
+    private val timestampSeconds: () -> Long = { System.currentTimeMillis() / 1000L },
+    /** Advertisement hint only: bound devices require an existing possession proof. */
+    private val boundInAdvertisement: () -> Boolean = { false }
 ) {
     private enum class Phase { NEW, HANDSHAKE, INFO, AUTH, START, FILE_EVENT, VERIFY_START, LIST, LEGACY_LIST, MANUAL_START, HEAD, AUDIO, WAIT_ROTATION, WAIT_STOP_FOR_OFFLINE_PROBE, WAIT_FILE_FLUSH, POST_STOP_LIST, POST_STOP_LEGACY_LIST, WAIT_OFFLINE_RETRY, STOP, CLOSED }
 
@@ -263,17 +265,23 @@ internal class D3200Session(
             followActiveRecording()
             return
         }
-        if (phase == Phase.INFO && authCredentials != null) {
-            val credential = authCredentials.invoke()
+        if (phase == Phase.INFO) {
+            val credential = authCredentials?.invoke()
             if (credential != null) {
-                val frame = try {
+                val authFrame = try {
                     credential.createRequest(timestampSeconds())
                 } finally {
                     credential.close()
                 }
                 pendingAuthenticatedRecordingState = state
                 status("Проверка привязки D3200")
-                request(Phase.AUTH, frame)
+                request(Phase.AUTH, authFrame)
+                return
+            }
+            if (boundInAdvertisement()) {
+                trace("auth_status=BLOCKED_MISSING_LOCAL_BINDING_KEY")
+                status("D3200 сообщает о привязке: нет локального ключа для 0B/8B; команды записи не отправлены")
+                finish()
                 return
             }
         }

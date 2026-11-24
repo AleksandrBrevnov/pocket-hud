@@ -41,6 +41,24 @@ class D3200SessionTest {
         assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in listOf("0b87", "0b8c", "1882", "1a10") })
     }
 
+    @Test fun boundFirmware0356NeverSendsRecordingCommandsWithoutExistingCredentials() {
+        val link = Link(bound = true)
+        link.handshake(recording = false)
+        assertTrue(link.closed)
+        assertEquals(listOf("2e01", "0101"), link.sent.map { it.copyOfRange(5, 7).hex() })
+        assertTrue(link.trace.any { it.contains("auth_status=BLOCKED_MISSING_LOCAL_BINDING_KEY") })
+        assertTrue(link.opus.isEmpty())
+    }
+
+    @Test fun boundRecorderWithEmptyProviderAlsoFailsClosedWithoutRebinding() {
+        val link = Link(bound = true, credentials = { null })
+        link.handshake(recording = true)
+        assertTrue(link.closed)
+        assertEquals(listOf("2e01", "0101"), link.sent.map { it.copyOfRange(5, 7).hex() })
+        assertFalse(link.sent.any { it.copyOfRange(5, 7).hex() in
+            listOf("0b87", "0b8c", "1882", "1a07", "1a10") })
+    }
+
     @Test fun onlyLiveEngineAcceptsSoundcore() {
         assertEquals(TranslationEngine.LIVE_WEBSOCKET,
             MicSource.SOUNDCORE_D3200.resolveEngine(TranslationEngine.CASCADED_REST))
@@ -381,14 +399,15 @@ class D3200SessionTest {
         assertFalse(link.closed)
     }
 
-    private class Link(private val credentials: (() -> D3200AuthCredentials?)? = null) {
+    private class Link(private val bound: Boolean = false,
+                       private val credentials: (() -> D3200AuthCredentials?)? = null) {
         val sent = mutableListOf<ByteArray>()
         val opus = mutableListOf<ByteArray>()
         val trace = mutableListOf<String>()
         lateinit var sessionKey: ByteArray
         var closeCount = 0
         val closed get() = closeCount != 0
-        val session = D3200Session({ sent.add(it) }, {}, { _, _ -> }, { opus.add(it) }, { closeCount++ }, trace::add, credentials, { 0x1234_5678L })
+        val session = D3200Session({ sent.add(it) }, {}, { _, _ -> }, { opus.add(it) }, { closeCount++ }, trace::add, credentials, { 0x1234_5678L }, { bound })
 
         fun lastCommand() = sent.last().copyOfRange(5, 7).hex()
 
