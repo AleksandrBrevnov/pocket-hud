@@ -54,15 +54,18 @@ class D3200KeystoreMetadataProbeV3Test(unittest.TestCase):
                     ],
                 )
             result = keystore_metadata(path, 10001)
-            self.assertEqual(2, result["app_namespace_count"])
-            self.assertEqual(1, len(result["app_client_keys"]))
-            key = result["app_client_keys"][0]
-            self.assertEqual(["AES"], key["algorithm"])
-            self.assertEqual([256], key["key_size_bits"])
-            self.assertEqual(["ENCRYPT", "DECRYPT"], key["purposes"])
-            self.assertEqual(["CTR"], key["block_modes"])
-            self.assertEqual(["NONE"], key["padding"])
-            self.assertEqual(["TRUSTED_ENVIRONMENT"], key["security_levels"])
+            self.assertEqual(3, result["app_namespace_count"])
+            self.assertEqual(2, len(result["app_client_keys"]))
+            aes_key, ec_key = result["app_client_keys"]
+            self.assertEqual(["AES"], aes_key["algorithm"])
+            self.assertEqual([256], aes_key["key_size_bits"])
+            self.assertEqual(["ENCRYPT", "DECRYPT"], aes_key["purposes"])
+            self.assertEqual(["CTR"], aes_key["block_modes"])
+            self.assertEqual(["NONE"], aes_key["padding"])
+            self.assertEqual(["TRUSTED_ENVIRONMENT"], aes_key["security_levels"])
+            self.assertEqual(["EC"], ec_key["algorithm"])
+            self.assertEqual([256], ec_key["key_size_bits"])
+            self.assertEqual(["SOFTWARE"], ec_key["security_levels"])
             serialized = str(result)
             for secret in ("PRIVATE_ALIAS", "OTHER_UID", "SUPER_KEY", "keyentryid"):
                 self.assertNotIn(secret, serialized)
@@ -104,8 +107,10 @@ class D3200KeystoreMetadataProbeV3Test(unittest.TestCase):
                     "(id INTEGER, key_type INTEGER, domain INTEGER, namespace INTEGER, "
                     "alias BLOB, state INTEGER, km_uuid BLOB)"
                 )
-                db.execute("INSERT INTO keyentry VALUES (1, 0, 0, 30001, ?, 1, ?)",
-                           (b"ALIAS", b"x" * 16))
+                db.execute(
+                    "INSERT INTO keyentry VALUES (1, 0, 0, 30001, ?, 1, ?)",
+                    (b"ALIAS", b"x" * 16),
+                )
             result = keystore_metadata(path, 30001)
             self.assertEqual("unsupported_keyparameter_schema", result["error"])
             self.assertEqual([], result["app_client_keys"])
