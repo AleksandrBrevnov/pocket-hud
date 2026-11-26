@@ -243,6 +243,16 @@ class PocketService : Service() {
 
     // Очереди и байты для Audio Latency Drift Catch-Up (24 кГц 16-бит mono = 48000 байт/сек)
     private val queuedPlaybackBytes = AtomicLong(0L)
+    private val audioPlaybackChunksEnqueued = AtomicLong(0L)
+    private val audioPlaybackBytesEnqueued = AtomicLong(0L)
+    private val audioPlaybackChunksWritten = AtomicLong(0L)
+    private val audioPlaybackBytesWritten = AtomicLong(0L)
+    private val audioPlaybackWriteErrors = AtomicLong(0L)
+    private val audioPlaybackSilentChunks = AtomicLong(0L)
+    @Volatile private var audioPlaybackLastWriteResult = 0
+    @Volatile private var audioPlaybackLastPcmPeak = 0
+    @Volatile private var audioOutputRecoveryPending = false
+    @Volatile private var forceSpeakerOutput = false
     @Volatile private var isPlaybackSpeedBoosted = false
 
     // Задача отложенного закрытия при сигнале goAway
@@ -732,6 +742,8 @@ class PocketService : Service() {
         currentInstance = this
         clearSessionTexts()
         serviceStartTime = System.currentTimeMillis()
+        forceSpeakerOutput = false
+        audioOutputRecoveryPending = false
         connectionState = "STARTING"
 
         logEvent("SERVICE_START", "(engine=$selectedEngine, mic=$selectedMicSource, isAudioMuted=$isAudioMuted)")
@@ -884,6 +896,8 @@ class PocketService : Service() {
             }
             foregroundSource = newSource
             logEvent("MIC_SOURCE_CHANGE", "from=$previous to=$newSource")
+            forceSpeakerOutput = false
+            audioOutputRecoveryPending = false
             setupAudioRouting()
             if (selectedEngine == TranslationEngine.CASCADED_REST) {
                 restartSpeechRecognizer()
@@ -969,12 +983,24 @@ class PocketService : Service() {
     }
 
     private fun stopLiveOutput() {
-        playbackThread?.interrupt()
+        val oldThread = playbackThread
         playbackThread = null
-        val track = audioTrack
+        val oldTrack = audioTrack
         audioTrack = null
-        runCatching { track?.stop() }.onFailure { Log.w(tag, "Ошибка остановки AudioTrack", it) }
-        runCatching { track?.release() }.onFailure { Log.w(tag, "Ошибка освобождения AudioTrack", it) }
+        audioOutputRecoveryPending = false
+
+        oldThread?.interrupt()
+        runCatching { oldTrack?.pause() }.onFailure { Log.w(tag, "Ошибка паузы AudioTrack", it) }
+        runCatching { oldTrack?.flush() }.onFailure { Log.w(tag, "Ошибка очистки AudioTrack", it) }
+        runCatching { oldTrack?.stop() }.onFailure { Log.w(tag, "Ошибка остановки AudioTrack", it) }
+        runCatching { oldTrack?.release() }.onFailure { Log.w(tag, "Ошибка освобождения AudioTrack", it) }
+        if (oldThread != null && oldThread !== Thread.currentThread()) {
+            try {
+                oldThread.join(300)
+            } catch (error: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
     }
 
     private fun triggerFailureHaptic() {
@@ -1814,8 +1840,15 @@ class PocketService : Service() {
             appendLine("Отправлено чанков: $chunksSent ($bytesSent байт)")
             appendLine("--- GEMINI LIVE СЕРВЕР ---")
             appendLine("Сообщений получено: $serverMessagesReceived")
-            appendLine("Аудио-ответов (звук в ухо): $serverAudioChunksReceived")
-            appendLine("Текстовых ответов (HUD/Часы): $serverTextChunksReceived")
+            appendLine("Аудио-чанков Gemini: $serverAudioChunksReceived")
+            appendLine("Текстовых чанков Gemini: $serverTextChunksReceived")
+            appendLine("Аудиочанков в очередь: ${audioPlaybackChunksEnqueued.get()}")
+            appendLine("Байт аудио в очереди за сессию: ${audioPlaybackBytesEnqueued.get()}")
+            appendLine("Успешно записано чанков: ${audioPlaybackChunksWritten.get()}")
+            appendLine("Успешно записано байт: ${audioPlaybackBytesWritten.get()}")
+            appendLine("Ошибок AudioTrack.write: ${audioPlaybackWriteErrors.get()}")
+            appendLine("Последний PCM peak: $audioPlaybackLastPcmPeak; нулевых чанков: ${audioPlaybackSilentChunks.get()}")
+            appendLine("Резервный вывод через динамик: $forceSpeakerOutput")
             appendLine("Последний распознанный (IT/EN): ${if (lastRecognizedInput.isBlank()) "нет" else "\"$lastRecognizedInput\""}")
             appendLine("Последний текст RU: ${if (lastServerText.isBlank()) "нет" else "\"$lastServerText\""}")
             appendLine("--- WEAR OS 5 & ЛОГИ ---")
@@ -1835,11 +1868,12 @@ class PocketService : Service() {
             AudioFormat.ENCODING_PCM_16BIT
         )
         val bufferSize = if (minBufferSize <= 0) 4096 * 2 else minBufferSize * 2
-
         val audioUsage = liveOutputUsage()
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        audioOutputRecoveryPending = false
 
         try {
-            audioTrack = AudioTrack.Builder()
+            val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(audioUsage)
@@ -1857,92 +1891,267 @@ class PocketService : Service() {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
-            if (selectedMicSource != MicSource.BLUETOOTH || splitBluetoothMedia) {
-                try {
-                    val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-                    val a2dp = audioManager?.let { mediaBluetoothOutput(it) }
-                    if (splitBluetoothMedia && a2dp != null) expectedBluetoothOutputId = a2dp.id
-                    if (a2dp != null) {
-                        val bound = audioTrack?.setPreferredDevice(a2dp)
-                        logEvent("A2DP_PREFERRED_OUTPUT_SET", "device=${describeAudioDevice(a2dp)}, bound=$bound")
-                    } else if (splitBluetoothMedia) {
-                        logEvent("BT_MEDIA_OUTPUT_MISSING")
-                    }
-                } catch (e: Exception) {
-                    Log.w(tag, "Ошибка назначения A2DP устройства: ${e.message}")
+            audioTrack = track
+            if (track.state != AudioTrack.STATE_INITIALIZED) {
+                val state = track.state
+                lastError = "AudioTrack не инициализирован (state=$state)"
+                logEvent("AUDIOTRACK_INIT_FAILED", "state=$state usage=$audioUsage buffer=$bufferSize")
+                runCatching { track.release() }
+                audioTrack = null
+                return
+            }
+
+            val preferredOutput = when {
+                forceSpeakerOutput -> audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                    ?.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                selectedMicSource != MicSource.BLUETOOTH || splitBluetoothMedia ->
+                    audioManager?.let { mediaBluetoothOutput(it) }
+                else -> null
+            }
+
+            if (preferredOutput != null) {
+                val accepted = track.setPreferredDevice(preferredOutput)
+                val event = if (forceSpeakerOutput) "SPEAKER_FALLBACK_PREFERRED" else "A2DP_PREFERRED_OUTPUT_SET"
+                logEvent(event, "device=${describeAudioDevice(preferredOutput)} accepted=$accepted")
+                if (splitBluetoothMedia && !forceSpeakerOutput && accepted) {
+                    expectedBluetoothOutputId = preferredOutput.id
                 }
+            } else if (forceSpeakerOutput) {
+                logEvent("SPEAKER_FALLBACK_DEVICE_MISSING")
+            } else if (splitBluetoothMedia) {
+                logEvent("BT_MEDIA_OUTPUT_MISSING")
             }
 
             if (!isAudioMuted) {
-                audioTrack?.play()
+                track.play()
             }
+
+            val volumeStream = if (audioUsage == AudioAttributes.USAGE_VOICE_COMMUNICATION) {
+                AudioManager.STREAM_VOICE_CALL
+            } else {
+                AudioManager.STREAM_MUSIC
+            }
+            val volume = audioManager?.getStreamVolume(volumeStream)
+            val maxVolume = audioManager?.getStreamMaxVolume(volumeStream)
+            logEvent(
+                "AUDIOTRACK_INIT",
+                "state=${track.state} playState=${track.playState} usage=$audioUsage " +
+                    "sampleRate=$sampleRate buffer=$bufferSize muted=$isAudioMuted " +
+                    "volume=$volume/$maxVolume route=${describeAudioDevice(track.routedDevice)} " +
+                    "speakerFallback=$forceSpeakerOutput"
+            )
         } catch (e: Exception) {
-            Log.e(tag, "Ошибка инициализации AudioTrack: ${e.message}")
+            Log.e(tag, "Ошибка инициализации AudioTrack: ${e.message}", e)
             lastError = "AudioTrack init: ${e.message}"
-            logEvent("AUDIOTRACK_INIT_ERROR", "${e.message}")
+            logEvent("AUDIOTRACK_INIT_ERROR", "${e.javaClass.simpleName}: ${e.message}")
+            audioTrack = null
             return
         }
 
-        playbackThread = Thread {
+        playbackThread = Thread({
             isPlaybackSpeedBoosted = false
             var lastOutputRoute: String? = null
+            var routeMismatchSince = 0L
+            var lastHealthLogAt = 0L
+            var lastPlaybackHead = audioTrack?.playbackHeadPosition ?: 0
+            var lastHeadProgressAt = System.currentTimeMillis()
+            var bytesAtLastHeadProgress = audioPlaybackBytesWritten.get()
+
             while (isRunning && !Thread.currentThread().isInterrupted) {
                 try {
                     val chunk = audioPlaybackQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
                     val remainingBytes = queuedPlaybackBytes.addAndGet(-chunk.size.toLong()).coerceAtLeast(0L)
 
-                    if (!isAudioMuted) {
-                        // Audio Latency Drift Catch-Up: 24 кГц 16-бит mono = 48000 байт/сек
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            val track = audioTrack
-                            if (track != null && track.state == AudioTrack.STATE_INITIALIZED) {
-                                // Если очередь > 2.5 сек (> 120,000 байт) — ускоряем воспроизведение на 15% (1.15x) для ликвидации лага
-                                if (!isPlaybackSpeedBoosted && remainingBytes > 120_000L) {
-                                    try {
-                                        val params = track.playbackParams ?: PlaybackParams()
-                                        track.playbackParams = params.setSpeed(1.15f)
-                                        isPlaybackSpeedBoosted = true
-                                        logEvent("LATENCY_CATCHUP_ENGAGED", "queuedBytes=$remainingBytes (~${"%.2f".format(Locale.US, remainingBytes / 48000.0)}s), speed=1.15x")
-                                    } catch (e: Exception) {
-                                        Log.w(tag, "Ошибка установки 1.15x: ${e.message}")
-                                    }
-                                } else if (isPlaybackSpeedBoosted && remainingBytes < 38_400L) { // Когда очередь сократилась до < 0.8 сек (< 38,400 байт) — возвращаем 1.0x
-                                    try {
-                                        val params = track.playbackParams ?: PlaybackParams()
-                                        track.playbackParams = params.setSpeed(1.0f)
-                                        isPlaybackSpeedBoosted = false
-                                        logEvent("LATENCY_CATCHUP_NORMALIZED", "queuedBytes=$remainingBytes (~${"%.2f".format(Locale.US, remainingBytes / 48000.0)}s), speed=1.0x")
-                                    } catch (e: Exception) {
-                                        Log.w(tag, "Ошибка возврата 1.0x: ${e.message}")
-                                    }
-                                }
+                    if (isAudioMuted) continue
+
+                    val track = audioTrack ?: continue
+                    if (track.state != AudioTrack.STATE_INITIALIZED) {
+                        requestAudioOutputRecovery(track, "track_state=${track.state}")
+                        break
+                    }
+                    if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                        track.play()
+                        logEvent("AUDIOTRACK_PLAY_RESTART", "playState=${track.playState}")
+                    }
+
+                    // Audio Latency Drift Catch-Up: 24 кГц 16-бит mono = 48000 байт/сек.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        if (!isPlaybackSpeedBoosted && remainingBytes > 120_000L) {
+                            try {
+                                val params = track.playbackParams ?: PlaybackParams()
+                                track.playbackParams = params.setSpeed(1.15f)
+                                isPlaybackSpeedBoosted = true
+                                logEvent("LATENCY_CATCHUP_ENGAGED", "queuedBytes=$remainingBytes (~${"%.2f".format(Locale.US, remainingBytes / 48000.0)}s), speed=1.15x")
+                            } catch (e: Exception) {
+                                Log.w(tag, "Ошибка установки 1.15x: ${e.message}")
+                            }
+                        } else if (isPlaybackSpeedBoosted && remainingBytes < 38_400L) {
+                            try {
+                                val params = track.playbackParams ?: PlaybackParams()
+                                track.playbackParams = params.setSpeed(1.0f)
+                                isPlaybackSpeedBoosted = false
+                                logEvent("LATENCY_CATCHUP_NORMALIZED", "queuedBytes=$remainingBytes (~${"%.2f".format(Locale.US, remainingBytes / 48000.0)}s), speed=1.0x")
+                            } catch (e: Exception) {
+                                Log.w(tag, "Ошибка возврата 1.0x: ${e.message}")
                             }
                         }
+                    }
 
-                        val track = audioTrack ?: continue
-                        val route = track.routedDevice
-                        val routeDescription = describeAudioDevice(route)
-                        if (routeDescription != lastOutputRoute) {
-                            lastOutputRoute = routeDescription
-                            logEvent("BT_OUTPUT_ACTUAL", "device=$routeDescription usage=${track.audioAttributes.usage}")
+                    val now = System.currentTimeMillis()
+                    val route = track.routedDevice
+                    val routeDescription = describeAudioDevice(route)
+                    if (routeDescription != lastOutputRoute) {
+                        lastOutputRoute = routeDescription
+                        logEvent(
+                            "BT_OUTPUT_ACTUAL",
+                            "device=$routeDescription usage=${track.audioAttributes.usage} " +
+                                "expectedId=$expectedBluetoothOutputId speakerFallback=$forceSpeakerOutput"
+                        )
+                    }
+
+                    // Do not replace real PCM with silence. If Android fails to route the
+                    // split Bluetooth stream to the requested sink, recover to the phone speaker.
+                    if (splitBluetoothMedia && !forceSpeakerOutput &&
+                        (expectedBluetoothOutputId == null || route?.id != expectedBluetoothOutputId)) {
+                        if (routeMismatchSince == 0L) routeMismatchSince = now
+                        if (now - routeMismatchSince >= 2500L) {
+                            requestAudioOutputRecovery(
+                                track,
+                                "bluetooth_route_mismatch expectedId=$expectedBluetoothOutputId actual=$routeDescription"
+                            )
+                            break
                         }
-                        if (splitBluetoothMedia && (expectedBluetoothOutputId == null ||
-                                route?.id != expectedBluetoothOutputId)) {
-                            // Prime the stream silently while Android resolves routing.
-                            val silence = ByteArray(chunk.size)
-                            track.write(silence, 0, silence.size)
-                        } else {
-                            track.write(chunk, 0, chunk.size)
-                        }
+                    } else {
+                        routeMismatchSince = 0L
+                    }
+
+                    val written = writePcmChunk(track, chunk)
+                    if (written < 0) {
+                        requestAudioOutputRecovery(track, "AudioTrack.write returned $written")
+                        break
+                    }
+                    if (written == 0) {
+                        requestAudioOutputRecovery(track, "AudioTrack.write returned 0")
+                        break
+                    }
+
+                    audioPlaybackChunksWritten.incrementAndGet()
+                    audioPlaybackBytesWritten.addAndGet(written.toLong())
+                    if (written != chunk.size) {
+                        logEvent("AUDIOTRACK_PARTIAL_WRITE", "written=$written expected=${chunk.size}")
+                    }
+
+                    val playbackHead = track.playbackHeadPosition
+                    if (playbackHead != lastPlaybackHead) {
+                        lastPlaybackHead = playbackHead
+                        lastHeadProgressAt = now
+                        bytesAtLastHeadProgress = audioPlaybackBytesWritten.get()
+                    } else if (audioPlaybackBytesWritten.get() - bytesAtLastHeadProgress >= 24_000L &&
+                        now - lastHeadProgressAt >= 3000L) {
+                        requestAudioOutputRecovery(
+                            track,
+                            "playback_head_stalled head=$playbackHead bytesWritten=${audioPlaybackBytesWritten.get()}"
+                        )
+                        break
+                    }
+
+                    if (now - lastHealthLogAt >= 5000L) {
+                        lastHealthLogAt = now
+                        logEvent(
+                            "AUDIOTRACK_PLAYBACK_HEALTH",
+                            "enqueued=${audioPlaybackChunksEnqueued.get()} written=${audioPlaybackChunksWritten.get()} " +
+                                "bytesWritten=${audioPlaybackBytesWritten.get()} writeErrors=${audioPlaybackWriteErrors.get()} " +
+                                "lastWrite=$audioPlaybackLastWriteResult pcmPeak=$audioPlaybackLastPcmPeak " +
+                                "state=${track.state} playState=${track.playState} head=$playbackHead " +
+                                "underruns=${track.underrunCount} route=$routeDescription " +
+                                "expectedId=$expectedBluetoothOutputId queue=${audioPlaybackQueue.size} " +
+                                "queuedBytes=${queuedPlaybackBytes.get()} speakerFallback=$forceSpeakerOutput"
+                        )
                     }
                 } catch (e: InterruptedException) {
                     break
                 } catch (e: Exception) {
-                    Log.e(tag, "Ошибка воспроизведения аудио: ${e.message}")
+                    Log.e(tag, "Ошибка воспроизведения аудио: ${e.message}", e)
+                    logEvent("AUDIOTRACK_PLAYBACK_EXCEPTION", "${e.javaClass.simpleName}: ${e.message}")
                 }
             }
-        }
+        }, "PocketHUD-AudioPlayback")
         playbackThread?.start()
+    }
+
+    private fun writePcmChunk(track: AudioTrack, chunk: ByteArray): Int {
+        var offset = 0
+        var zeroWriteAttempts = 0
+        while (offset < chunk.size && isRunning && !Thread.currentThread().isInterrupted) {
+            val result = track.write(chunk, offset, chunk.size - offset, AudioTrack.WRITE_BLOCKING)
+            audioPlaybackLastWriteResult = result
+            if (result > 0) {
+                offset += result
+                zeroWriteAttempts = 0
+            } else if (result == 0 && zeroWriteAttempts < 3) {
+                zeroWriteAttempts++
+                Thread.sleep(10)
+            } else {
+                audioPlaybackWriteErrors.incrementAndGet()
+                logEvent(
+                    "AUDIOTRACK_WRITE_ERROR",
+                    "result=$result offset=$offset total=${chunk.size} state=${track.state} playState=${track.playState}"
+                )
+                return result
+            }
+        }
+        return offset
+    }
+
+    private fun requestAudioOutputRecovery(failedTrack: AudioTrack, reason: String) {
+        if (audioOutputRecoveryPending) return
+        if (forceSpeakerOutput) {
+            lastError = "AudioTrack failed after speaker fallback: $reason"
+            logEvent("AUDIO_OUTPUT_RECOVERY_FAILED", "speakerFallback=true reason=$reason")
+            mainHandler.post {
+                if (isRunning) notifyStatusChanged("🔴 Не удалось воспроизвести звук даже через динамик телефона.")
+            }
+            return
+        }
+
+        audioOutputRecoveryPending = true
+        logEvent("AUDIO_OUTPUT_RECOVERY_REQUEST", "reason=$reason")
+        mainHandler.post {
+            if (!isRunning || audioTrack !== failedTrack) {
+                audioOutputRecoveryPending = false
+                return@post
+            }
+
+            forceSpeakerOutput = true
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            val speaker = audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                ?.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+            logEvent(
+                "AUDIO_OUTPUT_FALLBACK_REQUEST",
+                "reason=$reason speaker=${describeAudioDevice(speaker)}"
+            )
+            stopLiveOutput()
+            initAudioOutput()
+
+            if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
+                lastError = "AudioTrack recovery failed: $reason"
+                logEvent("AUDIO_OUTPUT_RECOVERY_FAILED", "reason=$reason")
+                notifyStatusChanged("🔴 Не удалось перезапустить аудиовывод. Проверьте громкость и перезапустите перевод.")
+            } else {
+                notifyStatusChanged("🔊 Сбой Bluetooth-вывода. Перезапустил звук с резервным маршрутом через динамик телефона.")
+            }
+        }
+    }
+
+    private fun pcm16Peak(bytes: ByteArray): Int {
+        var peak = 0
+        var index = 0
+        while (index + 1 < bytes.size) {
+            val sample = ((bytes[index + 1].toInt() shl 8) or (bytes[index].toInt() and 0xFF)).toShort().toInt()
+            peak = maxOf(peak, kotlin.math.abs(sample))
+            index += 2
+        }
+        return peak
     }
 
     private fun connectWebSocket(apiKey: String) {
@@ -2419,8 +2628,23 @@ class PocketService : Service() {
                                 serverAudioChunksReceived++
                                 if (!isAudioMuted) {
                                     val pcmBytes = Base64.decode(base64Pcm, Base64.DEFAULT)
-                                    audioPlaybackQueue.offer(pcmBytes)
-                                    queuedPlaybackBytes.addAndGet(pcmBytes.size.toLong())
+                                    if (pcmBytes.isNotEmpty()) {
+                                        val peak = pcm16Peak(pcmBytes)
+                                        audioPlaybackLastPcmPeak = peak
+                                        if (peak == 0) audioPlaybackSilentChunks.incrementAndGet()
+                                        audioPlaybackQueue.offer(pcmBytes)
+                                        queuedPlaybackBytes.addAndGet(pcmBytes.size.toLong())
+                                        audioPlaybackChunksEnqueued.incrementAndGet()
+                                        audioPlaybackBytesEnqueued.addAndGet(pcmBytes.size.toLong())
+                                        val count = audioPlaybackChunksEnqueued.get()
+                                        if (count == 1L || count % 50L == 0L) {
+                                            logEvent(
+                                                "SERVER_AUDIO_ENQUEUED",
+                                                "chunks=$count bytes=${audioPlaybackBytesEnqueued.get()} " +
+                                                    "chunkBytes=${pcmBytes.size} pcmPeak=$peak silentChunks=${audioPlaybackSilentChunks.get()}"
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -3920,7 +4144,12 @@ class PocketService : Service() {
         val totalResp = serverAudioChunksReceived + serverTextChunksReceived
         logEvent(
             "SERVICE_STOP",
-            "(uptime=${uptimeSec}s, total_chunks=$chunksSent, total_resp=$totalResp)"
+            "(uptime=${uptimeSec}s, total_chunks=$chunksSent, total_resp=$totalResp, " +
+                "server_audio=$serverAudioChunksReceived, server_text=$serverTextChunksReceived, " +
+                "playback_enqueued=${audioPlaybackChunksEnqueued.get()}, playback_written=${audioPlaybackChunksWritten.get()}, " +
+                "playback_bytes=${audioPlaybackBytesWritten.get()}, write_errors=${audioPlaybackWriteErrors.get()}, " +
+                "silent_pcm=${audioPlaybackSilentChunks.get()}, last_pcm_peak=$audioPlaybackLastPcmPeak, " +
+                "speaker_fallback=$forceSpeakerOutput)"
         )
 
         mainHandler.removeCallbacks(ttsWatchdogRunnable)

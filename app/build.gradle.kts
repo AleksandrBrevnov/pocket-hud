@@ -11,8 +11,8 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 75
-        versionName = "1.0.71-soundcore-hfp-routing-fix"
+        versionCode = 76
+        versionName = "1.0.72-audio-playback-fix"
     }
 
     signingConfigs {
