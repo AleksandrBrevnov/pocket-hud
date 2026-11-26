@@ -11,8 +11,8 @@ android {
         applicationId = "com.aleksandr.pockethud"
         minSdk = 26
         targetSdk = 34
-        versionCode = 73
-        versionName = "1.0.69-d3200-capture-audit"
+        versionCode = 74
+        versionName = "1.0.70-soundcore-hfp-routing"
     }
 
     signingConfigs {
