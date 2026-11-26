@@ -892,9 +892,9 @@ class PocketService : Service() {
                 stopAndroidCapture()
                 audioSendQueue.clear()
                 if (newSource == MicSource.SOUNDCORE_D3200) stopLiveArchive()
-                val usage = if (newSource == MicSource.BLUETOOTH) AudioAttributes.USAGE_VOICE_COMMUNICATION
-                    else AudioAttributes.USAGE_MEDIA
-                if (audioTrack?.audioAttributes?.usage != usage) {
+                val usage = liveOutputUsage()
+                if (audioTrack?.audioAttributes?.usage != usage ||
+                    previous == MicSource.BLUETOOTH || newSource == MicSource.BLUETOOTH) {
                     stopLiveOutput()
                     initAudioOutput()
                 }
@@ -1427,37 +1427,88 @@ class PocketService : Service() {
         scheduleNotificationUpdate(currentSentence, recentTranslations.toString().trim())
     }
 
+    // Experimental split route for Gemini Live: Bluetooth mic + independent media sink.
+    @Volatile private var splitBluetoothMedia = false
+    @Volatile private var expectedBluetoothInputId: Int? = null
+    @Volatile private var expectedBluetoothOutputId: Int? = null
+
+    private fun isBluetoothInput(device: AudioDeviceInfo): Boolean =
+        device.isSource && (device.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+            device.type == AudioDeviceInfo.TYPE_BLE_HEADSET)
+
+    private fun isSoundcoreWork(device: AudioDeviceInfo): Boolean =
+        device.productName.toString().contains("soundcore", ignoreCase = true) &&
+            device.productName.toString().contains("work", ignoreCase = true)
+
+    private fun mediaBluetoothOutput(manager: AudioManager): AudioDeviceInfo? {
+        val devices = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter {
+            it.isSink && !isSoundcoreWork(it) &&
+                (it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+                    it.type == AudioDeviceInfo.TYPE_HEARING_AID)
+        }
+        return devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
+            ?: devices.firstOrNull()
+    }
+
+    private fun describeAudioDevice(device: AudioDeviceInfo?): String =
+        device?.let { "${it.productName}(type=${it.type},id=${it.id})" } ?: "NONE"
+
+    private fun liveOutputUsage(): Int =
+        if (selectedMicSource == MicSource.BLUETOOTH && !splitBluetoothMedia)
+            AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_MEDIA
+
     private fun setupAudioRouting() {
         try {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
 
+            splitBluetoothMedia = false
+            expectedBluetoothInputId = null
+            expectedBluetoothOutputId = null
             if (selectedMicSource == MicSource.BLUETOOTH) {
-                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager.isSpeakerphoneOn = false
-
+                val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+                val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                val soundcoreInput = inputs.firstOrNull { isBluetoothInput(it) && isSoundcoreWork(it) }
+                val mediaOutput = mediaBluetoothOutput(audioManager)
+                splitBluetoothMedia = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    selectedEngine == TranslationEngine.LIVE_WEBSOCKET && mediaOutput != null
+                expectedBluetoothInputId = soundcoreInput?.id
+                expectedBluetoothOutputId = if (splitBluetoothMedia) mediaOutput?.id else null
+                logEvent("BT_ROUTE_INVENTORY", "inputs=${inputs.joinToString { describeAudioDevice(it) }}; outputs=${outputs.joinToString { describeAudioDevice(it) }}")
                 var selectedDeviceName = "DEFAULT_COMMUNICATION"
-
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     val devices = audioManager.availableCommunicationDevices
-                    val btDevice = devices.firstOrNull {
+                    val bluetoothSinks = devices.filter {
                         it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
                         it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
                         it.type == AudioDeviceInfo.TYPE_HEARING_AID
                     }
+                    val soundcoreSink = bluetoothSinks.firstOrNull { isSoundcoreWork(it) }
+                    val btDevice = soundcoreSink ?: if (soundcoreInput == null) bluetoothSinks.firstOrNull() else null
+                    logEvent("BT_COMMUNICATION_DEVICES", devices.joinToString { describeAudioDevice(it) })
+                    audioManager.clearCommunicationDevice()
                     if (btDevice != null) {
-                        audioManager.setCommunicationDevice(btDevice)
-                        selectedDeviceName = "${btDevice.productName} (${btDevice.type})"
-                        Log.d(tag, "Установлено устройство связи: $selectedDeviceName")
+                        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                        val accepted = audioManager.setCommunicationDevice(btDevice)
+                        selectedDeviceName = describeAudioDevice(btDevice)
+                        logEvent("BT_COMMUNICATION_REQUEST", "device=$selectedDeviceName accepted=$accepted")
+                    } else if (splitBluetoothMedia) {
+                        // Input-only device may not appear in the sink-only communication API.
+                        audioManager.mode = AudioManager.MODE_NORMAL
+                        selectedDeviceName = "DIRECT_INPUT_PREFERENCE"
+                    } else {
+                        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
                     }
                 } else {
+                    audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                    audioManager.isSpeakerphoneOn = false
                     @Suppress("DEPRECATION")
                     audioManager.startBluetoothSco()
                     @Suppress("DEPRECATION")
                     audioManager.isBluetoothScoOn = true
                     selectedDeviceName = "Bluetooth SCO (Legacy)"
                 }
-
-                logEvent("AUDIO_ROUTING_SETUP", "BLUETOOTH: $selectedDeviceName")
+                logEvent("AUDIO_ROUTING_SETUP", "BLUETOOTH: $selectedDeviceName splitMedia=$splitBluetoothMedia mode=${audioManager.mode} media=${describeAudioDevice(mediaOutput)}")
             } else {
                 // Режим SMARTPHONE: встроенный микрофон телефона с широкой диаграммой для комнаты/зала
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -1769,11 +1820,7 @@ class PocketService : Service() {
         )
         val bufferSize = if (minBufferSize <= 0) 4096 * 2 else minBufferSize * 2
 
-        val audioUsage = if (selectedMicSource == MicSource.BLUETOOTH) {
-            AudioAttributes.USAGE_VOICE_COMMUNICATION
-        } else {
-            AudioAttributes.USAGE_MEDIA
-        }
+        val audioUsage = liveOutputUsage()
 
         try {
             audioTrack = AudioTrack.Builder()
@@ -1794,18 +1841,16 @@ class PocketService : Service() {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
-            if (selectedMicSource != MicSource.BLUETOOTH) {
+            if (selectedMicSource != MicSource.BLUETOOTH || splitBluetoothMedia) {
                 try {
                     val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-                    val outDevices = audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                    val a2dp = outDevices?.firstOrNull {
-                        it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
-                        it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
-                        it.type == AudioDeviceInfo.TYPE_HEARING_AID
-                    }
+                    val a2dp = audioManager?.let { mediaBluetoothOutput(it) }
+                    if (splitBluetoothMedia) expectedBluetoothOutputId = a2dp?.id
                     if (a2dp != null) {
                         val bound = audioTrack?.setPreferredDevice(a2dp)
-                        logEvent("A2DP_PREFERRED_OUTPUT_SET", "device=${a2dp.productName} (${a2dp.type}), bound=$bound")
+                        logEvent("A2DP_PREFERRED_OUTPUT_SET", "device=${describeAudioDevice(a2dp)}, bound=$bound")
+                    } else if (splitBluetoothMedia) {
+                        logEvent("BT_MEDIA_OUTPUT_MISSING")
                     }
                 } catch (e: Exception) {
                     Log.w(tag, "Ошибка назначения A2DP устройства: ${e.message}")
@@ -1824,6 +1869,7 @@ class PocketService : Service() {
 
         playbackThread = Thread {
             isPlaybackSpeedBoosted = false
+            var lastOutputRoute: String? = null
             while (isRunning && !Thread.currentThread().isInterrupted) {
                 try {
                     val chunk = audioPlaybackQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
@@ -1857,7 +1903,21 @@ class PocketService : Service() {
                             }
                         }
 
-                        audioTrack?.write(chunk, 0, chunk.size)
+                        val track = audioTrack ?: continue
+                        val route = track.routedDevice
+                        val routeDescription = describeAudioDevice(route)
+                        if (routeDescription != lastOutputRoute) {
+                            lastOutputRoute = routeDescription
+                            logEvent("BT_OUTPUT_ACTUAL", "device=$routeDescription usage=${track.audioAttributes.usage}")
+                        }
+                        if (splitBluetoothMedia && (expectedBluetoothOutputId == null ||
+                                route?.id != expectedBluetoothOutputId)) {
+                            // Prime the stream silently while Android resolves routing.
+                            val silence = ByteArray(chunk.size)
+                            track.write(silence, 0, silence.size)
+                        } else {
+                            track.write(chunk, 0, chunk.size)
+                        }
                     }
                 } catch (e: InterruptedException) {
                     break
@@ -2493,7 +2553,18 @@ class PocketService : Service() {
                                 it.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
                                 it.type == AudioDeviceInfo.TYPE_USB_HEADSET
                             }
-                            if (usbMic != null) {
+                            if (selectedMicSource == MicSource.BLUETOOTH) {
+                                val bluetoothInputs = inputDevices?.filter { isBluetoothInput(it) }.orEmpty()
+                                val btMic = bluetoothInputs.firstOrNull { isSoundcoreWork(it) }
+                                    ?: bluetoothInputs.firstOrNull()
+                                expectedBluetoothInputId = btMic?.id
+                                if (btMic != null) {
+                                    val ok = record.setPreferredDevice(btMic)
+                                    logEvent("BT_INPUT_PREFERRED", "device=${describeAudioDevice(btMic)} accepted=$ok")
+                                } else {
+                                    logEvent("BT_INPUT_NOT_ENUMERATED", "source=$name")
+                                }
+                            } else if (usbMic != null) {
                                 val ok = record.setPreferredDevice(usbMic)
                                 Log.d(tag, "AudioRecord.setPreferredDevice(USB_MIC): $ok (${usbMic.productName})")
                                 logEvent("USB_MIC_DEVICE_SET", "device=${usbMic.productName}, ok=$ok")
@@ -2554,6 +2625,7 @@ class PocketService : Service() {
         recordThread = Thread {
             // Чанк 100 мс при 16 кГц Mono 16-бит = 1600 сэмплов (Shorts) = 3200 байт
             val shortBuffer = ShortArray(1600)
+            var lastInputRoute: String? = null
 
             while (isRunning && audioRecord === capture && !Thread.currentThread().isInterrupted) {
                 try {
@@ -2562,6 +2634,19 @@ class PocketService : Service() {
                     lastAudioReadResult = read
 
                     if (read > 0) {
+                        if (mic == MicSource.BLUETOOTH) {
+                            val route = capture.routedDevice
+                            val routeDescription = describeAudioDevice(route)
+                            if (routeDescription != lastInputRoute) {
+                                lastInputRoute = routeDescription
+                                logEvent("BT_INPUT_ACTUAL", "device=$routeDescription")
+                            }
+                            if (splitBluetoothMedia && (route == null || !isBluetoothInput(route) ||
+                                    (expectedBluetoothInputId != null && route.id != expectedBluetoothInputId))) {
+                                micPeakAmplitude = 0
+                                continue
+                            }
+                        }
                         var maxVal = 0
                         for (i in 0 until read) {
                             val absVal = kotlin.math.abs(shortBuffer[i].toInt())
