@@ -2,7 +2,7 @@ name: Build PocketHUD APK
 
 on:
   push:
-    branches: [ "main", "master", "asr-test/**", "feature/soundcore-d3200-ble-input" ]
+    branches: [ "main", "master", "asr-test/**", "feature/soundcore-d3200-ble-input", "feature/soundcore-hfp-audio-routing" ]
     tags: [ "v*" ]
   workflow_dispatch:
 
