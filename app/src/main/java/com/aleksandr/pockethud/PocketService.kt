@@ -1466,6 +1466,13 @@ class PocketService : Service() {
             expectedBluetoothInputId = null
             expectedBluetoothOutputId = null
             if (selectedMicSource == MicSource.BLUETOOTH) {
+                // HFP devices may not be exposed by AudioManager until communication
+                // mode is active. Enter the mode before enumerating devices.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                    audioManager.clearCommunicationDevice()
+                    logEvent("BT_COMMUNICATION_PREPARE", "mode=${audioManager.mode}")
+                }
                 val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
                 val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
                 val soundcoreInput = inputs.firstOrNull { isBluetoothInput(it) && isSoundcoreWork(it) }
@@ -1497,9 +1504,7 @@ class PocketService : Service() {
                     expectedBluetoothOutputId = if (splitBluetoothMedia) mediaOutput?.id else null
                     val btDevice = soundcoreSink ?: if (soundcoreInput == null) bluetoothSinks.firstOrNull() else null
                     logEvent("BT_COMMUNICATION_DEVICES", devices.joinToString { describeAudioDevice(it) })
-                    audioManager.clearCommunicationDevice()
                     if (btDevice != null) {
-                        audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
                         val accepted = audioManager.setCommunicationDevice(btDevice)
                         selectedDeviceName = describeAudioDevice(btDevice)
                         logEvent("BT_COMMUNICATION_REQUEST", "device=$selectedDeviceName accepted=$accepted")
