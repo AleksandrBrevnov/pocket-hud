@@ -1470,10 +1470,7 @@ class PocketService : Service() {
                 val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
                 val soundcoreInput = inputs.firstOrNull { isBluetoothInput(it) && isSoundcoreWork(it) }
                 val mediaOutput = mediaBluetoothOutput(audioManager)
-                splitBluetoothMedia = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                    selectedEngine == TranslationEngine.LIVE_WEBSOCKET && mediaOutput != null
                 expectedBluetoothInputId = soundcoreInput?.id
-                expectedBluetoothOutputId = if (splitBluetoothMedia) mediaOutput?.id else null
                 logEvent("BT_ROUTE_INVENTORY", "inputs=${inputs.joinToString { describeAudioDevice(it) }}; outputs=${outputs.joinToString { describeAudioDevice(it) }}")
                 var selectedDeviceName = "DEFAULT_COMMUNICATION"
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -1484,6 +1481,20 @@ class PocketService : Service() {
                         it.type == AudioDeviceInfo.TYPE_HEARING_AID
                     }
                     val soundcoreSink = bluetoothSinks.firstOrNull { isSoundcoreWork(it) }
+                    val mediaName = mediaOutput?.productName?.toString()
+                    val distinctInput = inputs.any {
+                        isBluetoothInput(it) && !it.productName.toString().equals(mediaName, ignoreCase = true)
+                    }
+                    val distinctSink = bluetoothSinks.any {
+                        !it.productName.toString().equals(mediaName, ignoreCase = true)
+                    }
+                    // Preserve ordinary single-headset behavior when the input and
+                    // media sink belong to the same device. Test split routing for
+                    // a distinct mic or an input-only device with no call sink.
+                    splitBluetoothMedia = selectedEngine == TranslationEngine.LIVE_WEBSOCKET &&
+                        mediaOutput != null && (soundcoreInput != null || soundcoreSink != null ||
+                            distinctInput || distinctSink || bluetoothSinks.isEmpty())
+                    expectedBluetoothOutputId = if (splitBluetoothMedia) mediaOutput?.id else null
                     val btDevice = soundcoreSink ?: if (soundcoreInput == null) bluetoothSinks.firstOrNull() else null
                     logEvent("BT_COMMUNICATION_DEVICES", devices.joinToString { describeAudioDevice(it) })
                     audioManager.clearCommunicationDevice()
@@ -1845,7 +1856,7 @@ class PocketService : Service() {
                 try {
                     val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
                     val a2dp = audioManager?.let { mediaBluetoothOutput(it) }
-                    if (splitBluetoothMedia) expectedBluetoothOutputId = a2dp?.id
+                    if (splitBluetoothMedia && a2dp != null) expectedBluetoothOutputId = a2dp.id
                     if (a2dp != null) {
                         val bound = audioTrack?.setPreferredDevice(a2dp)
                         logEvent("A2DP_PREFERRED_OUTPUT_SET", "device=${describeAudioDevice(a2dp)}, bound=$bound")
@@ -2751,6 +2762,19 @@ class PocketService : Service() {
             return false
         }
 
+        if (selectedMicSource == MicSource.BLUETOOTH) {
+            mainHandler.postDelayed({
+                if (isRunning && audioRecord === record && selectedMicSource == MicSource.BLUETOOTH) {
+                    val manager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                    val communication = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+                        manager?.communicationDevice else null
+                    logEvent("BT_ROUTE_SNAPSHOT", "input=${describeAudioDevice(record.routedDevice)}; output=${describeAudioDevice(audioTrack?.routedDevice)}; communication=${describeAudioDevice(communication)}; mode=${manager?.mode}; splitMedia=$splitBluetoothMedia")
+                    if (splitBluetoothMedia && record.routedDevice?.let { isBluetoothInput(it) } != true) {
+                        notifyStatusChanged("Bluetooth: фактический вход не подтверждён. Проверь лог BT_ROUTE_SNAPSHOT")
+                    }
+                }
+            }, 2000L)
+        }
         // Поток 1: Неблокирующий захват PCM звука с микрофона в audioSendQueue
         startRecordThread()
         return true
